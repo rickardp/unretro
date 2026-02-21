@@ -1,0 +1,22 @@
+[package]
+name = "unretro-python"
+description = "Python bindings for unretro container library"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+# Distributed as a Python wheel via maturin; never published to crates.io.
+publish = false
+
+[lib]
+name = "_unretro"
+crate-type = ["cdylib"]
+
+[lints]
+workspace = true
+
+[dependencies]
+unretro = { path = "../..", features = ["full"] }
+pyo3.workspace = true
+crossbeam-channel.workspace = true
+log.workspace = true

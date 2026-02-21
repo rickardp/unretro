@@ -1,0 +1,141 @@
+[workspace]
+resolver = "2"
+members = [".", "crates/unretro-python"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/rickardp/unretro"
+
+[workspace.lints.rust]
+unsafe_code = "warn"
+missing_docs = "warn"
+
+[workspace.lints.clippy]
+all = { level = "warn", priority = -1 }
+pedantic = { level = "allow", priority = -1 }
+nursery = { level = "allow", priority = -1 }
+too_many_lines = "allow"
+too_many_arguments = "allow"
+
+[workspace.dependencies]
+pyo3 = { version = "0.23", features = ["extension-module", "abi3-py39"] }
+crossbeam-channel = "0.5"
+log = "0.4"
+
+[package]
+name = "unretro"
+description = "Forward-only access to retro container formats for emulators and retro gaming"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+readme = "README.md"
+keywords = ["retro", "emulator", "archive", "hfs", "stuffit"]
+categories = ["parser-implementations", "compression", "game-development"]
+# Keep the published tarball lean: no CI configs, agent docs, dev scripts, or binary fixtures.
+exclude = [
+    ".github/**",
+    "AGENTS.md",
+    "scripts/**",
+    "testdata/**",
+]
+
+[package.metadata.docs.rs]
+features = ["full"]
+rustdoc-args = ["--cfg", "docsrs"]
+
+[lints]
+workspace = true
+
+[[bin]]
+name = "unretro"
+path = "src/bin/unretro.rs"
+required-features = ["std", "full"]
+
+[[example]]
+name = "list_contents"
+path = "examples/list_contents.rs"
+required-features = ["std"]
+
+[features]
+default = ["std", "full"]
+std = [
+    "dep:memmap2",
+    "dep:xattr",
+    "dep:libc",
+    "__backend_common",
+    "__backend_xz",
+    "__backend_mac_stuffit",
+    "__backend_mac_binhex",
+    "__backend_dos_rar",
+]
+no_std = []
+
+# Public format toggles. These remain stable API.
+# Backend implementation capabilities are wired internally.
+common = []
+xz = []
+macintosh = []
+stuffit = []
+amiga = ["dep:delharc"]
+game = []
+dos = []
+
+# Internal backend capability toggles (not part of public API contract).
+__backend_common = ["dep:flate2", "dep:zip", "zip/deflate", "dep:tar"]
+__backend_xz = ["__backend_common", "dep:xz2", "zip/xz", "zip/lzma"]
+__backend_mac_stuffit = ["dep:stuffit"]
+__backend_mac_binhex = ["dep:binhex4"]
+__backend_dos_rar = []
+
+# All features (native only - includes xz)
+full = ["common", "xz", "macintosh", "amiga", "game", "dos"]
+all = ["full"]
+
+# WASM-compatible full feature set (excludes xz which has C deps)
+wasm = ["common", "amiga", "macintosh", "dos"]
+
+[dependencies]
+# Error handling
+thiserror = "2.0"
+
+# Memory mapping
+memmap2 = { version = "0.9", optional = true }
+
+# Compression / Archives (optional)
+flate2 = { version = "1.0", optional = true }
+delharc = { version = "0.6", optional = true, default-features = false, features = ["lh1", "lz"] }
+zip = { version = "2.2", default-features = false, optional = true }
+tar = { version = "0.4", optional = true }
+xz2 = { version = "0.1", optional = true }
+
+# Retrogaming support (optional)
+stuffit = { version = "0.1", optional = true }
+
+# BinHex 4.0 (WASM-safe - only depends on lazy_static and nom)
+binhex4 = { version = "0.1", optional = true }
+
+# Platform-specific
+[target.'cfg(unix)'.dependencies]
+xattr = { version = "1", optional = true }
+libc = { version = "0.2", optional = true }
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = true
+
+[profile.dev]
+opt-level = 1
+
+[dev-dependencies]
+criterion = { version = "0.5", features = ["html_reports"] }
+
+[[bench]]
+name = "traversal"
+harness = false
+required-features = ["std", "full"]

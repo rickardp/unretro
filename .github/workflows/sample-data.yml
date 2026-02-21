@@ -1,0 +1,52 @@
+name: Sample Data Tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  sample-data:
+    name: Sample data tests
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: "1.85"
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Pull test data image
+        run: docker pull ghcr.io/rickardp/unretro-test-data:latest
+
+      - name: Extract test data from Docker image
+        run: |
+          mkdir -p /tmp/unretro-test-image /tmp/unretro-test-data
+          docker save ghcr.io/rickardp/unretro-test-data:latest | tar -xf - -C /tmp/unretro-test-image
+          LAYER=$(python3 -c "import json; m=json.load(open('/tmp/unretro-test-image/manifest.json')); print(m[0]['Layers'][0])")
+          tar -xf "/tmp/unretro-test-image/$LAYER" -C /tmp/unretro-test-data
+          echo "Extracted test data:"
+          find /tmp/unretro-test-data/data -type f | sort
+
+      - name: Run sample data tests
+        env:
+          UNRETRO_SAMPLES: /tmp/unretro-test-data/data
+        run: cargo test --test sample_data -- --nocapture
+
+      - name: Cleanup
+        if: always()
+        run: rm -rf /tmp/unretro-test-image /tmp/unretro-test-data

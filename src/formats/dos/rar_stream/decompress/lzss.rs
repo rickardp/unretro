@@ -1,0 +1,319 @@
+//! LZSS sliding window decoder.
+//!
+//! Implements the dictionary-based decompression used in RAR.
+
+use super::{DecompressError, Result};
+
+/// Window size for RAR29 (2MB).
+pub const WINDOW_SIZE_29: usize = 0x200000;
+
+/// Window size for RAR50 (up to 4GB, but we use 64MB max for memory).
+pub const WINDOW_SIZE_50: usize = 0x4000000;
+
+/// LZSS sliding window decoder.
+pub struct LzssDecoder {
+    /// Sliding window buffer
+    window: Vec<u8>,
+    /// Window size mask for wrap-around
+    mask: usize,
+    /// Current write position in window
+    pos: usize,
+    /// Total bytes written to window
+    total_written: u64,
+    /// How much has been flushed to output
+    flushed_pos: u64,
+    /// Output buffer for final result
+    output: Vec<u8>,
+}
+
+impl LzssDecoder {
+    /// Create a new LZSS decoder with the specified window size.
+    pub fn new(window_size: usize) -> Self {
+        debug_assert!(window_size.is_power_of_two());
+        Self {
+            window: vec![0; window_size],
+            mask: window_size - 1,
+            pos: 0,
+            total_written: 0,
+            flushed_pos: 0,
+            output: Vec::new(),
+        }
+    }
+
+    /// Create decoder for RAR 2.9 format.
+    pub fn rar29() -> Self {
+        Self::new(WINDOW_SIZE_29)
+    }
+
+    /// Create decoder for RAR 5.0 format.
+    pub fn rar50() -> Self {
+        Self::new(WINDOW_SIZE_50)
+    }
+
+    /// Reset the decoder for reuse, avoiding reallocation.
+    /// Note: Window contents are NOT cleared - we only read after writing.
+    #[inline]
+    pub fn reset(&mut self) {
+        self.pos = 0;
+        self.total_written = 0;
+        self.output.clear();
+        // No need to clear window - we validate reads against total_written
+    }
+
+    /// Enable output accumulation for extracting files larger than window.
+    #[inline]
+    pub fn enable_output(&mut self, capacity: usize) {
+        self.output = Vec::with_capacity(capacity);
+    }
+
+    /// Write a literal byte to the window.
+    #[inline(always)]
+    pub fn write_literal(&mut self, byte: u8) {
+        // SAFETY: pos is always < window.len() due to mask
+        unsafe {
+            *self.window.get_unchecked_mut(self.pos) = byte;
+        }
+        self.pos = (self.pos + 1) & self.mask;
+        self.total_written += 1;
+    }
+
+    /// Flush data from window to output, up to the given absolute position.
+    /// This is called after filters have been applied.
+    pub fn flush_to_output(&mut self, up_to: u64) {
+        let current_output_len = self.output.len() as u64;
+        if up_to <= current_output_len {
+            return; // Already flushed
+        }
+
+        let flush_start = current_output_len as usize;
+        let flush_end = up_to as usize;
+        let flush_len = flush_end - flush_start;
+        let window_start = flush_start & self.mask;
+
+        // Reserve space upfront
+        self.output.reserve(flush_len);
+
+        // Check if we can do a contiguous copy (no wrap)
+        if window_start + flush_len <= self.window.len() {
+            // Fast path: contiguous copy
+            self.output
+                .extend_from_slice(&self.window[window_start..window_start + flush_len]);
+        } else {
+            // Slow path: wrapping copy in two parts
+            let first_part = self.window.len() - window_start;
+            self.output.extend_from_slice(&self.window[window_start..]);
+            self.output
+                .extend_from_slice(&self.window[..flush_len - first_part]);
+        }
+
+        self.flushed_pos = up_to;
+    }
+
+    /// Get mutable access to the window for filter execution.
+    pub fn window_mut(&mut self) -> &mut [u8] {
+        &mut self.window
+    }
+
+    /// Get the window mask (for filter positioning).
+    pub fn window_mask(&self) -> u32 {
+        self.mask as u32
+    }
+
+    /// Get how much has been flushed to output.
+    pub fn flushed_pos(&self) -> u64 {
+        self.flushed_pos
+    }
+
+    /// Write filtered data directly to output, bypassing the window.
+    /// This is used for VM filter output which should NOT modify the window.
+    pub fn write_filtered_to_output(&mut self, data: &[u8], position: u64) {
+        // Ensure we're at the right position - if not, we might have missed a flush
+        let current_len = self.output.len() as u64;
+        if current_len < position {
+            // Flush unfiltered data from window up to this position
+            let window_start = current_len as usize;
+            let flush_len = (position - current_len) as usize;
+            self.output.reserve(flush_len);
+            let ws = window_start & self.mask;
+            if ws + flush_len <= self.window.len() {
+                self.output
+                    .extend_from_slice(&self.window[ws..ws + flush_len]);
+            } else {
+                let first = self.window.len() - ws;
+                self.output.extend_from_slice(&self.window[ws..]);
+                self.output
+                    .extend_from_slice(&self.window[..flush_len - first]);
+            }
+        }
+        self.output.extend_from_slice(data);
+        self.flushed_pos = position + data.len() as u64;
+    }
+
+    /// Get read-only access to the window for filter execution.
+    pub fn window(&self) -> &[u8] {
+        &self.window
+    }
+
+    /// Copy bytes from a previous position in the window.
+    /// Optimized for both overlapping and non-overlapping copies.
+    #[inline(always)]
+    pub fn copy_match(&mut self, distance: u32, length: u32) -> Result<()> {
+        // Validate distance against bytes actually written, not window size
+        if distance == 0 || distance as u64 > self.total_written {
+            return self.copy_match_error(distance);
+        }
+
+        let len = length as usize;
+        let dist = distance as usize;
+
+        // Fast path: copy doesn't wrap around window boundary and doesn't overlap
+        if dist >= len && self.pos + len <= self.window.len() && self.pos >= dist {
+            // Non-overlapping, non-wrapping: use copy_within for speed
+            let src_start = self.pos - dist;
+            self.window
+                .copy_within(src_start..src_start + len, self.pos);
+            self.pos += len;
+            self.total_written += length as u64;
+            return Ok(());
+        }
+
+        // Medium path: overlapping but no wrapping - use copy_within in chunks
+        // Only worthwhile if we can copy at least 8 bytes at a time
+        if self.pos + len <= self.window.len() && self.pos >= dist && dist >= 8 {
+            let src_start = self.pos - dist;
+            let mut copied = 0;
+            while copied < len {
+                let chunk = (len - copied).min(dist);
+                self.window
+                    .copy_within(src_start..src_start + chunk, self.pos + copied);
+                copied += chunk;
+            }
+            self.pos += len;
+            self.total_written += length as u64;
+            return Ok(());
+        }
+
+        // Slow path: handle wrapping or very short distance copies
+        // Chunk into non-wrapping segments where possible
+        let src_pos = (self.pos.wrapping_sub(dist)) & self.mask;
+        let window_len = self.window.len();
+
+        let mut remaining = len;
+        let mut si = src_pos;
+        let mut di = self.pos;
+
+        while remaining > 0 {
+            // How many bytes until src or dest wraps?
+            let src_avail = window_len - si;
+            let dst_avail = window_len - di;
+            let chunk = remaining.min(src_avail).min(dst_avail);
+
+            // For overlapping copies with very short distance, fall back to byte-by-byte
+            if si < di && di < si + chunk || di < si && si < di + chunk {
+                // Overlapping within this chunk — byte-by-byte
+                let window_ptr = self.window.as_mut_ptr();
+                for _ in 0..chunk {
+                    // SAFETY: si and di are always < window.len() due to mask
+                    unsafe {
+                        *window_ptr.add(di) = *window_ptr.add(si);
+                    }
+                    si = (si + 1) & self.mask;
+                    di = (di + 1) & self.mask;
+                }
+            } else {
+                self.window.copy_within(si..si + chunk, di);
+                si = (si + chunk) & self.mask;
+                di = (di + chunk) & self.mask;
+            }
+            remaining -= chunk;
+        }
+        self.pos = (self.pos + len) & self.mask;
+
+        self.total_written += length as u64;
+        Ok(())
+    }
+
+    /// Cold path for error handling - keeps hot path small
+    #[cold]
+    #[inline(never)]
+    fn copy_match_error(&self, distance: u32) -> Result<()> {
+        Err(DecompressError::InvalidBackReference {
+            offset: distance,
+            position: self.pos as u32,
+        })
+    }
+
+    /// Get the current window position.
+    pub fn position(&self) -> usize {
+        self.pos
+    }
+
+    /// Get total bytes written.
+    pub fn total_written(&self) -> u64 {
+        self.total_written
+    }
+
+    /// Get a byte at the specified offset from current position (going back).
+    /// Call this after decompression to get the output.
+    pub fn get_output(&self, start: u64, len: usize) -> Vec<u8> {
+        // If we have accumulated output, use it
+        if !self.output.is_empty() {
+            let start = start as usize;
+            let end = (start + len).min(self.output.len());
+            return self.output[start..end].to_vec();
+        }
+
+        let window_len = self.window.len();
+
+        // Calculate start position in window
+        let start_pos = if self.total_written <= window_len as u64 {
+            start as usize
+        } else {
+            // Window has wrapped
+            let offset = (self.total_written - start) as usize;
+            if offset > window_len {
+                return Vec::new(); // Data no longer in window
+            }
+            (self.pos.wrapping_sub(offset)) & self.mask
+        };
+
+        self.copy_from_window(start_pos, len)
+    }
+
+    /// Take ownership of the accumulated output buffer.
+    /// More efficient than get_output() when you need all output.
+    pub fn take_output(&mut self) -> Vec<u8> {
+        std::mem::take(&mut self.output)
+    }
+
+    /// Get read access to the accumulated output buffer.
+    pub fn output(&self) -> &[u8] {
+        &self.output
+    }
+
+    /// Get mutable access to the output buffer for filter execution.
+    pub fn output_mut(&mut self) -> &mut [u8] {
+        &mut self.output
+    }
+
+    /// Get the most recent `len` bytes from the window.
+    pub fn get_recent(&self, len: usize) -> Vec<u8> {
+        let actual_len = len.min(self.total_written as usize);
+        let start = (self.pos.wrapping_sub(actual_len)) & self.mask;
+        self.copy_from_window(start, actual_len)
+    }
+
+    /// Bulk copy from window handling wrap-around with extend_from_slice.
+    fn copy_from_window(&self, start: usize, len: usize) -> Vec<u8> {
+        let mut out = Vec::with_capacity(len);
+        let ws = start & self.mask;
+        if ws + len <= self.window.len() {
+            out.extend_from_slice(&self.window[ws..ws + len]);
+        } else {
+            let first = self.window.len() - ws;
+            out.extend_from_slice(&self.window[ws..]);
+            out.extend_from_slice(&self.window[..len - first]);
+        }
+        out
+    }
+}
