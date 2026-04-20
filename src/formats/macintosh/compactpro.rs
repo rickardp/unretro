@@ -716,7 +716,13 @@ fn read_huffman_tree(reader: &mut BitReader, size: usize) -> Vec<HuffNode> {
 
 fn get_huffman_byte(reader: &mut BitReader, tree: &[HuffNode]) -> u16 {
     let mut node = &tree[0];
-    while !node.is_leaf {
+    // Cap traversal at tree.len(): a well-formed Huffman tree reaches a leaf in
+    // at most that many steps. A corrupt tree (or one consumed past EOF, where
+    // BitReader::get_bit just keeps returning 0) can otherwise cycle forever.
+    for _ in 0..tree.len() {
+        if node.is_leaf {
+            return node.value;
+        }
         let bit = reader.get_bit();
         let next_idx = if bit != 0 { node.one } else { node.zero };
         if next_idx >= tree.len() {
@@ -724,7 +730,9 @@ fn get_huffman_byte(reader: &mut BitReader, tree: &[HuffNode]) -> u16 {
         }
         node = &tree[next_idx];
     }
-    node.value
+    // Bail out on cycle-or-EOF: returning 0 lets the outer
+    // `decompress_rle_lzh` loop hit its no-progress check and break.
+    0
 }
 
 fn decompress_rle_lzh(input: &[u8], output_len: usize) -> Result<Vec<u8>> {
