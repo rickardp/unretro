@@ -1071,6 +1071,14 @@ fn parse_mish_data(data: &[u8]) -> Result<Vec<MishBlock>> {
         data[24], data[25], data[26], data[27], data[28], data[29], data[30], data[31],
     ]);
 
+    // Cap block_count to what the remaining buffer could actually contain. Each
+    // entry is 40 bytes after the 204-byte header. Some DMG files (seen in real
+    // fixtures: music-udco.dmg / music-udro.dmg) carry `block_count = u32::MAX
+    // - 1`, which would have us pre-allocate ~160 GiB for the Vec — lazy-commit
+    // on macOS, hard abort under Linux allocators.
+    let max_plausible = data.len().saturating_sub(204) / 40;
+    let block_count = block_count.min(max_plausible);
+
     let mut blocks = Vec::with_capacity(block_count);
     let mut pos = 204;
 

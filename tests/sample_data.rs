@@ -100,28 +100,12 @@ fn test_sample_data_against_expect_files() {
         match output {
             Ok(result) => {
                 let stdout = String::from_utf8_lossy(&result.stdout);
-                let stderr = String::from_utf8_lossy(&result.stderr);
                 let actual = stdout.trim_end();
                 let expected = expected.trim_end();
 
                 if actual != expected {
                     let actual_lines: Vec<&str> = actual.lines().collect();
                     let expected_lines: Vec<&str> = expected.lines().collect();
-
-                    // Surface the binary's exit status and stderr whenever stdout is
-                    // empty — that's the only signal we have that the CLI itself
-                    // failed, as opposed to producing wrong-but-shaped output.
-                    if actual_lines.is_empty() {
-                        let exit = result.status.code();
-                        #[cfg(unix)]
-                        let signal = {
-                            use std::os::unix::process::ExitStatusExt;
-                            result.status.signal()
-                        };
-                        #[cfg(not(unix))]
-                        let signal: Option<i32> = None;
-                        eprintln!("[{rel}] exit={exit:?} signal={signal:?} stderr:\n{stderr}");
-                    }
 
                     let mut diff_msg = format!(
                         "{rel}: output mismatch ({} actual vs {} expected lines)",
