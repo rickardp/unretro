@@ -27,6 +27,10 @@ use crate::compat::FastMap;
 ///
 /// Maps lowercased path keys to entry indices, enabling O(1) sibling lookups
 /// in [`Container::get_file`](crate::Container::get_file).
+// Used by the `common`, `amiga`, `game`, and `dos` backends. With no backend
+// features enabled this function is unreachable; silence the lint rather than
+// duplicate four cfg gates.
+#[allow(dead_code)]
 pub(crate) fn build_path_index<S: AsRef<str>>(
     paths: impl Iterator<Item = (usize, S)>,
 ) -> FastMap<crate::compat::String, usize> {

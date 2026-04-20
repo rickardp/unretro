@@ -1123,6 +1123,9 @@ fn open_container_internal(
 ///
 /// This is used when recursing into nested containers, allowing formats like
 /// HFS/NDIF to access sibling files (e.g., resource forks) from the parent container.
+// `get_sibling` is used only when feature `macintosh` is enabled, so allow
+// `unused_variables` here instead of duplicating the fn body under cfg gates.
+#[allow(unused_variables)]
 fn open_container_internal_with_siblings<F>(
     data: &[u8],
     path: &str,

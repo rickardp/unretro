@@ -163,7 +163,7 @@ pub struct Entry<'a> {
     pub container_format: Option<ContainerFormat>,
 }
 
-impl<'a> fmt::Debug for Entry<'a> {
+impl fmt::Debug for Entry<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Entry")
             .field("path", &self.path)

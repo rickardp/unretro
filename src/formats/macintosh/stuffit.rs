@@ -739,27 +739,31 @@ mod parser {
 
             // Decode the code
             let first_byte: u8;
-            let decoded = if code < num_symbols {
-                let s = decode_lzw_string(&dict, code);
-                first_byte = s[0];
-                s
-            } else if code == num_symbols {
-                // Special case: code not yet in dictionary (KwKwK case)
-                if let Some(pc) = prev_code {
-                    let mut s = decode_lzw_string(&dict, pc);
+            let decoded = match code.cmp(&num_symbols) {
+                std::cmp::Ordering::Less => {
+                    let s = decode_lzw_string(&dict, code);
                     first_byte = s[0];
-                    s.push(first_byte);
                     s
-                } else {
-                    return Err(StuffItError::Decompression(
-                        "Invalid LZW stream: KwKwK without prev".into(),
-                    ));
                 }
-            } else {
-                return Err(StuffItError::Decompression(format!(
-                    "Invalid LZW code: {} >= {} (code_bits={})",
-                    code, num_symbols, code_bits
-                )));
+                std::cmp::Ordering::Equal => {
+                    // Special case: code not yet in dictionary (KwKwK case)
+                    if let Some(pc) = prev_code {
+                        let mut s = decode_lzw_string(&dict, pc);
+                        first_byte = s[0];
+                        s.push(first_byte);
+                        s
+                    } else {
+                        return Err(StuffItError::Decompression(
+                            "Invalid LZW stream: KwKwK without prev".into(),
+                        ));
+                    }
+                }
+                std::cmp::Ordering::Greater => {
+                    return Err(StuffItError::Decompression(format!(
+                        "Invalid LZW code: {} >= {} (code_bits={})",
+                        code, num_symbols, code_bits
+                    )));
+                }
             };
 
             output.extend_from_slice(&decoded);
