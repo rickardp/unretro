@@ -1257,6 +1257,18 @@ fn extract_bcem_resource(resource_fork: &[u8]) -> Option<Vec<u8>> {
     Some(bcem.data.clone())
 }
 
+/// Returns true if the given resource fork contains an NDIF (`bcem`) resource.
+///
+/// NDIF disk images store the filesystem as compressed chunks in the data fork,
+/// described by a `bcem` resource (id 128) in the resource fork. The data fork
+/// alone is not detectable as HFS; only the combination with the resource fork
+/// is. This helper lets the loader opt into the HFS code path when it has
+/// access to a sibling resource fork but `is_hfs_image` returned false.
+#[must_use]
+pub(crate) fn is_ndif_resource_fork(resource_fork: &[u8]) -> bool {
+    extract_bcem_resource(resource_fork).is_some()
+}
+
 // =============================================================================
 // HFS Volume Parsing
 // =============================================================================

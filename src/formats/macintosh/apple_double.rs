@@ -1,8 +1,5 @@
-use super::resource_fork::ResourceFork;
 use crate::compat::{String, ToString, Vec, format, vec};
 use crate::error::{Error, Result};
-use crate::loader::detect_format;
-use crate::{Entry, Metadata};
 
 const APPLE_DOUBLE_MAGIC: u32 = 0x0005_1607;
 
@@ -10,7 +7,7 @@ const ENTRY_RESOURCE_FORK: u32 = 2;
 const ENTRY_FINDER_INFO: u32 = 9;
 
 #[must_use]
-fn is_apple_double_file(data: &[u8]) -> bool {
+pub(crate) fn is_apple_double_file(data: &[u8]) -> bool {
     if data.len() < 4 {
         return false;
     }
@@ -151,101 +148,14 @@ impl AppleDoubleFile {
     }
 }
 
-pub fn visit<'a, F, G>(
-    entry: &Entry<'_>,
-    get_file: F,
-    extract_relative_path: G,
-    visitor: &mut dyn FnMut(&Entry<'_>) -> Result<bool>,
-) -> Result<bool>
-where
-    F: Fn(&str) -> Option<&'a [u8]>,
-    G: Fn(&str) -> Option<&str>,
-{
-    // Check if this is an AppleDouble sidecar file
-    if is_apple_double_path(entry.path) && is_apple_double_file(entry.data) {
-        // Get the companion data file path (relative to container)
-        if let Some(rel_path) = extract_relative_path(entry.path) {
-            if let Some(companion_rel) = data_fork_path(rel_path) {
-                // If companion exists, skip this sidecar - it will be handled with the data file
-                if get_file(&companion_rel).is_some() {
-                    return Ok(true); // Handled by skipping
-                }
-            }
-        }
-        // No companion found - yield as regular entry (fall through to return false)
-        return Ok(false);
-    }
-
-    // For non-AppleDouble entries, check for an AppleDouble sidecar
-    if let Some(rel_path) = extract_relative_path(entry.path) {
-        let possible_sidecars = resource_fork_paths(rel_path);
-
-        // Try each possible sidecar location
-        let sidecar_data = possible_sidecars.iter().find_map(|path| get_file(path));
-
-        if let Some(ad_data) = sidecar_data {
-            if is_apple_double_file(ad_data) {
-                // Parse AppleDouble to get Finder Info (type/creator)
-                let ad_file = AppleDoubleFile::parse(ad_data).ok();
-
-                // Detect format for the data file (needed to set container_format)
-                let detected_format = detect_format(entry.path, Some(entry.data));
-
-                // Build metadata: start with existing, add type/creator from AppleDouble
-                let owned_metadata: Option<Metadata> =
-                    ad_file
-                        .as_ref()
-                        .and_then(|ad| match (ad.file_type, ad.creator) {
-                            (Some(file_type), Some(creator)) => Some(
-                                entry
-                                    .metadata
-                                    .cloned()
-                                    .unwrap_or_default()
-                                    .with_type_creator(file_type, creator),
-                            ),
-                            _ => None,
-                        });
-                let metadata_ref = owned_metadata.as_ref().or(entry.metadata);
-
-                // Build entry with format and metadata
-                let mut entry_with_extras =
-                    Entry::new(entry.path, entry.container_path, entry.data);
-                if let Some(format) = detected_format {
-                    entry_with_extras = entry_with_extras.with_container_format(format);
-                }
-                if let Some(meta) = metadata_ref {
-                    entry_with_extras = entry_with_extras.with_metadata(meta);
-                }
-
-                // Yield the data file entry
-                let yielded = visitor(&entry_with_extras)?;
-
-                if !yielded {
-                    return Ok(true); // Visitor wants to stop
-                }
-
-                // Then yield resource fork entries from the AppleDouble sidecar
-                if let Some(ad) = ad_file {
-                    if !ad.resource_fork.is_empty() && ResourceFork::is_valid(&ad.resource_fork) {
-                        let rsrc_path = format!("{}/..namedfork/rsrc", entry.path);
-                        // Detect format for resource fork (should be ResourceFork format)
-                        let rsrc_format = detect_format(&rsrc_path, Some(&ad.resource_fork));
-                        let mut rsrc_entry =
-                            Entry::new(&rsrc_path, entry.container_path, &ad.resource_fork);
-                        if let Some(format) = rsrc_format {
-                            rsrc_entry = rsrc_entry.with_container_format(format);
-                        }
-                        visitor(&rsrc_entry)?;
-                    }
-                }
-
-                return Ok(true); // Handled
-            }
-        }
-    }
-
-    Ok(false) // Not handled - caller should yield entry normally
-}
+// `visit` was the previous entrypoint that both yielded the enriched data
+// entry and yielded a `..namedfork/rsrc` sibling from the AD sidecar, then
+// returned "handled" to the caller. That suppressed recursion into container
+// data forks (e.g. BinHex files shipped next to `__MACOSX/._file` sidecars).
+// The loader now drives the flow directly using `is_apple_double_path`,
+// `is_apple_double_file`, `data_fork_path`, `resource_fork_paths`, and
+// `AppleDoubleFile::parse` so the enrichment and yield/recurse stay in the
+// same place.
 
 #[cfg(test)]
 mod tests {

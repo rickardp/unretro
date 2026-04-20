@@ -43,7 +43,10 @@ use crate::formats::macintosh::{
     macbinary::{
         AppleSingleContainer, MacBinaryContainer, is_apple_single_file, is_macbinary_file,
     },
+    resource_fork::ResourceFork,
 };
+#[cfg(feature = "macintosh")]
+use crate::metadata::Metadata;
 
 #[cfg(feature = "game")]
 use crate::formats::game::scumm::{ScummContainer, is_encrypted_scumm_file, is_scumm_file};
@@ -793,39 +796,96 @@ where
             }
         }
 
+        // Look for an AppleDouble sidecar and, if present, extract the
+        // type/creator + resource fork from it. This lets us enrich the entry
+        // with Mac metadata while still running the normal yield/recurse flow
+        // below — the previous approach yielded here and short-circuited, which
+        // silently disabled recursion into container data forks (e.g. BinHex
+        // .hqx files shipped alongside an `__MACOSX/._file` sidecar).
         #[cfg(feature = "macintosh")]
-        {
-            // AppleDouble is special: it may hide standalone sidecar entries and
-            // emit resource-fork entries in their place.
-            let mut bool_visitor = |e: &Entry<'_>| -> Result<bool> {
-                report.record_visited_entry(false);
-                match visitor(e) {
-                    Ok(action) => Ok(action == VisitAction::Continue),
-                    Err(err) => {
-                        visitor_error = Some(err);
-                        Err(visitor_error_sentinel())
+        let (ad_metadata_override, ad_resource_fork): (Option<Metadata>, Option<Vec<u8>>) = {
+            // If this entry IS a sidecar and a companion data file exists in
+            // the same container, hide it — the companion's iteration will
+            // pick up the sidecar's metadata.
+            if apple_double::is_apple_double_path(entry.path)
+                && apple_double::is_apple_double_file(entry.data)
+            {
+                if let Some(rel) = extract_relative_path(entry.path, &prefix) {
+                    if let Some(companion) = apple_double::data_fork_path(rel) {
+                        if container.get_file(&companion).is_some() {
+                            return Ok(true);
+                        }
                     }
                 }
-            };
-
-            let handled = apple_double::visit(
-                entry,
-                |path| container.get_file(path),
-                |full_path| extract_relative_path(full_path, &prefix),
-                &mut bool_visitor,
-            )?;
-
-            if handled {
-                // AppleDouble integration already yielded the data/resource-fork
-                // view for this entry. Do not recurse into the original sidecar-
-                // handled entry to avoid duplicate traversal and pathological
-                // recursion on malformed sidecar-backed payloads.
-                return Ok(true);
+                (None, None)
+            } else if let Some(rel) = extract_relative_path(entry.path, &prefix) {
+                let sidecar_data = apple_double::resource_fork_paths(rel)
+                    .into_iter()
+                    .find_map(|p| container.get_file(&p));
+                match sidecar_data {
+                    Some(data) if apple_double::is_apple_double_file(data) => {
+                        match apple_double::AppleDoubleFile::parse(data) {
+                            Ok(ad) => {
+                                let metadata = match (ad.file_type, ad.creator) {
+                                    (Some(ft), Some(cr)) => Some(
+                                        entry
+                                            .metadata
+                                            .cloned()
+                                            .unwrap_or_default()
+                                            .with_type_creator(ft, cr),
+                                    ),
+                                    _ => None,
+                                };
+                                let rsrc = if !ad.resource_fork.is_empty()
+                                    && ResourceFork::is_valid(&ad.resource_fork)
+                                {
+                                    Some(ad.resource_fork)
+                                } else {
+                                    None
+                                };
+                                (metadata, rsrc)
+                            }
+                            Err(_) => (None, None),
+                        }
+                    }
+                    _ => (None, None),
+                }
+            } else {
+                (None, None)
             }
-        }
+        };
 
         // Detect format BEFORE calling visitor (needed for container decisions).
-        let detected_format = detect_format(entry.path, Some(entry.data));
+        // Sibling-aware: NDIF disk images have no HFS signature in the data
+        // fork (the descriptor lives in the sibling resource fork's `bcem`
+        // resource). Consult either the in-container sibling or the just-
+        // parsed AppleDouble resource fork.
+        let detected_format = {
+            let base = detect_format(entry.path, Some(entry.data));
+            #[cfg(feature = "macintosh")]
+            {
+                if base.is_none() {
+                    let rsrc_path = format!("{}/..namedfork/rsrc", entry.path);
+                    let sibling_bytes = container.get_file(&rsrc_path);
+                    let has_ndif = sibling_bytes.is_some_and(
+                        crate::formats::macintosh::hfs::is_ndif_resource_fork,
+                    ) || ad_resource_fork
+                        .as_deref()
+                        .is_some_and(crate::formats::macintosh::hfs::is_ndif_resource_fork);
+                    if has_ndif {
+                        Some(ContainerFormat::Hfs)
+                    } else {
+                        base
+                    }
+                } else {
+                    base
+                }
+            }
+            #[cfg(not(feature = "macintosh"))]
+            {
+                base
+            }
+        };
         let is_container = detected_format.is_some();
 
         // Determine whether to visit this entry based on entry_types.
@@ -847,7 +907,14 @@ where
                 },
             );
 
-            let entry_with_format = if let Some(metadata) = entry.metadata {
+            // Prefer AppleDouble-derived metadata when we have it (type/creator
+            // from the sidecar); otherwise keep whatever the container yielded.
+            #[cfg(feature = "macintosh")]
+            let metadata_ref = ad_metadata_override.as_ref().or(entry.metadata);
+            #[cfg(not(feature = "macintosh"))]
+            let metadata_ref = entry.metadata;
+
+            let entry_with_format = if let Some(metadata) = metadata_ref {
                 entry_with_format.with_metadata(metadata)
             } else {
                 entry_with_format
@@ -866,15 +933,36 @@ where
 
         // Recurse into containers AFTER calling visitor, based on return value.
         if recurse && is_container && depth > 1 {
-            match open_container_internal_with_siblings(
-                entry.data,
-                entry.path,
-                entry.path,
-                depth - 1,
-                options,
-                |sibling_path| container.get_file(sibling_path).map(<[u8]>::to_vec),
-                detected_format,
-            ) {
+            let open_result = {
+                #[cfg(feature = "macintosh")]
+                let ad_rsrc_ref = ad_resource_fork.as_deref();
+                #[cfg(not(feature = "macintosh"))]
+                let ad_rsrc_ref: Option<&[u8]> = None;
+                open_container_internal_with_siblings(
+                    entry.data,
+                    entry.path,
+                    entry.path,
+                    depth - 1,
+                    options,
+                    |sibling_path| {
+                        // If caller asks for this entry's `..namedfork/rsrc`
+                        // and we have an AD sidecar resource fork in hand,
+                        // serve that. Otherwise fall through to the container.
+                        #[cfg(feature = "macintosh")]
+                        {
+                            let expected = format!("{}/..namedfork/rsrc", entry.path);
+                            if let Some(rsrc) = ad_rsrc_ref {
+                                if sibling_path == expected {
+                                    return Some(rsrc.to_vec());
+                                }
+                            }
+                        }
+                        container.get_file(sibling_path).map(<[u8]>::to_vec)
+                    },
+                    detected_format,
+                )
+            };
+            match open_result {
                 Ok(nested) => {
                     if let Err(err) = visit_container_recursive(
                         nested.as_ref(),
@@ -895,6 +983,28 @@ where
                     entry.path,
                     err.to_string(),
                 ),
+            }
+        }
+
+        // If we had an AppleDouble sidecar with a resource fork AND we did not
+        // route that resource fork through the HFS/NDIF descent above, yield
+        // it as its own `..namedfork/rsrc` entry so downstream visitors can
+        // see the resource fork contents.
+        #[cfg(feature = "macintosh")]
+        if let Some(rsrc) = ad_resource_fork {
+            if !matches!(detected_format, Some(ContainerFormat::Hfs)) {
+                let rsrc_path = format!("{}/..namedfork/rsrc", entry.path);
+                let rsrc_format = detect_format(&rsrc_path, Some(&rsrc));
+                let mut rsrc_entry =
+                    Entry::new(&rsrc_path, entry.container_path, &rsrc);
+                if let Some(format) = rsrc_format {
+                    rsrc_entry = rsrc_entry.with_container_format(format);
+                }
+                report.record_visited_entry(rsrc_format.is_some());
+                if let Err(err) = visitor(&rsrc_entry) {
+                    visitor_error = Some(err);
+                    return Err(visitor_error_sentinel());
+                }
             }
         }
 
