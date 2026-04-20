@@ -112,19 +112,15 @@ fn test_sample_data_against_expect_files() {
                     // empty — that's the only signal we have that the CLI itself
                     // failed, as opposed to producing wrong-but-shaped output.
                     if actual_lines.is_empty() {
-                        eprintln!(
-                            "[{rel}] exit={:?} signal={:?} stderr:\n{stderr}",
-                            result.status.code(),
-                            #[cfg(unix)]
-                            {
-                                use std::os::unix::process::ExitStatusExt;
-                                result.status.signal()
-                            },
-                            #[cfg(not(unix))]
-                            {
-                                Option::<i32>::None
-                            }
-                        );
+                        let exit = result.status.code();
+                        #[cfg(unix)]
+                        let signal = {
+                            use std::os::unix::process::ExitStatusExt;
+                            result.status.signal()
+                        };
+                        #[cfg(not(unix))]
+                        let signal: Option<i32> = None;
+                        eprintln!("[{rel}] exit={exit:?} signal={signal:?} stderr:\n{stderr}");
                     }
 
                     let mut diff_msg = format!(
