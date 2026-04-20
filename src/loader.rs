@@ -867,11 +867,11 @@ where
                 if base.is_none() {
                     let rsrc_path = format!("{}/..namedfork/rsrc", entry.path);
                     let sibling_bytes = container.get_file(&rsrc_path);
-                    let has_ndif = sibling_bytes.is_some_and(
-                        crate::formats::macintosh::hfs::is_ndif_resource_fork,
-                    ) || ad_resource_fork
-                        .as_deref()
-                        .is_some_and(crate::formats::macintosh::hfs::is_ndif_resource_fork);
+                    let has_ndif = sibling_bytes
+                        .is_some_and(crate::formats::macintosh::hfs::is_ndif_resource_fork)
+                        || ad_resource_fork
+                            .as_deref()
+                            .is_some_and(crate::formats::macintosh::hfs::is_ndif_resource_fork);
                     if has_ndif {
                         Some(ContainerFormat::Hfs)
                     } else {
@@ -995,8 +995,7 @@ where
             if !matches!(detected_format, Some(ContainerFormat::Hfs)) {
                 let rsrc_path = format!("{}/..namedfork/rsrc", entry.path);
                 let rsrc_format = detect_format(&rsrc_path, Some(&rsrc));
-                let mut rsrc_entry =
-                    Entry::new(&rsrc_path, entry.container_path, &rsrc);
+                let mut rsrc_entry = Entry::new(&rsrc_path, entry.container_path, &rsrc);
                 if let Some(format) = rsrc_format {
                     rsrc_entry = rsrc_entry.with_container_format(format);
                 }
