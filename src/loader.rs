@@ -1046,10 +1046,25 @@ fn last_path_component(path: &str) -> &str {
     all(feature = "common", feature = "__backend_common"),
     all(feature = "xz", feature = "__backend_xz")
 ))]
+// Matches `std::path::Path::file_stem` semantics without requiring `std::path`
+// (this code compiles under `no_std`). Specifically:
+//   * "foo.ext"    -> Some("foo")
+//   * "foo.tar.gz" -> Some("foo.tar")   (strip only the last extension)
+//   * "foo"        -> Some("foo")       (no dot: return whole basename)
+//   * ".hidden"    -> Some(".hidden")   (leading-dot only: treat as a name)
+//   * ""           -> None
+// The earlier string-based port of this helper returned None for the no-dot
+// case, which made nested gzip entries without a `.gz` suffix in their path
+// (e.g. `.fseventsd/00000000060057b1`) render with inner name `unknown`.
 fn path_file_stem(path: &str) -> Option<&str> {
     let file_name = last_path_component(path);
-    let (stem, _) = file_name.rsplit_once('.')?;
-    if stem.is_empty() { None } else { Some(stem) }
+    if file_name.is_empty() {
+        return None;
+    }
+    match file_name.rsplit_once('.') {
+        Some((stem, _)) if !stem.is_empty() => Some(stem),
+        _ => Some(file_name),
+    }
 }
 
 fn path_extension(path: &str) -> Option<&str> {
