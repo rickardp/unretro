@@ -934,10 +934,11 @@ where
         // Recurse into containers AFTER calling visitor, based on return value.
         if recurse && is_container && depth > 1 {
             let open_result = {
+                // Only used inside the matching cfg-gated block of the closure
+                // below — omit the binding entirely when the feature is off so
+                // `-Dwarnings` doesn't trip on `unused_variables`.
                 #[cfg(feature = "macintosh")]
                 let ad_rsrc_ref = ad_resource_fork.as_deref();
-                #[cfg(not(feature = "macintosh"))]
-                let ad_rsrc_ref: Option<&[u8]> = None;
                 open_container_internal_with_siblings(
                     entry.data,
                     entry.path,
