@@ -29,23 +29,23 @@ pub fn is_encrypted_scumm_file(data: &[u8]) -> bool {
         return false;
     }
 
-    // Check for XOR-encrypted signatures
-    // "LECF" XOR 0x69 = [0x25, 0x2C, 0x2A, 0x2F]
-    // "LFLF" XOR 0x69 = [0x25, 0x2F, 0x25, 0x2F]
-    let encrypted_lecf: [u8; 4] = [
-        b'L' ^ SCUMM_XOR_KEY,
-        b'E' ^ SCUMM_XOR_KEY,
-        b'C' ^ SCUMM_XOR_KEY,
-        b'F' ^ SCUMM_XOR_KEY,
-    ];
-    let encrypted_lflf: [u8; 4] = [
-        b'L' ^ SCUMM_XOR_KEY,
-        b'F' ^ SCUMM_XOR_KEY,
-        b'L' ^ SCUMM_XOR_KEY,
-        b'F' ^ SCUMM_XOR_KEY,
-    ];
+    // SCUMM v5+ XOR-encrypts resources with 0x69. Accept the resource-file
+    // signatures (LECF/LFLF) and the index-file signatures (RNAM/MAXS) —
+    // e.g. MONKEY1.001 starts with encrypted LECF, MONKEY1.000 with encrypted RNAM.
+    let encrypt = |sig: &[u8; 4]| -> [u8; 4] {
+        [
+            sig[0] ^ SCUMM_XOR_KEY,
+            sig[1] ^ SCUMM_XOR_KEY,
+            sig[2] ^ SCUMM_XOR_KEY,
+            sig[3] ^ SCUMM_XOR_KEY,
+        ]
+    };
 
-    data[0..4] == encrypted_lecf || data[0..4] == encrypted_lflf
+    let head = &data[0..4];
+    head == encrypt(b"LECF")
+        || head == encrypt(b"LFLF")
+        || head == encrypt(b"RNAM")
+        || head == encrypt(b"MAXS")
 }
 
 struct ScummEntry {
@@ -308,6 +308,28 @@ mod tests {
             .unwrap();
 
         assert_eq!(visited.len(), 1);
+    }
+
+    #[test]
+    fn test_encrypted_scumm_index_file() {
+        // SCUMM v5 index files (e.g. MONKEY1.000) start with XOR-encrypted
+        // RNAM or MAXS, not LECF/LFLF. Verify detection and round-trip parsing.
+        let rnam = make_chunk(b"RNAM", &[0u8; 8]);
+        let encrypted: Vec<u8> = rnam.iter().map(|b| b ^ SCUMM_XOR_KEY).collect();
+
+        assert!(is_encrypted_scumm_file(&encrypted));
+        assert!(is_scumm_file(&encrypted));
+
+        // Also verify MAXS (another common index-file header).
+        let maxs = make_chunk(b"MAXS", &[0u8; 8]);
+        let encrypted_maxs: Vec<u8> = maxs.iter().map(|b| b ^ SCUMM_XOR_KEY).collect();
+        assert!(is_encrypted_scumm_file(&encrypted_maxs));
+
+        // End-to-end: container should decrypt and expose the RNAM chunk.
+        let container =
+            ScummContainer::from_bytes(&encrypted, "MONKEY1.000".to_string(), 32).unwrap();
+        assert_eq!(container.entries.len(), 1);
+        assert_eq!(container.entries[0].path, "MONKEY1.000/RNAM/0000");
     }
 
     #[test]
