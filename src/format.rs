@@ -76,6 +76,9 @@ pub enum ContainerFormat {
     /// `Wolfenstein 3D` data file (`VSWAP/AUDIOT`).
     #[cfg(feature = "game")]
     Wolf3d,
+    /// `LucasArts` digital iMUSE audio bundle (`*.BUN`).
+    #[cfg(feature = "game")]
+    ImuseBundle,
 
     // DOS/PC formats
     /// `FAT12/FAT16/FAT32` disk image.
@@ -134,6 +137,8 @@ impl ContainerFormat {
             Self::Pak => "Quake PAK File",
             #[cfg(feature = "game")]
             Self::Wolf3d => "Wolf3D Data File",
+            #[cfg(feature = "game")]
+            Self::ImuseBundle => "iMUSE Bundle",
             #[cfg(feature = "dos")]
             Self::Fat => "FAT Disk Image",
             #[cfg(feature = "dos")]
@@ -197,6 +202,8 @@ impl ContainerFormat {
             "wl1" | "wl3" | "wl6" | "sod" | "sdm" => Some(Self::Wolf3d),
             #[cfg(feature = "game")]
             "lec" | "la0" | "la1" | "la2" => Some(Self::Scumm),
+            #[cfg(feature = "game")]
+            "bun" => Some(Self::ImuseBundle),
             #[cfg(feature = "dos")]
             "ima" | "flp" | "vfd" => Some(Self::Fat),
             _ => None,
@@ -232,7 +239,7 @@ impl ContainerFormat {
             #[cfg(feature = "game")]
             Self::Scumm => true,
             #[cfg(feature = "game")]
-            Self::Wad | Self::Pak | Self::Wolf3d => true,
+            Self::Wad | Self::Pak | Self::Wolf3d | Self::ImuseBundle => true,
             #[cfg(feature = "dos")]
             Self::Fat | Self::Mbr | Self::Gpt => true,
             Self::Unknown => false,

@@ -359,6 +359,8 @@ fn format_name(format: &ContainerFormat) -> &'static str {
         ContainerFormat::Pak => "PAK",
         #[cfg(feature = "game")]
         ContainerFormat::Wolf3d => "Wolf3D",
+        #[cfg(feature = "game")]
+        ContainerFormat::ImuseBundle => "iMUSE Bundle",
         #[cfg(feature = "dos")]
         ContainerFormat::Fat => "FAT",
         #[cfg(feature = "dos")]

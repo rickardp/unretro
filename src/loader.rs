@@ -60,6 +60,9 @@ use crate::formats::game::pak::{PakContainer, is_pak_file};
 #[cfg(feature = "game")]
 use crate::formats::game::wolf3d::{Wolf3dContainer, is_wolf3d_file};
 
+#[cfg(feature = "game")]
+use crate::formats::game::imuse_bundle::{ImuseBundleContainer, is_imuse_bundle};
+
 #[cfg(feature = "dos")]
 use crate::formats::dos::fat::{FatContainer, is_fat_image};
 
@@ -1214,6 +1217,12 @@ fn open_container_internal(
             prefix.to_string(),
             depth,
         )?)),
+        #[cfg(feature = "game")]
+        Some(ContainerFormat::ImuseBundle) => Ok(Box::new(ImuseBundleContainer::from_bytes(
+            data,
+            prefix.to_string(),
+            depth,
+        )?)),
         #[cfg(feature = "dos")]
         Some(ContainerFormat::Fat) => Ok(Box::new(FatContainer::from_bytes(
             data,
@@ -1388,6 +1397,10 @@ pub fn detect_format(path: &str, data: Option<&[u8]>) -> Option<ContainerFormat>
                     return Some(ContainerFormat::Scumm);
                 }
             }
+            #[cfg(feature = "game")]
+            ContainerFormat::ImuseBundle => {
+                try_format!(is_imuse_bundle, ContainerFormat::ImuseBundle);
+            }
             #[cfg(feature = "dos")]
             ContainerFormat::Fat => try_format!(is_fat_image, ContainerFormat::Fat),
             _ => {}
@@ -1455,6 +1468,9 @@ pub fn detect_format(path: &str, data: Option<&[u8]>) -> Option<ContainerFormat>
         }
         if is_pak_file(data) {
             return Some(ContainerFormat::Pak);
+        }
+        if is_imuse_bundle(data) {
+            return Some(ContainerFormat::ImuseBundle);
         }
         if is_wolf3d_file(data) {
             return Some(ContainerFormat::Wolf3d);
