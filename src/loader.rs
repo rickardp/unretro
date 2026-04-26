@@ -49,7 +49,10 @@ use crate::formats::macintosh::{
 use crate::metadata::Metadata;
 
 #[cfg(feature = "game")]
-use crate::formats::game::scumm::{ScummContainer, is_encrypted_scumm_file, is_scumm_file};
+use crate::formats::game::scumm::{
+    ScummContainer, ScummSpeechContainer, is_encrypted_scumm_file, is_scumm_file,
+    is_scumm_speech_file,
+};
 
 #[cfg(feature = "game")]
 use crate::formats::game::wad::{WadContainer, is_wad_file};
@@ -1200,6 +1203,12 @@ fn open_container_internal(
             depth,
         )?)),
         #[cfg(feature = "game")]
+        Some(ContainerFormat::ScummSpeech) => Ok(Box::new(ScummSpeechContainer::from_bytes(
+            data,
+            prefix.to_string(),
+            depth,
+        )?)),
+        #[cfg(feature = "game")]
         Some(ContainerFormat::Wad) => Ok(Box::new(WadContainer::from_bytes(
             data,
             prefix.to_string(),
@@ -1398,6 +1407,10 @@ pub fn detect_format(path: &str, data: Option<&[u8]>) -> Option<ContainerFormat>
                 }
             }
             #[cfg(feature = "game")]
+            ContainerFormat::ScummSpeech => {
+                try_format!(is_scumm_speech_file, ContainerFormat::ScummSpeech);
+            }
+            #[cfg(feature = "game")]
             ContainerFormat::ImuseBundle => {
                 try_format!(is_imuse_bundle, ContainerFormat::ImuseBundle);
             }
@@ -1468,6 +1481,9 @@ pub fn detect_format(path: &str, data: Option<&[u8]>) -> Option<ContainerFormat>
         }
         if is_pak_file(data) {
             return Some(ContainerFormat::Pak);
+        }
+        if is_scumm_speech_file(data) {
+            return Some(ContainerFormat::ScummSpeech);
         }
         if is_imuse_bundle(data) {
             return Some(ContainerFormat::ImuseBundle);

@@ -354,6 +354,8 @@ fn format_name(format: &ContainerFormat) -> &'static str {
         #[cfg(feature = "game")]
         ContainerFormat::Scumm => "SCUMM",
         #[cfg(feature = "game")]
+        ContainerFormat::ScummSpeech => "SCUMM Speech",
+        #[cfg(feature = "game")]
         ContainerFormat::Wad => "WAD",
         #[cfg(feature = "game")]
         ContainerFormat::Pak => "PAK",

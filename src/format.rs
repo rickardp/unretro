@@ -67,6 +67,9 @@ pub enum ContainerFormat {
     /// `LucasArts` `SCUMM` data file.
     #[cfg(feature = "game")]
     Scumm,
+    /// `LucasArts` `SCUMM` speech bundle (`MONSTER.SOU` and friends).
+    #[cfg(feature = "game")]
+    ScummSpeech,
     /// `DOOM/Heretic/Hexen` `WAD` file (`IWAD/PWAD`).
     #[cfg(feature = "game")]
     Wad,
@@ -131,6 +134,8 @@ impl ContainerFormat {
             Self::ResourceFork => "Resource Fork",
             #[cfg(feature = "game")]
             Self::Scumm => "SCUMM Data File",
+            #[cfg(feature = "game")]
+            Self::ScummSpeech => "SCUMM Speech",
             #[cfg(feature = "game")]
             Self::Wad => "DOOM WAD File",
             #[cfg(feature = "game")]
@@ -203,6 +208,8 @@ impl ContainerFormat {
             #[cfg(feature = "game")]
             "lec" | "la0" | "la1" | "la2" => Some(Self::Scumm),
             #[cfg(feature = "game")]
+            "sou" => Some(Self::ScummSpeech),
+            #[cfg(feature = "game")]
             "bun" => Some(Self::ImuseBundle),
             #[cfg(feature = "dos")]
             "ima" | "flp" | "vfd" => Some(Self::Fat),
@@ -237,7 +244,7 @@ impl ContainerFormat {
             #[cfg(feature = "macintosh")]
             Self::ResourceFork => true,
             #[cfg(feature = "game")]
-            Self::Scumm => true,
+            Self::Scumm | Self::ScummSpeech => true,
             #[cfg(feature = "game")]
             Self::Wad | Self::Pak | Self::Wolf3d | Self::ImuseBundle => true,
             #[cfg(feature = "dos")]
