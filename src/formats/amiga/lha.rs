@@ -1,6 +1,10 @@
 //! LHA/LZH archive container support.
 
-use delharc::{LhaDecodeReader, Read as _};
+use delharc::LhaDecodeReader;
+#[cfg(not(feature = "std"))]
+use delharc::Read as _;
+#[cfg(feature = "std")]
+use std::io::Read as _;
 
 use crate::compat::{FastMap, String, Vec, format};
 use crate::error::{Error, Result};
@@ -58,6 +62,20 @@ impl LhaContainer {
                 let mut file_data = Vec::with_capacity(original_size.min(max_size));
                 let mut read_buf = [0_u8; 65536];
                 loop {
+                    // delharc 0.6 only re-exports its own `Read` trait when its
+                    // `std` feature is off. With `std` on the `LhaDecodeReader`
+                    // implements `std::io::Read` directly and `read_all` is gone.
+                    #[cfg(feature = "std")]
+                    let read = match lha.read(&mut read_buf) {
+                        Ok(n) => n,
+                        Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+                        Err(e) => {
+                            return Err(Error::decompression(format!(
+                                "Error extracting from LHA: {e}"
+                            )));
+                        }
+                    };
+                    #[cfg(not(feature = "std"))]
                     let read = lha.read_all(&mut read_buf).map_err(|e| {
                         Error::decompression(format!("Error extracting from LHA: {e}"))
                     })?;

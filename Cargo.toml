@@ -67,6 +67,7 @@ std = [
     "dep:memmap2",
     "dep:xattr",
     "dep:libc",
+    "delharc?/std",
     "__backend_common",
     "__backend_xz",
     "__backend_mac_stuffit",
