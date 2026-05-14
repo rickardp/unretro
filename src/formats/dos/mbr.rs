@@ -25,11 +25,18 @@ pub fn is_mbr_image(data: &[u8]) -> bool {
         return false;
     }
 
-    // Check partition table for at least one valid entry, and no GPT protective type
-    let mut has_valid_partition = false;
+    // Check partition table for at least one usable in-bounds entry, and no GPT
+    // protective type. Keep this at least as strict as `parse_partitions()` so
+    // arbitrary payloads with a coincidental 0x55AA trailer are not reported as
+    // MBR containers and then rejected during open.
     for i in 0..4 {
         let offset = 446 + i * 16;
+        let boot_flag = data[offset];
         let part_type = data[offset + 4];
+
+        if !matches!(boot_flag, 0x00 | 0x80) {
+            return false;
+        }
 
         if part_type == GPT_PROTECTIVE_TYPE {
             return false; // This is a GPT disk, not plain MBR
@@ -49,12 +56,24 @@ pub fn is_mbr_image(data: &[u8]) -> bool {
                 data[offset + 15],
             ]);
             if lba_start > 0 && sectors > 0 {
-                has_valid_partition = true;
+                let Some(byte_offset) = (lba_start as usize).checked_mul(512) else {
+                    continue;
+                };
+                let Some(byte_len) = (sectors as usize).checked_mul(512) else {
+                    continue;
+                };
+                if byte_offset < data.len()
+                    && byte_offset
+                        .checked_add(byte_len)
+                        .is_some_and(|end| end <= data.len())
+                {
+                    return true;
+                }
             }
         }
     }
 
-    has_valid_partition
+    false
 }
 
 struct MbrPartition {
@@ -266,6 +285,17 @@ mod tests {
         let mut image = vec![0u8; 512];
         image[510] = 0x55;
         image[511] = 0xAA;
+        assert!(!is_mbr_image(&image));
+    }
+
+    #[test]
+    fn test_is_mbr_image_rejects_out_of_bounds_partition() {
+        let mut image = vec![0u8; 600];
+        image[510] = 0x55;
+        image[511] = 0xAA;
+        image[446 + 4] = 0x06;
+        image[446 + 8..446 + 12].copy_from_slice(&1u32.to_le_bytes());
+        image[446 + 12..446 + 16].copy_from_slice(&100u32.to_le_bytes());
         assert!(!is_mbr_image(&image));
     }
 

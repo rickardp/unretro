@@ -65,6 +65,11 @@ pub fn is_hfs_image(data: &[u8]) -> bool {
         }
     }
 
+    // Raw 2352-byte CD sectors containing a cooked Apple partition map.
+    if let Some(cooked) = cdrom_user_data(data) {
+        return is_hfs_image(&cooked);
+    }
+
     false
 }
 
@@ -86,9 +91,17 @@ fn find_apm_hfs_partition(data: &[u8]) -> Option<usize> {
         return None;
     }
 
-    // First partition entry is at block 1
-    let mut entry_offset = block_size;
-    if data.len() < entry_offset + 512 {
+    // APM entries are 512-byte records. On some CD images the driver
+    // descriptor map reports a 2048-byte device block size while the partition
+    // map itself still starts at byte 512.
+    let entry_size = 512;
+    let map_start = [NDIF_BLOCK_SIZE, block_size].into_iter().find(|&offset| {
+        data.len() >= offset + entry_size
+            && u16::from_be_bytes([data[offset], data[offset + 1]]) == APM_PARTITION_SIGNATURE
+    })?;
+
+    let mut entry_offset = map_start;
+    if data.len() < entry_offset + entry_size {
         return None;
     }
 
@@ -113,8 +126,8 @@ fn find_apm_hfs_partition(data: &[u8]) -> Option<usize> {
 
     // Scan all partition entries looking for Apple_HFS
     for i in 0..map_entries {
-        entry_offset = block_size * (1 + i);
-        if data.len() < entry_offset + 512 {
+        entry_offset = map_start + i * entry_size;
+        if data.len() < entry_offset + entry_size {
             break;
         }
 
@@ -142,11 +155,45 @@ fn find_apm_hfs_partition(data: &[u8]) -> Option<usize> {
                 data[entry_offset + 11],
             ]) as usize;
 
-            return start_block.checked_mul(block_size);
+            return start_block.checked_mul(entry_size);
         }
     }
 
     None
+}
+
+fn cdrom_user_data(data: &[u8]) -> Option<Vec<u8>> {
+    const RAW_SECTOR_SIZE: usize = 2352;
+    const USER_DATA_OFFSET: usize = 16;
+    const USER_DATA_SIZE: usize = 2048;
+
+    if data.len() < RAW_SECTOR_SIZE * 2 || data.len() % RAW_SECTOR_SIZE != 0 {
+        return None;
+    }
+
+    let sectors_to_probe = (data.len() / RAW_SECTOR_SIZE).min(16);
+    let valid_headers = (0..sectors_to_probe)
+        .filter(|&sector| {
+            let offset = sector * RAW_SECTOR_SIZE;
+            data[offset] == 0x00
+                && data[offset + 1..offset + 11].iter().all(|&b| b == 0xFF)
+                && data[offset + 11] == 0x00
+                && matches!(data[offset + 15], 0x01 | 0x02)
+        })
+        .count();
+
+    if valid_headers < sectors_to_probe.saturating_sub(1).max(1) {
+        return None;
+    }
+
+    let sector_count = data.len() / RAW_SECTOR_SIZE;
+    let mut cooked = Vec::with_capacity(sector_count * USER_DATA_SIZE);
+    for sector in 0..sector_count {
+        let offset = sector * RAW_SECTOR_SIZE + USER_DATA_OFFSET;
+        cooked.extend_from_slice(&data[offset..offset + USER_DATA_SIZE]);
+    }
+
+    Some(cooked)
 }
 
 // =============================================================================
@@ -173,6 +220,8 @@ struct MasterDirectoryBlock {
     _num_alloc_blocks: u16,
     alloc_block_size: u32,
     first_alloc_block: u16,
+    extents_file_size: u32,
+    extents_file_extents: [ExtentDescriptor; 3],
     catalog_file_size: u32,
     catalog_extents: [ExtentDescriptor; 3],
 }
@@ -199,6 +248,14 @@ impl MasterDirectoryBlock {
             alloc_block_size: u32::from_be_bytes([data[20], data[21], data[22], data[23]]),
             // drAlBlSt at offset 28 (0x1C)
             first_alloc_block: u16::from_be_bytes([data[28], data[29]]),
+            // drXTFlSize at offset 130 (0x82)
+            extents_file_size: u32::from_be_bytes([data[130], data[131], data[132], data[133]]),
+            // drXTExtRec at offset 134 (0x86) - 3 extent descriptors × 4 bytes each
+            extents_file_extents: [
+                ExtentDescriptor::read(&data[134..]),
+                ExtentDescriptor::read(&data[138..]),
+                ExtentDescriptor::read(&data[142..]),
+            ],
             // drCTFlSize at offset 146 (0x92)
             catalog_file_size: u32::from_be_bytes([data[146], data[147], data[148], data[149]]),
             // drCTExtRec at offset 150 (0x96) - 3 extent descriptors × 4 bytes each
@@ -300,6 +357,7 @@ impl From<i8> for CatalogRecordType {
 struct HfsFileEntry {
     name: String,
     parent_id: u32,
+    file_id: u32,
     file_type: [u8; 4],
     creator: [u8; 4],
     data_fork_size: u32,
@@ -312,6 +370,20 @@ struct HfsFileEntry {
 struct HfsDirEntry {
     name: String,
     parent_id: u32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ForkType {
+    Data,
+    Resource,
+}
+
+#[derive(Debug)]
+struct ExtentOverflowRecord {
+    fork_type: ForkType,
+    file_id: u32,
+    start_block: u16,
+    extents: [ExtentDescriptor; 3],
 }
 
 // =============================================================================
@@ -1233,7 +1305,9 @@ fn udif_decompress(data: &[u8]) -> Result<Vec<u8>> {
 
                     let src = &data[src_start..src_start + src_len];
                     let mut decoder = ZlibDecoder::new(src);
-                    let _ = decoder.read(&mut output[out_offset..out_offset + out_size]);
+                    decoder
+                        .read_exact(&mut output[out_offset..out_offset + out_size])
+                        .map_err(|_| Error::invalid_format("UDIF: ZLIB block truncated"))?;
                 }
                 #[cfg(not(all(feature = "common", feature = "__backend_common")))]
                 {
@@ -1284,6 +1358,7 @@ pub(crate) fn is_ndif_resource_fork(resource_fork: &[u8]) -> bool {
 struct HfsVolume {
     data: Vec<u8>,
     mdb: MasterDirectoryBlock,
+    extents_overflow: Vec<ExtentOverflowRecord>,
     files: Vec<HfsFileEntry>,
     directories: FastMap<u32, HfsDirEntry>,
 }
@@ -1296,6 +1371,10 @@ impl HfsVolume {
         } else {
             data
         };
+
+        if let Some(cooked) = cdrom_user_data(&hfs_data) {
+            hfs_data = cooked;
+        }
 
         // Check for DiskCopy 4.2 header and strip if present
         let hfs_offset = get_hfs_data_offset(&hfs_data);
@@ -1326,6 +1405,14 @@ impl HfsVolume {
         // Parse MDB
         let mdb = MasterDirectoryBlock::parse(&hfs_data[MDB_OFFSET..])?;
 
+        let extents_overflow_data =
+            mdb.read_extents(&hfs_data, &mdb.extents_file_extents, mdb.extents_file_size);
+        let extents_overflow = if extents_overflow_data.len() >= 512 {
+            Self::parse_extents_overflow(&extents_overflow_data).unwrap_or_default()
+        } else {
+            Vec::new()
+        };
+
         // Try to read catalog file
         let catalog_data = mdb.read_extents(&hfs_data, &mdb.catalog_extents, mdb.catalog_file_size);
 
@@ -1339,6 +1426,7 @@ impl HfsVolume {
         Ok(Self {
             data: hfs_data,
             mdb,
+            extents_overflow,
             files,
             directories,
         })
@@ -1397,6 +1485,97 @@ impl HfsVolume {
         }
 
         Ok((files, directories))
+    }
+
+    fn parse_extents_overflow(data: &[u8]) -> Result<Vec<ExtentOverflowRecord>> {
+        let header_node = &data[0..512.min(data.len())];
+        if header_node.len() < 512 {
+            return Err(Error::invalid_format("Extents header node too small"));
+        }
+
+        let first_record_offset = u16::from_be_bytes([header_node[510], header_node[511]]) as usize;
+        if first_record_offset + 30 > header_node.len() {
+            return Err(Error::invalid_format(
+                "Invalid extents header record offset",
+            ));
+        }
+
+        let btree_header = BTreeHeader::parse(&header_node[first_record_offset..]);
+        let node_size = btree_header.node_size as usize;
+        if node_size == 0 {
+            return Ok(Vec::new());
+        }
+
+        let mut records = Vec::new();
+        let mut current_node = btree_header.first_leaf_node;
+
+        while current_node != 0 {
+            let node_offset = current_node as usize * node_size;
+            if node_offset + node_size > data.len() {
+                break;
+            }
+
+            let node_data = &data[node_offset..node_offset + node_size];
+            let node_desc = NodeDescriptor::parse(node_data);
+            if node_desc.node_type == -1 {
+                Self::parse_extents_leaf_node(node_data, node_desc.num_records, &mut records);
+            }
+
+            current_node = node_desc.f_link;
+        }
+
+        Ok(records)
+    }
+
+    fn parse_extents_leaf_node(
+        node_data: &[u8],
+        num_records: u16,
+        records: &mut Vec<ExtentOverflowRecord>,
+    ) {
+        let node_size = node_data.len();
+
+        for i in 0..num_records {
+            let offset_pos = node_size - 2 - (i as usize * 2);
+            if offset_pos < 2 {
+                break;
+            }
+
+            let record_offset =
+                u16::from_be_bytes([node_data[offset_pos], node_data[offset_pos + 1]]) as usize;
+            if record_offset >= node_size - 2 {
+                continue;
+            }
+
+            let record = &node_data[record_offset..];
+            if record.len() < 20 || record[0] < 7 {
+                continue;
+            }
+
+            let fork_type = match record[1] as i8 {
+                0 => ForkType::Data,
+                -1 => ForkType::Resource,
+                _ => continue,
+            };
+            let file_id = u32::from_be_bytes([record[2], record[3], record[4], record[5]]);
+            let start_block = u16::from_be_bytes([record[6], record[7]]);
+            let key_area = 1 + record[0] as usize;
+            let data_offset = key_area + (key_area & 1);
+
+            if data_offset + 12 > record.len() {
+                continue;
+            }
+
+            records.push(ExtentOverflowRecord {
+                fork_type,
+                file_id,
+                start_block,
+                extents: [
+                    ExtentDescriptor::read(&record[data_offset..]),
+                    ExtentDescriptor::read(&record[data_offset + 4..]),
+                    ExtentDescriptor::read(&record[data_offset + 8..]),
+                ],
+            });
+        }
     }
 
     fn parse_leaf_node(
@@ -1480,6 +1659,12 @@ impl HfsVolume {
                 // Parse file record (cdrFilRec) - Inside Macintosh: Files page 2-69
                 let file_type: [u8; 4] = record_data[4..8].try_into().unwrap_or([0; 4]);
                 let creator: [u8; 4] = record_data[8..12].try_into().unwrap_or([0; 4]);
+                let file_id = u32::from_be_bytes([
+                    record_data[20],
+                    record_data[21],
+                    record_data[22],
+                    record_data[23],
+                ]);
 
                 let data_fork_size = u32::from_be_bytes([
                     record_data[26],
@@ -1509,6 +1694,7 @@ impl HfsVolume {
                 files.push(HfsFileEntry {
                     name,
                     parent_id,
+                    file_id,
                     file_type,
                     creator,
                     data_fork_size,
@@ -1540,16 +1726,82 @@ impl HfsVolume {
     }
 
     fn read_data_fork(&self, file: &HfsFileEntry) -> Vec<u8> {
-        self.mdb
-            .read_extents(&self.data, &file.data_fork_extents, file.data_fork_size)
+        self.read_file_fork(
+            file.file_id,
+            ForkType::Data,
+            &file.data_fork_extents,
+            file.data_fork_size,
+        )
     }
 
     fn read_resource_fork(&self, file: &HfsFileEntry) -> Vec<u8> {
-        self.mdb.read_extents(
-            &self.data,
+        self.read_file_fork(
+            file.file_id,
+            ForkType::Resource,
             &file.resource_fork_extents,
             file.resource_fork_size,
         )
+    }
+
+    fn read_file_fork(
+        &self,
+        file_id: u32,
+        fork_type: ForkType,
+        inline_extents: &[ExtentDescriptor; 3],
+        size: u32,
+    ) -> Vec<u8> {
+        let extents = self.resolve_extents(file_id, fork_type, inline_extents, size);
+        self.mdb.read_extents(&self.data, &extents, size)
+    }
+
+    fn resolve_extents(
+        &self,
+        file_id: u32,
+        fork_type: ForkType,
+        inline_extents: &[ExtentDescriptor; 3],
+        size: u32,
+    ) -> Vec<ExtentDescriptor> {
+        let mut extents: Vec<ExtentDescriptor> = inline_extents
+            .iter()
+            .copied()
+            .filter(|extent| extent.block_count != 0)
+            .collect();
+
+        if size == 0 || self.mdb.alloc_block_size == 0 {
+            return extents;
+        }
+
+        let blocks_needed = (size as u64).div_ceil(u64::from(self.mdb.alloc_block_size)) as u32;
+        let mut next_logical_block = extents
+            .iter()
+            .map(|extent| u32::from(extent.block_count))
+            .fold(0u32, u32::saturating_add);
+
+        while next_logical_block < blocks_needed {
+            let Some(record) = self.extents_overflow.iter().find(|record| {
+                record.file_id == file_id
+                    && record.fork_type == fork_type
+                    && u32::from(record.start_block) == next_logical_block
+            }) else {
+                break;
+            };
+
+            let mut added = 0u32;
+            for extent in record.extents {
+                if extent.block_count == 0 {
+                    continue;
+                }
+                added = added.saturating_add(u32::from(extent.block_count));
+                extents.push(extent);
+            }
+
+            if added == 0 {
+                break;
+            }
+            next_logical_block = next_logical_block.saturating_add(added);
+        }
+
+        extents
     }
 }
 
@@ -2036,6 +2288,70 @@ mod tests {
     }
 
     #[test]
+    fn test_apm_cd_image_uses_512_byte_partition_entries() {
+        let hfs_start_block = 333usize;
+        let hfs_offset = hfs_start_block * 512;
+        let mut data = vec![0u8; hfs_offset + 2048];
+
+        // Driver Descriptor Map with a 2048-byte device block size, as found
+        // on some CD images.
+        data[0] = 0x45;
+        data[1] = 0x52;
+        data[2..4].copy_from_slice(&2048u16.to_be_bytes());
+
+        // APM entries are still 512-byte records starting at byte 512.
+        let entry = 512;
+        data[entry..entry + 2].copy_from_slice(&APM_PARTITION_SIGNATURE.to_be_bytes());
+        data[entry + 4..entry + 8].copy_from_slice(&1u32.to_be_bytes());
+        data[entry + 8..entry + 12].copy_from_slice(&(hfs_start_block as u32).to_be_bytes());
+        data[entry + 48..entry + 58].copy_from_slice(b"Apple_HFS\0");
+
+        data[hfs_offset + MDB_OFFSET..hfs_offset + MDB_OFFSET + 2]
+            .copy_from_slice(&HFS_SIGNATURE.to_be_bytes());
+        assert!(is_hfs_image(&data));
+    }
+
+    #[test]
+    fn test_raw_cd_sector_hfs_detection() {
+        const RAW_SECTOR_SIZE: usize = 2352;
+        const USER_DATA_OFFSET: usize = 16;
+        const USER_DATA_SIZE: usize = 2048;
+
+        let hfs_start_block = 4usize;
+        let hfs_offset = hfs_start_block * 512;
+        let mut cooked = vec![0u8; hfs_offset + 2048];
+
+        cooked[0..2].copy_from_slice(&APM_DRIVER_MAP_SIGNATURE.to_be_bytes());
+        cooked[2..4].copy_from_slice(&2048u16.to_be_bytes());
+
+        let entry = 512;
+        cooked[entry..entry + 2].copy_from_slice(&APM_PARTITION_SIGNATURE.to_be_bytes());
+        cooked[entry + 4..entry + 8].copy_from_slice(&1u32.to_be_bytes());
+        cooked[entry + 8..entry + 12].copy_from_slice(&(hfs_start_block as u32).to_be_bytes());
+        cooked[entry + 48..entry + 58].copy_from_slice(b"Apple_HFS\0");
+
+        cooked[hfs_offset + MDB_OFFSET..hfs_offset + MDB_OFFSET + 2]
+            .copy_from_slice(&HFS_SIGNATURE.to_be_bytes());
+
+        let sector_count = cooked.len().div_ceil(USER_DATA_SIZE);
+        let mut raw = vec![0u8; sector_count * RAW_SECTOR_SIZE];
+        for sector in 0..sector_count {
+            let raw_offset = sector * RAW_SECTOR_SIZE;
+            raw[raw_offset] = 0x00;
+            raw[raw_offset + 1..raw_offset + 11].fill(0xFF);
+            raw[raw_offset + 11] = 0x00;
+            raw[raw_offset + 15] = 0x01;
+
+            let cooked_offset = sector * USER_DATA_SIZE;
+            let copy_len = USER_DATA_SIZE.min(cooked.len().saturating_sub(cooked_offset));
+            raw[raw_offset + USER_DATA_OFFSET..raw_offset + USER_DATA_OFFSET + copy_len]
+                .copy_from_slice(&cooked[cooked_offset..cooked_offset + copy_len]);
+        }
+
+        assert!(is_hfs_image(&raw));
+    }
+
+    #[test]
     fn test_mdb_parsing() {
         // Minimal MDB with correct offsets
         let mut mdb = vec![0u8; 162];
@@ -2057,5 +2373,67 @@ mod tests {
         let parsed = MasterDirectoryBlock::parse(&mdb).unwrap();
         assert_eq!(parsed.alloc_block_size, 512);
         assert_eq!(parsed.first_alloc_block, 5);
+    }
+
+    #[test]
+    fn test_resolve_extents_uses_overflow_for_both_forks() {
+        let volume = HfsVolume {
+            data: Vec::new(),
+            mdb: MasterDirectoryBlock {
+                _num_alloc_blocks: 0,
+                alloc_block_size: 512,
+                first_alloc_block: 0,
+                extents_file_size: 0,
+                extents_file_extents: [ExtentDescriptor::default(); 3],
+                catalog_file_size: 0,
+                catalog_extents: [ExtentDescriptor::default(); 3],
+            },
+            extents_overflow: vec![
+                ExtentOverflowRecord {
+                    fork_type: ForkType::Data,
+                    file_id: 42,
+                    start_block: 1,
+                    extents: [
+                        ExtentDescriptor {
+                            start_block: 20,
+                            block_count: 2,
+                        },
+                        ExtentDescriptor::default(),
+                        ExtentDescriptor::default(),
+                    ],
+                },
+                ExtentOverflowRecord {
+                    fork_type: ForkType::Resource,
+                    file_id: 42,
+                    start_block: 1,
+                    extents: [
+                        ExtentDescriptor {
+                            start_block: 30,
+                            block_count: 2,
+                        },
+                        ExtentDescriptor::default(),
+                        ExtentDescriptor::default(),
+                    ],
+                },
+            ],
+            files: Vec::new(),
+            directories: FastMap::new(),
+        };
+        let inline = [
+            ExtentDescriptor {
+                start_block: 10,
+                block_count: 1,
+            },
+            ExtentDescriptor::default(),
+            ExtentDescriptor::default(),
+        ];
+
+        let data_extents = volume.resolve_extents(42, ForkType::Data, &inline, 1536);
+        assert_eq!(data_extents.len(), 2);
+        assert_eq!(data_extents[1].start_block, 20);
+
+        let rsrc_extents = volume.resolve_extents(42, ForkType::Resource, &inline, 1536);
+        assert_eq!(rsrc_extents.len(), 2);
+        assert_eq!(rsrc_extents[1].start_block, 30);
     }
 }

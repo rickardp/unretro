@@ -134,7 +134,7 @@ impl ResourceFork {
 
             for res_idx in 0..num_resources {
                 let ref_offset = ref_list_start + res_idx * 12;
-                if ref_offset + 12 > map_offset + map_len {
+                if ref_offset + 12 > map_len {
                     break;
                 }
 

@@ -63,8 +63,11 @@ impl BinHexContainer {
 
         #[cfg(not(target_arch = "wasm32"))]
         let hqx = {
+            let panic_hook = panic::take_hook();
+            panic::set_hook(Box::new(|_| {}));
             let decode_result =
                 panic::catch_unwind(panic::AssertUnwindSafe(|| hexbin(&data_vec, false)));
+            panic::set_hook(panic_hook);
 
             match decode_result {
                 Ok(Ok(hqx)) => hqx,

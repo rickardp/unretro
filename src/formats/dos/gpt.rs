@@ -37,8 +37,10 @@ pub fn is_gpt_image(data: &[u8]) -> bool {
         return false;
     }
 
-    // Check "EFI PART" magic at LBA 1 (offset 512)
+    // Check "EFI PART" magic at LBA 1 (offset 512), then require at least
+    // one usable partition so detection matches open-time validation.
     data[512..520] == *EFI_PART_MAGIC
+        && parse_gpt_partitions(data).is_ok_and(|parts| !parts.is_empty())
 }
 
 struct GptPartition {
@@ -295,6 +297,21 @@ mod tests {
     #[test]
     fn test_is_gpt_image_rejects_too_small() {
         assert!(!is_gpt_image(&[0u8; 100]));
+    }
+
+    #[test]
+    fn test_is_gpt_image_rejects_header_without_partitions() {
+        let mut image = vec![0u8; 1024];
+        image[510] = 0x55;
+        image[511] = 0xAA;
+        image[446 + 4] = GPT_PROTECTIVE_TYPE;
+        image[446 + 8..446 + 12].copy_from_slice(&1u32.to_le_bytes());
+        image[446 + 12..446 + 16].copy_from_slice(&1u32.to_le_bytes());
+        image[512..520].copy_from_slice(EFI_PART_MAGIC);
+        image[512 + 72..512 + 80].copy_from_slice(&2u64.to_le_bytes());
+        image[512 + 80..512 + 84].copy_from_slice(&1u32.to_le_bytes());
+        image[512 + 84..512 + 88].copy_from_slice(&128u32.to_le_bytes());
+        assert!(!is_gpt_image(&image));
     }
 
     #[test]
