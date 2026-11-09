@@ -472,6 +472,76 @@ class TestContainerFormat:
 
 
 # =============================================================================
+# Tests: Resource naming (with_numeric_identifiers)
+# =============================================================================
+
+def _macbinary_with_resources(resources):
+    """MacBinary file whose resource fork holds `resources`: a list of
+    (type, id, name_or_None, data). Minimal valid fork, names in the name list."""
+    import struct
+    data = b""
+    names = b""
+    by_type = {}
+    for rtype, rid, name, payload in resources:
+        by_type.setdefault(rtype, []).append((rid, name, len(data)))
+        data += struct.pack(">I", len(payload)) + payload
+    type_list = struct.pack(">H", len(by_type) - 1)
+    refs = b""
+    ref_base = 2 + 8 * len(by_type)
+    for rtype, items in by_type.items():
+        type_list += struct.pack(">4sHH", rtype, len(items) - 1, ref_base + len(refs))
+        for rid, name, off in items:
+            if name is None:
+                noff = -1
+            else:
+                noff = len(names)
+                names += bytes([len(name)]) + name
+            refs += struct.pack(">hhIi", rid, noff, off & 0xFFFFFF, 0)
+    tl = type_list + refs
+    rmap = b"\0" * 24 + struct.pack(">HH", 28, 28 + len(tl)) + tl + names
+    fork = struct.pack(">IIII", 256, 256 + len(data), len(data), len(rmap))
+    fork += b"\0" * 240 + data + rmap
+    header = bytearray(128)
+    header[1] = 4
+    header[2:6] = b"Test"
+    header[65:73] = b"APPLtest"
+    struct.pack_into(">II", header, 83, 0, len(fork))
+    return bytes(header) + fork + b"\0" * (-len(fork) % 128)
+
+
+class TestNumericIdentifiers:
+    """Resources are named TYPE/name when named, TYPE/#id otherwise; with
+    with_numeric_identifiers() every resource is TYPE/#id (CLI --numeric)."""
+
+    RESOURCES = [(b"CODE", 1, b"Main", b"\x4e\x75"), (b"CODE", 2, None, b"\x4e\x71")]
+
+    def _resource_paths(self, loader):
+        return sorted(e.path.split("/..namedfork/rsrc/")[1] for e in loader if "/..namedfork/rsrc/" in e.path)
+
+    def test_default_uses_names(self):
+        data = _macbinary_with_resources(self.RESOURCES)
+        paths = self._resource_paths(unretro.Loader(data=data, name="app.bin"))
+        assert paths == ["CODE/#2", "CODE/Main"]
+
+    def test_numeric_identifiers(self):
+        data = _macbinary_with_resources(self.RESOURCES)
+        loader = unretro.Loader(data=data, name="app.bin").with_numeric_identifiers()
+        assert self._resource_paths(loader) == ["CODE/#1", "CODE/#2"]
+
+    def test_numeric_identifiers_can_be_turned_off(self):
+        data = _macbinary_with_resources(self.RESOURCES)
+        loader = unretro.Loader(data=data, name="app.bin").with_numeric_identifiers().with_numeric_identifiers(False)
+        assert self._resource_paths(loader) == ["CODE/#2", "CODE/Main"]
+
+    def test_resource_data_is_unchanged(self):
+        data = _macbinary_with_resources(self.RESOURCES)
+        got = {e.path.split("/..namedfork/rsrc/")[1]: e.read()
+               for e in unretro.Loader(data=data, name="app.bin").with_numeric_identifiers()
+               if "/..namedfork/rsrc/" in e.path}
+        assert got == {"CODE/#1": b"\x4e\x75", "CODE/#2": b"\x4e\x71"}
+
+
+# =============================================================================
 # Tests: Real Test Files (when available)
 # =============================================================================
 

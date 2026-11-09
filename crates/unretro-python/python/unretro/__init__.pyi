@@ -228,6 +228,18 @@ class Loader:
         """
         ...
 
+    def with_numeric_identifiers(self, numeric: bool = True) -> Loader:
+        """
+        Name resources by numeric ID (`TYPE/#id`) instead of by resource name.
+
+        Args:
+            numeric: Whether to use numeric identifiers (default True).
+
+        Returns:
+            A new Loader with the updated setting.
+        """
+        ...
+
     def filter_path(self, prefix: str) -> Loader:
         """
         Filter entries by path prefix.

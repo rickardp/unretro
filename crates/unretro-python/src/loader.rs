@@ -67,6 +67,7 @@ impl EntryFilter {
 pub struct PyLoader {
     source: LoaderSource,
     max_depth: u32,
+    numeric_identifiers: bool,
     filter: EntryFilter,
 }
 
@@ -112,6 +113,7 @@ impl PyLoader {
         Ok(Self {
             source,
             max_depth: 32,
+            numeric_identifiers: false,
             filter: EntryFilter::default(),
         })
     }
@@ -126,6 +128,26 @@ impl PyLoader {
     fn with_max_depth(&self, depth: u32) -> Self {
         Self {
             max_depth: depth,
+            ..self.clone()
+        }
+    }
+
+    /// Name resources by numeric ID instead of by resource name.
+    ///
+    /// Resource-fork entries are normally named `TYPE/name` when the
+    /// resource has a name and `TYPE/#id` otherwise. With this enabled every
+    /// resource is `TYPE/#id` (e.g. `CODE/#1`), so callers can address
+    /// resources by ID regardless of naming (the CLI's `--numeric`).
+    ///
+    /// Args:
+    ///     numeric: Whether to use numeric identifiers (default True).
+    ///
+    /// Returns:
+    ///     A new Loader with the updated setting.
+    #[pyo3(signature = (numeric=true))]
+    fn with_numeric_identifiers(&self, numeric: bool) -> Self {
+        Self {
+            numeric_identifiers: numeric,
             ..self.clone()
         }
     }
@@ -182,18 +204,22 @@ impl PyLoader {
         // Clone config for the background thread
         let source = self.source.clone();
         let max_depth = self.max_depth;
+        let numeric = self.numeric_identifiers;
         let filter = self.filter.clone();
 
         let handle = thread::spawn(move || {
             // Catch panics to prevent Python from hanging forever
             let result = std::panic::catch_unwind(AssertUnwindSafe(|| match &source {
                 LoaderSource::Path(p) => {
-                    let loader = Loader::from_virtual_path(p).with_max_depth(max_depth);
+                    let loader = Loader::from_virtual_path(p)
+                        .with_max_depth(max_depth)
+                        .with_numeric_identifiers(numeric);
                     run_visitor(loader, &filter, &sender)
                 }
                 LoaderSource::Bytes { data, name } => {
-                    let loader =
-                        Loader::from_bytes(Vec::clone(data), name).with_max_depth(max_depth);
+                    let loader = Loader::from_bytes(Vec::clone(data), name)
+                        .with_max_depth(max_depth)
+                        .with_numeric_identifiers(numeric);
                     run_visitor(loader, &filter, &sender)
                 }
             }));
