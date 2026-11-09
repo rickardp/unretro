@@ -7,7 +7,7 @@
 //! - **`BinHex 4.0`** - ASCII encoding for Mac files (`.hqx`)
 //! - **`MacBinary I/II/III`** - Binary encoding for Mac files (`.bin`)
 //! - **`AppleSingle`** - Apple's combined data+resource-fork encoding
-//! - **`AppleDouble`** - Resource-fork sidecar files (handled during visitation)
+//! - **`AppleDouble`** - Resource-fork sidecars (paired during visitation) and standalone files
 //! - **`Resource Fork`** - Native Mac resource-fork parser and container
 
 pub mod apple_double;

@@ -122,6 +122,11 @@ Invalid combinations raise `ValueError`:
 - `ContainerFormat.name` provides a human-readable name.
 - `ContainerFormat.is_multi_file` indicates whether format contains multiple files.
 - `Entry.metadata` exposes optional structured metadata when available.
+- Classic Mac resources are yielded as `<owner>/..namedfork/rsrc/<TYPE>/<name or #id>`
+  (`with_numeric_identifiers()` forces `#id`). AppleDouble sidecars in plain directories
+  are paired like in archives; standalone AppleDouble files and bare resource-fork files
+  root their resources at `<file>/..namedfork/rsrc`. See
+  [docs/USAGE.md](../../docs/USAGE.md#classic-mac-resource-forks).
 
 ## Local Development
 

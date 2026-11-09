@@ -141,6 +141,36 @@ Root-level failures and recoverable nested issues are separated in the report.
 - Copy entry bytes if needed after callback returns.
 - `path` is full virtual path; `container_path` is owning container path; `relative_path()` is path inside that container.
 
+## Classic Mac Resource Forks
+
+Every resource is yielded as `<owner>/..namedfork/rsrc/<TYPE>/<name>` (or `<TYPE>/#<id>`
+with `with_numeric_identifiers(true)` / `--numeric`). `<TYPE>` is the 4-character code,
+or `0xXXXXXXXX` when it is not printable ASCII. `<owner>` depends on where the fork lives:
+
+| Source | `<owner>` | Example resource path |
+|---|---|---|
+| MacBinary / AppleSingle / archive / HFS file `app` | the file | `app.sit/app/..namedfork/rsrc/CODE/#1` |
+| AppleDouble sidecar (`._app`, `__MACOSX/<dir>/._app`) next to `app`, in an archive or a plain directory | the data file `app` | `dir/app/..namedfork/rsrc/CODE/#1` |
+| Standalone AppleDouble (`app.rsrc` from `unar -k visible`, or a `._app` with no companion) | the AppleDouble file itself | `dir/app.rsrc/..namedfork/rsrc/CODE/#1` |
+| Bare resource-fork file (`app.rsrc`) | the fork file itself | `dir/app.rsrc/..namedfork/rsrc/CODE/#1` |
+| Native macOS fork of `app` | the file | `app/..namedfork/rsrc/CODE/#1` |
+
+Notes:
+
+- A paired sidecar is hidden; its companion gets the sidecar's type/creator in `metadata`
+  and its resource fork. A sidecar is paired only when its companion exists in the same
+  container or directory tree.
+- A standalone AppleDouble yields the container entry `<file>/..namedfork/rsrc`, which
+  carries the Finder type/creator, then the resources. Python iteration yields leaves
+  only, so that metadata is visible to Rust `EntryType::All`/`Containers` visitors.
+- AppleDouble is detected by magic `00 05 16 07` with version `0x00010000` or
+  `0x00020000`; such a file is never treated as MacBinary.
+- A bare resource fork has no magic. Without a `/..namedfork/rsrc` path it is detected
+  only if it passes strict structural validation (header, map, type list, reference
+  lists, name list and every resource's length prefix in bounds, data and map not
+  overlapping, at least one resource), and it is probed after every other format.
+  Its resources' `container_path` is `<file>/..namedfork/rsrc`.
+
 ## Virtual Path Behavior
 
 Examples with `archive.zip` containing `inner.sit` containing `a` and `b`:

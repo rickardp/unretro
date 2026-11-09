@@ -1,4 +1,8 @@
+#[cfg(feature = "macintosh")]
+use std::borrow::Cow;
 use std::fs;
+#[cfg(feature = "macintosh")]
+use std::path::Component;
 use std::path::{Path, PathBuf};
 
 use crate::error::{Error, Result};
@@ -14,6 +18,8 @@ struct DirEntry {
 }
 
 pub struct DirectoryContainer {
+    #[cfg(feature = "macintosh")]
+    root: PathBuf,
     prefix: String,
     entries: Vec<DirEntry>,
     depth: u32,
@@ -61,10 +67,29 @@ impl DirectoryContainer {
         entries.sort_by(|a, b| a.path.cmp(&b.path));
 
         Ok(Self {
+            #[cfg(feature = "macintosh")]
+            root: path.to_path_buf(),
             prefix,
             entries,
             depth,
         })
+    }
+}
+
+#[cfg(feature = "macintosh")]
+impl DirectoryContainer {
+    // Sibling paths are relative to the root directory; anything that could
+    // escape it is rejected.
+    fn sibling_path(&self, rel: &str) -> Option<PathBuf> {
+        let rel = Path::new(rel);
+        if rel
+            .components()
+            .all(|c| matches!(c, Component::Normal(_) | Component::CurDir))
+        {
+            Some(self.root.join(rel))
+        } else {
+            None
+        }
     }
 }
 
@@ -79,6 +104,20 @@ impl Container for DirectoryContainer {
             format: ContainerFormat::Directory,
             entry_count: Some(self.entries.len()),
         }
+    }
+
+    #[cfg(feature = "macintosh")]
+    fn read_file(&self, path: &str) -> Option<Cow<'_, [u8]>> {
+        let full = self.sibling_path(path)?;
+        if !full.is_file() {
+            return None;
+        }
+        fs::read(full).ok().map(Cow::Owned)
+    }
+
+    #[cfg(feature = "macintosh")]
+    fn has_file(&self, path: &str) -> bool {
+        self.sibling_path(path).is_some_and(|p| p.is_file())
     }
 
     fn visit(&self, visitor: &mut dyn FnMut(&Entry<'_>) -> Result<bool>) -> Result<()> {

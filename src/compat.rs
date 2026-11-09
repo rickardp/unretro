@@ -6,7 +6,7 @@
 #[cfg(all(feature = "no_std", not(feature = "std")))]
 #[allow(unused_imports)]
 pub use alloc::{
-    borrow::ToOwned,
+    borrow::{Cow, ToOwned},
     boxed::Box,
     string::{String, ToString},
     vec::Vec,
@@ -15,7 +15,7 @@ pub use alloc::{
 #[cfg(not(all(feature = "no_std", not(feature = "std"))))]
 #[allow(unused_imports)]
 pub use std::{
-    borrow::ToOwned,
+    borrow::{Cow, ToOwned},
     boxed::Box,
     string::{String, ToString},
     vec::Vec,

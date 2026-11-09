@@ -818,7 +818,7 @@ where
             {
                 if let Some(rel) = extract_relative_path(entry.path, &prefix) {
                     if let Some(companion) = apple_double::data_fork_path(rel) {
-                        if container.get_file(&companion).is_some() {
+                        if container.has_file(&companion) {
                             return Ok(true);
                         }
                     }
@@ -827,8 +827,8 @@ where
             } else if let Some(rel) = extract_relative_path(entry.path, &prefix) {
                 let sidecar_data = apple_double::resource_fork_paths(rel)
                     .into_iter()
-                    .find_map(|p| container.get_file(&p));
-                match sidecar_data {
+                    .find_map(|p| container.read_file(&p));
+                match sidecar_data.as_deref() {
                     Some(data) if apple_double::is_apple_double_file(data) => {
                         match apple_double::AppleDoubleFile::parse(data) {
                             Ok(ad) => {
@@ -999,17 +999,56 @@ where
         // see the resource fork contents.
         #[cfg(feature = "macintosh")]
         if let Some(rsrc) = ad_resource_fork {
-            if !matches!(detected_format, Some(ContainerFormat::Hfs)) {
-                let rsrc_path = format!("{}/..namedfork/rsrc", entry.path);
-                let rsrc_format = detect_format(&rsrc_path, Some(&rsrc));
-                let mut rsrc_entry = Entry::new(&rsrc_path, entry.container_path, &rsrc);
-                if let Some(format) = rsrc_format {
-                    rsrc_entry = rsrc_entry.with_container_format(format);
-                }
-                report.record_visited_entry(rsrc_format.is_some());
-                if let Err(err) = visitor(&rsrc_entry) {
-                    visitor_error = Some(err);
-                    return Err(visitor_error_sentinel());
+            let rsrc_path = format!("{}/..namedfork/rsrc", entry.path);
+            let filtered_out = matches!(path_filter, PathFilter::Prefix(filter)
+                if !path_matches_prefix(&rsrc_path, filter));
+            if !matches!(detected_format, Some(ContainerFormat::Hfs)) && !filtered_out {
+                let rsrc_entry = Entry::new(&rsrc_path, entry.container_path, &rsrc)
+                    .with_container_format(ContainerFormat::ResourceFork);
+                let recurse = if matches!(entry_types, EntryType::Containers | EntryType::All) {
+                    report.record_visited_entry(true);
+                    match visitor(&rsrc_entry) {
+                        Ok(action) => action == VisitAction::Continue,
+                        Err(err) => {
+                            visitor_error = Some(err);
+                            return Err(visitor_error_sentinel());
+                        }
+                    }
+                } else {
+                    true
+                };
+                // Descend so the sidecar's resources appear exactly as a
+                // native or MacBinary fork's would.
+                if recurse && depth > 1 {
+                    match open_container_internal(
+                        &rsrc,
+                        &rsrc_path,
+                        &rsrc_path,
+                        depth - 1,
+                        options,
+                        Some(ContainerFormat::ResourceFork),
+                    ) {
+                        Ok(nested) => {
+                            if let Err(err) = visit_container_recursive(
+                                nested.as_ref(),
+                                path_filter,
+                                depth - 1,
+                                options,
+                                entry_types,
+                                visitor,
+                                report,
+                                false,
+                            ) {
+                                visitor_error = Some(err);
+                                return Err(visitor_error_sentinel());
+                            }
+                        }
+                        Err(err) => report.push_diagnostic(
+                            TraversalDiagnosticCode::NestedContainerOpenFailed,
+                            &rsrc_path,
+                            err.to_string(),
+                        ),
+                    }
                 }
             }
         }
@@ -1189,10 +1228,22 @@ fn open_container_internal(
             depth,
         )?)),
         #[cfg(feature = "macintosh")]
+        Some(ContainerFormat::AppleDouble) => Ok(Box::new(
+            apple_double::AppleDoubleContainer::from_bytes(data, prefix.to_string(), depth)?,
+        )),
+        #[cfg(feature = "macintosh")]
         Some(ContainerFormat::ResourceFork) => {
+            // A content-detected bare fork is rooted at `{prefix}/..namedfork/rsrc`
+            // so its resources have the same path shape as every other fork.
+            use crate::formats::macintosh::resource_fork::RESOURCE_FORK_SUFFIX;
+            let fork_prefix = if prefix.ends_with(RESOURCE_FORK_SUFFIX) {
+                prefix.to_string()
+            } else {
+                format!("{prefix}{RESOURCE_FORK_SUFFIX}")
+            };
             Ok(Box::new(ResourceForkContainer::from_bytes_with_options(
                 data,
-                prefix.to_string(),
+                fork_prefix,
                 options.numeric_identifiers,
             )?))
         }
@@ -1318,7 +1369,9 @@ where
 /// Detect the container format from a path hint and optional file bytes.
 ///
 /// `path` is used only to prioritize probes; detection is content-based except
-/// for resource-fork suffix detection (`/..namedfork/rsrc`).
+/// for resource-fork suffix detection (`/..namedfork/rsrc`), which accepts any
+/// bytes. Without that suffix a resource fork is recognized only when it passes
+/// strict structural validation.
 #[must_use]
 pub fn detect_format(path: &str, data: Option<&[u8]>) -> Option<ContainerFormat> {
     // Check for resource fork path FIRST (contextual detection)
@@ -1466,6 +1519,9 @@ pub fn detect_format(path: &str, data: Option<&[u8]>) -> Option<ContainerFormat>
         if is_apple_single_file(data) {
             return Some(ContainerFormat::AppleSingle);
         }
+        if apple_double::is_apple_double_file(data) {
+            return Some(ContainerFormat::AppleDouble);
+        }
         if is_macbinary_file(data) {
             return Some(ContainerFormat::MacBinary);
         }
@@ -1514,6 +1570,13 @@ pub fn detect_format(path: &str, data: Option<&[u8]>) -> Option<ContainerFormat>
         }
     }
 
+    // A bare resource fork has no magic; probe it last with strict
+    // structural validation so it cannot shadow a format that has one.
+    #[cfg(feature = "macintosh")]
+    if crate::formats::macintosh::resource_fork::is_resource_fork_file(data) {
+        return Some(ContainerFormat::ResourceFork);
+    }
+
     None
 }
 
@@ -1523,8 +1586,9 @@ pub fn detect_format(path: &str, data: Option<&[u8]>) -> Option<ContainerFormat>
 /// This extracts just the `relative_path` portion.
 #[cfg(feature = "macintosh")]
 fn extract_relative_path<'a>(full_path: &'a str, prefix: &str) -> Option<&'a str> {
-    // Strip the prefix and the following slash
-    let expected_prefix = format!("{prefix}/");
+    // Strip the prefix and the following slash (a directory root given as
+    // `dir/` yields entries `dir/name`, not `dir//name`).
+    let expected_prefix = format!("{}/", prefix.trim_end_matches('/'));
     full_path.strip_prefix(&expected_prefix)
 }
 
@@ -1619,6 +1683,96 @@ mod tests {
             "other.lha/file.mod",
             "archive.lha/file.mod"
         ));
+    }
+
+    #[cfg(feature = "macintosh")]
+    mod mac_detection {
+        use super::*;
+        use crate::formats::macintosh::apple_double::build_apple_double;
+        use crate::formats::macintosh::resource_fork::build_test_fork;
+
+        fn fork() -> Vec<u8> {
+            build_test_fork(&[(*b"CODE", 1, Some("Main"), &[0x4E, 0x75])])
+        }
+
+        fn macbinary_with_fork(fork: &[u8]) -> Vec<u8> {
+            let mut out = vec![0u8; 128];
+            out[1] = 4;
+            out[2..6].copy_from_slice(b"Test");
+            out[65..73].copy_from_slice(b"APPLtest");
+            out[87..91].copy_from_slice(&(fork.len() as u32).to_be_bytes());
+            out.extend_from_slice(fork);
+            out.resize(out.len().next_multiple_of(128), 0);
+            out
+        }
+
+        fn leaf_paths(data: Vec<u8>, name: &str) -> Vec<String> {
+            let mut paths = Vec::new();
+            Loader::from_bytes(data, name)
+                .with_numeric_identifiers(true)
+                .visit(EntryType::Leaves, |e| {
+                    paths.push(e.path.to_string());
+                    Ok(VisitAction::Continue)
+                })
+                .unwrap();
+            paths
+        }
+
+        #[test]
+        fn apple_double_is_detected_and_not_macbinary() {
+            for version in [0x0001_0000, 0x0002_0000] {
+                let ad = build_apple_double(version, &fork(), Some(b"APPLtest"));
+                assert!(!is_macbinary_file(&ad));
+                assert_eq!(
+                    detect_format("app.rsrc", Some(&ad)),
+                    Some(ContainerFormat::AppleDouble)
+                );
+                // A `.bin` extension hint must not override the magic.
+                assert_eq!(
+                    detect_format("app.bin", Some(&ad)),
+                    Some(ContainerFormat::AppleDouble)
+                );
+            }
+        }
+
+        #[test]
+        fn standalone_apple_double_yields_resources_under_its_own_path() {
+            let ad = build_apple_double(0x0002_0000, &fork(), Some(b"APPLtest"));
+            assert_eq!(
+                leaf_paths(ad, "app.rsrc"),
+                ["app.rsrc/..namedfork/rsrc/CODE/#1"]
+            );
+        }
+
+        #[test]
+        fn raw_resource_fork_is_detected_by_content() {
+            assert_eq!(
+                detect_format("app.rsrc", Some(&fork())),
+                Some(ContainerFormat::ResourceFork)
+            );
+            assert_eq!(
+                leaf_paths(fork(), "app.rsrc"),
+                ["app.rsrc/..namedfork/rsrc/CODE/#1"]
+            );
+            // An explicit fork path keeps its single `..namedfork/rsrc`.
+            assert_eq!(
+                leaf_paths(fork(), "app/..namedfork/rsrc"),
+                ["app/..namedfork/rsrc/CODE/#1"]
+            );
+        }
+
+        #[test]
+        fn non_forks_are_not_detected_as_resource_forks() {
+            let fork = fork();
+            assert_eq!(detect_format("x", Some(&fork[..fork.len() - 1])), None);
+            assert_eq!(detect_format("x", Some(&[0u8; 512])), None);
+            let mb = macbinary_with_fork(&fork);
+            assert_eq!(
+                detect_format("x", Some(&mb)),
+                Some(ContainerFormat::MacBinary)
+            );
+            assert!(!crate::formats::macintosh::resource_fork::is_resource_fork_file(&mb));
+        }
     }
 
     // ========================================================================

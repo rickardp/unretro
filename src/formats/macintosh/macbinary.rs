@@ -18,6 +18,12 @@ pub fn is_macbinary_file(data: &[u8]) -> bool {
         return false;
     }
 
+    // AppleSingle/AppleDouble start with 00 05 16 xx and otherwise satisfy
+    // the loose MacBinary I checks below.
+    if data[1] == 0x05 && data[2] == 0x16 && matches!(data[3], 0x00 | 0x07) {
+        return false;
+    }
+
     let header = &data[..MACBINARY_HEADER_SIZE];
 
     // MacBinary III: 'mBIN' signature
@@ -331,5 +337,26 @@ impl Container for AppleSingleContainer {
             format: ContainerFormat::AppleSingle,
             entry_count: Some(if self.resource_fork.is_empty() { 1 } else { 2 }),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn apple_single_and_double_are_never_macbinary() {
+        // Header shaped so the loose MacBinary I checks would otherwise pass:
+        // byte 1 (0x05) is a valid name length, 74/82/101..=125 are zero.
+        for magic in [[0x00, 0x05, 0x16, 0x07], [0x00, 0x05, 0x16, 0x00]] {
+            let mut data = vec![0u8; 256];
+            data[..4].copy_from_slice(&magic);
+            data[4..8].copy_from_slice(&0x0002_0000u32.to_be_bytes());
+            assert!(!is_macbinary_file(&data), "{magic:02X?}");
+        }
+        let mut macbinary = vec![0u8; 256];
+        macbinary[1] = 4;
+        macbinary[2..6].copy_from_slice(b"Test");
+        assert!(is_macbinary_file(&macbinary));
     }
 }

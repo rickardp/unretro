@@ -6,6 +6,106 @@ use crate::{Container, ContainerInfo, Entry};
 
 pub const RESOURCE_FORK_SUFFIX: &str = "/..namedfork/rsrc";
 
+const HEADER_SIZE: usize = 16;
+const MAP_HEADER_SIZE: usize = 28;
+const TYPE_ENTRY_SIZE: usize = 8;
+const REF_ENTRY_SIZE: usize = 12;
+
+fn be16(d: &[u8], at: usize) -> usize {
+    u16::from_be_bytes([d[at], d[at + 1]]) as usize
+}
+
+fn be32(d: &[u8], at: usize) -> usize {
+    u32::from_be_bytes([d[at], d[at + 1], d[at + 2], d[at + 3]]) as usize
+}
+
+/// Strict structural check for a bare resource fork with no path context.
+///
+/// Every offset in the header, map, type list, reference lists and name list
+/// must be in bounds, the data and map areas must not overlap each other or
+/// the header, and every resource's 4-byte length prefix and payload must lie
+/// inside the data area. A fork with no resources is rejected.
+#[must_use]
+pub fn is_resource_fork_file(data: &[u8]) -> bool {
+    validate_resource_fork(data).is_some()
+}
+
+fn validate_resource_fork(data: &[u8]) -> Option<()> {
+    if data.len() < HEADER_SIZE + MAP_HEADER_SIZE + 2 {
+        return None;
+    }
+    let data_offset = be32(data, 0);
+    let map_offset = be32(data, 4);
+    let data_len = be32(data, 8);
+    let map_len = be32(data, 12);
+
+    let data_end = data_offset.checked_add(data_len)?;
+    let map_end = map_offset.checked_add(map_len)?;
+    if data_offset < HEADER_SIZE
+        || map_offset < HEADER_SIZE
+        || data_end > data.len()
+        || map_end > data.len()
+        || map_len < MAP_HEADER_SIZE + 2
+        || (data_len > 0 && data_offset < map_end && map_offset < data_end)
+    {
+        return None;
+    }
+
+    let map = &data[map_offset..map_end];
+    let type_list_offset = be16(map, 24);
+    let name_list_offset = be16(map, 26);
+    if type_list_offset < MAP_HEADER_SIZE
+        || type_list_offset + 2 > map_len
+        || name_list_offset < MAP_HEADER_SIZE
+        || name_list_offset > map_len
+    {
+        return None;
+    }
+
+    // Stored as count - 1; 0xFFFF means an empty fork.
+    let raw_type_count = be16(map, type_list_offset);
+    if raw_type_count == 0xFFFF {
+        return None;
+    }
+    let type_count = raw_type_count + 1;
+    let types_end = 2 + type_count * TYPE_ENTRY_SIZE;
+    if type_list_offset + types_end > map_len {
+        return None;
+    }
+
+    for t in 0..type_count {
+        let entry = type_list_offset + 2 + t * TYPE_ENTRY_SIZE;
+        let ref_count = be16(map, entry + 4) + 1;
+        let ref_list_offset = be16(map, entry + 6);
+        if ref_list_offset < types_end {
+            return None;
+        }
+        let refs_start = type_list_offset + ref_list_offset;
+        if refs_start + ref_count * REF_ENTRY_SIZE > map_len {
+            return None;
+        }
+        for r in 0..ref_count {
+            let reference = refs_start + r * REF_ENTRY_SIZE;
+            let name_offset = be16(map, reference + 2);
+            if name_offset != 0xFFFF {
+                let name_at = name_list_offset + name_offset;
+                if name_at >= map_len || name_at + 1 + map[name_at] as usize > map_len {
+                    return None;
+                }
+            }
+            let res_offset = be32(map, reference + 4) & 0x00FF_FFFF;
+            if res_offset + 4 > data_len {
+                return None;
+            }
+            let res_len = be32(data, data_offset + res_offset);
+            if res_len > data_len - res_offset - 4 {
+                return None;
+            }
+        }
+    }
+    Some(())
+}
+
 #[derive(Debug, Clone)]
 pub struct Resource {
     pub resource_type: [u8; 4],
@@ -309,5 +409,152 @@ impl Container for ResourceForkContainer {
             visitor(&entry)?;
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+pub(crate) type TestResource<'a> = ([u8; 4], i16, Option<&'a str>, &'a [u8]);
+
+/// Minimal well-formed resource fork: `(type, id, name, payload)` per resource.
+#[cfg(test)]
+pub(crate) fn build_test_fork(resources: &[TestResource<'_>]) -> Vec<u8> {
+    let mut data = Vec::new();
+    let mut names = Vec::new();
+    // (type, [(id, name offset, data offset)])
+    #[allow(clippy::type_complexity)]
+    let mut types: Vec<([u8; 4], Vec<(i16, u16, u32)>)> = Vec::new();
+    for (rtype, id, name, payload) in resources {
+        let name_off = name.map_or(0xFFFF, |n| {
+            let off = names.len() as u16;
+            names.push(n.len() as u8);
+            names.extend_from_slice(n.as_bytes());
+            off
+        });
+        let data_off = data.len() as u32;
+        data.extend_from_slice(&(payload.len() as u32).to_be_bytes());
+        data.extend_from_slice(payload);
+        match types.iter_mut().find(|(t, _)| t == rtype) {
+            Some((_, refs)) => refs.push((*id, name_off, data_off)),
+            None => types.push((*rtype, crate::compat::vec![(*id, name_off, data_off)])),
+        }
+    }
+    let mut type_list = ((types.len() as u16).wrapping_sub(1))
+        .to_be_bytes()
+        .to_vec();
+    let mut refs = Vec::new();
+    let refs_base = 2 + 8 * types.len();
+    for (rtype, items) in &types {
+        type_list.extend_from_slice(rtype);
+        type_list.extend_from_slice(&((items.len() - 1) as u16).to_be_bytes());
+        type_list.extend_from_slice(&((refs_base + refs.len()) as u16).to_be_bytes());
+        for (id, name_off, data_off) in items {
+            refs.extend_from_slice(&id.to_be_bytes());
+            refs.extend_from_slice(&name_off.to_be_bytes());
+            refs.extend_from_slice(&data_off.to_be_bytes());
+            refs.extend_from_slice(&[0; 4]);
+        }
+    }
+    type_list.extend_from_slice(&refs);
+    let mut map = crate::compat::vec![0u8; 24];
+    map.extend_from_slice(&28u16.to_be_bytes());
+    map.extend_from_slice(&((28 + type_list.len()) as u16).to_be_bytes());
+    map.extend_from_slice(&type_list);
+    map.extend_from_slice(&names);
+    let mut fork = Vec::new();
+    fork.extend_from_slice(&256u32.to_be_bytes());
+    fork.extend_from_slice(&((256 + data.len()) as u32).to_be_bytes());
+    fork.extend_from_slice(&(data.len() as u32).to_be_bytes());
+    fork.extend_from_slice(&(map.len() as u32).to_be_bytes());
+    fork.resize(256, 0);
+    fork.extend_from_slice(&data);
+    fork.extend_from_slice(&map);
+    fork
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn sample() -> Vec<u8> {
+        build_test_fork(&[
+            (*b"CODE", 1, Some("Main"), &[0x4E, 0x75]),
+            (*b"CODE", 2, None, &[0x4E, 0x71]),
+            ([0, 1, 2, 3], -5, None, b"x"),
+        ])
+    }
+
+    #[test]
+    fn strict_validator_accepts_well_formed_fork() {
+        let fork = sample();
+        assert!(is_resource_fork_file(&fork));
+        let parsed = ResourceFork::parse(&fork).unwrap();
+        assert_eq!(parsed.resources.len(), 3);
+    }
+
+    #[test]
+    fn strict_validator_rejects_truncated_fork() {
+        let fork = sample();
+        for cut in [0, 15, 16, 100, 256, fork.len() - 1] {
+            assert!(!is_resource_fork_file(&fork[..cut]), "cut at {cut}");
+        }
+    }
+
+    #[test]
+    fn strict_validator_rejects_random_bytes() {
+        // Deterministic xorshift noise; also with a plausible 0x100 data offset.
+        let mut state = 0x2545_F491_4F6C_DD1Du64;
+        for len in [16usize, 64, 300, 4096, 65536] {
+            let mut buf: Vec<u8> = (0..len)
+                .map(|_| {
+                    state ^= state << 13;
+                    state ^= state >> 7;
+                    state ^= state << 17;
+                    state as u8
+                })
+                .collect();
+            assert!(!is_resource_fork_file(&buf), "noise len {len}");
+            if len >= 16 {
+                buf[..4].copy_from_slice(&256u32.to_be_bytes());
+                assert!(!is_resource_fork_file(&buf), "noise+offset len {len}");
+            }
+        }
+        assert!(!is_resource_fork_file(&[0u8; 4096]));
+    }
+
+    #[test]
+    fn strict_validator_rejects_structural_damage() {
+        let good = sample();
+        let map_off = 256 + be32(&good, 8);
+
+        let mut overlap = good.clone();
+        overlap[4..8].copy_from_slice(&256u32.to_be_bytes()); // map == data
+        assert!(!is_resource_fork_file(&overlap));
+
+        let mut bad_type_list = good.clone();
+        bad_type_list[map_off + 24..map_off + 26].copy_from_slice(&0xFFF0u16.to_be_bytes());
+        assert!(!is_resource_fork_file(&bad_type_list));
+
+        let mut bad_name_list = good.clone();
+        bad_name_list[map_off + 26..map_off + 28].copy_from_slice(&0xFFF0u16.to_be_bytes());
+        assert!(!is_resource_fork_file(&bad_name_list));
+
+        let mut too_many_types = good.clone();
+        too_many_types[map_off + 28..map_off + 30].copy_from_slice(&0x00FFu16.to_be_bytes());
+        assert!(!is_resource_fork_file(&too_many_types));
+
+        // First reference's data offset points past the data area.
+        let mut bad_ref = good.clone();
+        let first_ref = map_off + 28 + 2 + 2 * 8;
+        bad_ref[first_ref + 5..first_ref + 8].copy_from_slice(&[0x00, 0xFF, 0xFF]);
+        assert!(!is_resource_fork_file(&bad_ref));
+
+        // First resource's length prefix overruns the data area.
+        let mut bad_len = good.clone();
+        bad_len[256..260].copy_from_slice(&0x1000u32.to_be_bytes());
+        assert!(!is_resource_fork_file(&bad_len));
+
+        let empty = build_test_fork(&[]);
+        assert!(ResourceFork::is_valid(&empty));
+        assert!(!is_resource_fork_file(&empty));
     }
 }

@@ -360,6 +360,23 @@ pub(crate) trait Container: Send + Sync {
     fn get_file(&self, _path: &str) -> Option<&[u8]> {
         None // Default implementation for containers that don't support siblings
     }
+
+    /// Like [`get_file`](Self::get_file), but may return owned data.
+    ///
+    /// Used for AppleDouble sidecar pairing.
+    ///
+    /// Containers that load entries on demand (e.g. filesystem directories)
+    /// cannot hand out borrowed slices and override this instead.
+    #[cfg(feature = "macintosh")]
+    fn read_file(&self, path: &str) -> Option<compat::Cow<'_, [u8]>> {
+        self.get_file(path).map(compat::Cow::Borrowed)
+    }
+
+    /// Whether a sibling file exists at `path` (same path rules as `get_file`).
+    #[cfg(feature = "macintosh")]
+    fn has_file(&self, path: &str) -> bool {
+        self.get_file(path).is_some()
+    }
 }
 
 /// Information about a container.

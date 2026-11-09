@@ -1047,3 +1047,243 @@ fn test_directory_container() {
     let has_testfile = entries.iter().any(|(name, _)| name == "testfile.txt");
     assert!(has_testfile, "Should find testfile.txt in directory");
 }
+
+// ============================================================================
+// AppleDouble sidecars, standalone AppleDouble and bare resource forks
+// ============================================================================
+
+/// Minimal resource fork: `(type, id, payload)`, no names.
+fn build_fork(resources: &[(&[u8; 4], i16, &[u8])]) -> Vec<u8> {
+    let mut data = Vec::new();
+    #[allow(clippy::type_complexity)]
+    let mut types: Vec<(&[u8; 4], Vec<(i16, u32)>)> = Vec::new();
+    for (rtype, id, payload) in resources {
+        let off = data.len() as u32;
+        data.extend_from_slice(&(payload.len() as u32).to_be_bytes());
+        data.extend_from_slice(payload);
+        match types.iter_mut().find(|(t, _)| t == rtype) {
+            Some((_, refs)) => refs.push((*id, off)),
+            None => types.push((rtype, vec![(*id, off)])),
+        }
+    }
+    let mut list = ((types.len() as u16) - 1).to_be_bytes().to_vec();
+    let mut refs = Vec::new();
+    let base = 2 + 8 * types.len();
+    for (rtype, items) in &types {
+        list.extend_from_slice(*rtype);
+        list.extend_from_slice(&((items.len() - 1) as u16).to_be_bytes());
+        list.extend_from_slice(&((base + refs.len()) as u16).to_be_bytes());
+        for (id, off) in items {
+            refs.extend_from_slice(&id.to_be_bytes());
+            refs.extend_from_slice(&0xFFFFu16.to_be_bytes());
+            refs.extend_from_slice(&off.to_be_bytes());
+            refs.extend_from_slice(&[0; 4]);
+        }
+    }
+    list.extend_from_slice(&refs);
+    let mut map = vec![0u8; 24];
+    map.extend_from_slice(&28u16.to_be_bytes());
+    map.extend_from_slice(&((28 + list.len()) as u16).to_be_bytes());
+    map.extend_from_slice(&list);
+    let mut fork = Vec::new();
+    for v in [256, 256 + data.len(), data.len(), map.len()] {
+        fork.extend_from_slice(&(v as u32).to_be_bytes());
+    }
+    fork.resize(256, 0);
+    fork.extend_from_slice(&data);
+    fork.extend_from_slice(&map);
+    fork
+}
+
+/// AppleDouble v2 with Finder Info (type/creator) and a resource fork.
+fn build_apple_double(type_creator: &[u8; 8], rsrc: &[u8]) -> Vec<u8> {
+    let mut finder = type_creator.to_vec();
+    finder.resize(32, 0);
+    let mut out = vec![0x00, 0x05, 0x16, 0x07, 0x00, 0x02, 0x00, 0x00];
+    out.extend_from_slice(&[0u8; 16]);
+    out.extend_from_slice(&2u16.to_be_bytes());
+    let first = 26 + 2 * 12;
+    for (id, off, len) in [
+        (9u32, first, finder.len()),
+        (2u32, first + finder.len(), rsrc.len()),
+    ] {
+        out.extend_from_slice(&id.to_be_bytes());
+        out.extend_from_slice(&(off as u32).to_be_bytes());
+        out.extend_from_slice(&(len as u32).to_be_bytes());
+    }
+    out.extend_from_slice(&finder);
+    out.extend_from_slice(rsrc);
+    out
+}
+
+struct TempDir(PathBuf);
+
+impl TempDir {
+    fn new(name: &str) -> Self {
+        let dir = std::env::temp_dir().join(format!("unretro-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        Self(dir)
+    }
+
+    fn write(&self, rel: &str, data: &[u8]) {
+        let path = self.0.join(rel);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, data).unwrap();
+    }
+}
+
+impl Drop for TempDir {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
+/// Leaf paths relative to `root`, plus type/creator where present.
+fn leaves_with_type(root: &std::path::Path) -> Vec<(String, Option<String>)> {
+    let prefix = format!("{}/", root.display());
+    let mut out = Vec::new();
+    Loader::from_path(root)
+        .with_numeric_identifiers(true)
+        .visit(EntryType::Leaves, |e| {
+            let rel = e.path.strip_prefix(&prefix).unwrap_or(e.path).to_string();
+            let tc = e
+                .metadata
+                .and_then(|m| m.type_code.zip(m.creator_code))
+                .map(|(t, c)| {
+                    format!(
+                        "{}{}",
+                        String::from_utf8_lossy(&t),
+                        String::from_utf8_lossy(&c)
+                    )
+                });
+            out.push((rel, tc));
+            Ok(VisitAction::Continue)
+        })
+        .unwrap();
+    out.sort();
+    out
+}
+
+#[test]
+fn test_directory_pairs_apple_double_sidecars() {
+    let fork = build_fork(&[(b"CODE", 1, &[0x4E, 0x75]), (b"CODE", 2, &[0x4E, 0x71])]);
+    let ad = build_apple_double(b"APPLtest", &fork);
+    let dir = TempDir::new("ad-dir");
+    dir.write("app", b"data fork");
+    dir.write("._app", &ad);
+    dir.write("sub/tool", b"tool data");
+    dir.write("sub/._tool", &ad);
+    dir.write("mac/zipped", b"zipped data");
+    dir.write("__MACOSX/mac/._zipped", &ad);
+
+    let app = Some("APPLtest".to_string());
+    let mut expected: Vec<(String, Option<String>)> = Vec::new();
+    for owner in ["app", "sub/tool", "mac/zipped"] {
+        expected.push((owner.to_string(), app.clone()));
+        for id in [1, 2] {
+            expected.push((format!("{owner}/..namedfork/rsrc/CODE/#{id}"), None));
+        }
+    }
+    expected.sort();
+    assert_eq!(leaves_with_type(&dir.0), expected);
+}
+
+#[test]
+fn test_directory_lone_sidecar_is_standalone_apple_double() {
+    let fork = build_fork(&[(b"MENU", 128, b"menu")]);
+    let dir = TempDir::new("ad-lone");
+    dir.write("._orphan", &build_apple_double(b"APPLtest", &fork));
+    dir.write("app.rsrc", &build_apple_double(b"APPLtest", &fork));
+    assert_eq!(
+        leaves_with_type(&dir.0),
+        vec![
+            ("._orphan/..namedfork/rsrc/MENU/#128".to_string(), None),
+            ("app.rsrc/..namedfork/rsrc/MENU/#128".to_string(), None),
+        ]
+    );
+}
+
+#[test]
+fn test_standalone_apple_double_file() {
+    let fork = build_fork(&[(b"CODE", 0, b"jt")]);
+    let dir = TempDir::new("ad-file");
+    dir.write("app.rsrc", &build_apple_double(b"APPLtest", &fork));
+    let path = dir.0.join("app.rsrc");
+    let p = path.display().to_string();
+
+    let data = std::fs::read(&path).unwrap();
+    assert_eq!(
+        unretro::detect_format(&p, Some(&data)),
+        Some(unretro::ContainerFormat::AppleDouble)
+    );
+
+    let mut seen = Vec::new();
+    let report = Loader::from_path(&path)
+        .with_numeric_identifiers(true)
+        .visit_with_report(EntryType::All, |e| {
+            let tc = e.metadata.and_then(|m| m.type_code);
+            seen.push((e.path.to_string(), e.container_format, tc));
+            Ok(VisitAction::Continue)
+        })
+        .unwrap();
+    assert_eq!(
+        report.root_format,
+        Some(unretro::ContainerFormat::AppleDouble)
+    );
+    assert_eq!(
+        seen,
+        vec![
+            (
+                format!("{p}/..namedfork/rsrc"),
+                Some(unretro::ContainerFormat::ResourceFork),
+                Some(*b"APPL")
+            ),
+            (format!("{p}/..namedfork/rsrc/CODE/#0"), None, None),
+        ]
+    );
+}
+
+#[test]
+fn test_bare_resource_fork_file() {
+    let fork = build_fork(&[(b"STR ", -16396, b"\x05hello")]);
+    let dir = TempDir::new("raw-fork");
+    dir.write("app.rsrc", &fork);
+    dir.write("noise.bin", &fork[..fork.len() - 3]);
+    let path = dir.0.join("app.rsrc");
+    let p = path.display().to_string();
+
+    assert_eq!(
+        unretro::detect_format(&p, Some(&fork)),
+        Some(unretro::ContainerFormat::ResourceFork)
+    );
+    let mut seen = Vec::new();
+    Loader::from_path(&path)
+        .with_numeric_identifiers(true)
+        .visit(EntryType::Leaves, |e| {
+            seen.push((
+                e.path.to_string(),
+                e.container_path.to_string(),
+                e.data.to_vec(),
+            ));
+            Ok(VisitAction::Continue)
+        })
+        .unwrap();
+    assert_eq!(
+        seen,
+        vec![(
+            format!("{p}/..namedfork/rsrc/STR /#-16396"),
+            format!("{p}/..namedfork/rsrc"),
+            b"\x05hello".to_vec()
+        )]
+    );
+
+    // A truncated fork stays an opaque leaf.
+    assert_eq!(
+        leaves_with_type(&dir.0),
+        vec![
+            ("app.rsrc/..namedfork/rsrc/STR /#-16396".to_string(), None),
+            ("noise.bin".to_string(), None),
+        ]
+    );
+}

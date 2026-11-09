@@ -67,6 +67,7 @@ Important internals:
 - For `from_path`, data access can be memory-mapped using `MmapStrategy`.
 - `from_virtual_path` uses `parse_virtual_path` to split filesystem archive path and internal path filter.
 - Macintosh special handling includes AppleDouble integration and optional native resource-fork traversal.
+- AppleDouble sidecar pairing runs in `visit_container_recursive` for every container, including `DirectoryContainer`. It looks siblings up through `Container::has_file`/`read_file` (relative to the container root); the default implementations wrap `get_file`, and `DirectoryContainer` reads from disk.
 
 ## Path Model
 
@@ -86,6 +87,11 @@ Resource fork paths use `..namedfork/rsrc` conventions in virtual path space, fo
 - `file.app/..namedfork/rsrc/SOUN/#128`
 
 These paths are exposed consistently so CLI/Python/Rust consumers can reason about them uniformly.
+Sources without a native fork use the same shape: a paired AppleDouble sidecar puts the
+resources under its data file, and a standalone AppleDouble or a bare resource-fork file
+puts them under `<file>/..namedfork/rsrc` (a content-detected `ResourceFork` container
+appends the suffix to its prefix when the path does not already end in it).
+See [USAGE.md](USAGE.md#classic-mac-resource-forks).
 
 ## Path Sanitization Contracts
 

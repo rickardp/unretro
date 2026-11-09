@@ -475,9 +475,9 @@ class TestContainerFormat:
 # Tests: Resource naming (with_numeric_identifiers)
 # =============================================================================
 
-def _macbinary_with_resources(resources):
-    """MacBinary file whose resource fork holds `resources`: a list of
-    (type, id, name_or_None, data). Minimal valid fork, names in the name list."""
+def _resource_fork(resources):
+    """Minimal valid resource fork holding `resources`: a list of
+    (type, id, name_or_None, data), names in the name list."""
     import struct
     data = b""
     names = b""
@@ -500,7 +500,13 @@ def _macbinary_with_resources(resources):
     tl = type_list + refs
     rmap = b"\0" * 24 + struct.pack(">HH", 28, 28 + len(tl)) + tl + names
     fork = struct.pack(">IIII", 256, 256 + len(data), len(data), len(rmap))
-    fork += b"\0" * 240 + data + rmap
+    return fork + b"\0" * 240 + data + rmap
+
+
+def _macbinary_with_resources(resources):
+    """MacBinary file whose resource fork holds `resources` (see _resource_fork)."""
+    import struct
+    fork = _resource_fork(resources)
     header = bytearray(128)
     header[1] = 4
     header[2:6] = b"Test"
@@ -539,6 +545,114 @@ class TestNumericIdentifiers:
                for e in unretro.Loader(data=data, name="app.bin").with_numeric_identifiers()
                if "/..namedfork/rsrc/" in e.path}
         assert got == {"CODE/#1": b"\x4e\x75", "CODE/#2": b"\x4e\x71"}
+
+
+# =============================================================================
+# Tests: AppleDouble sidecars, standalone AppleDouble, bare resource forks
+# =============================================================================
+
+def _apple_double(resources, type_creator=b"APPLtest", version=0x00020000):
+    """AppleDouble file: Finder Info (type/creator) + resource fork entry."""
+    import struct
+    fork = _resource_fork(resources)
+    finder = type_creator + b"\0" * 24
+    first = 26 + 2 * 12
+    out = struct.pack(">II16sH", 0x00051607, version, b"", 2)
+    out += struct.pack(">III", 9, first, len(finder))
+    out += struct.pack(">III", 2, first + len(finder), len(fork))
+    return out + finder + fork
+
+
+class TestAppleDoubleAndResourceForks:
+    """Resources always appear as `<owner>/..namedfork/rsrc/<TYPE>/#<id>`."""
+
+    RESOURCES = [(b"CODE", 1, b"Main", b"\x4e\x75"), (b"CODE", 2, None, b"\x4e\x71")]
+
+    @staticmethod
+    def _leaves(root):
+        """{relative path: (data, type_code, creator_code)}; data is read during
+        iteration because entries are only valid until the iterator advances."""
+        loader = unretro.Loader(path=str(root)).with_numeric_identifiers()
+        prefix = str(root) + "/"
+        out = {}
+        for e in loader:
+            rel = e.path[len(prefix):] if e.path.startswith(prefix) else e.path
+            meta = e.metadata
+            out[rel] = (e.read(), meta and meta.type_code, meta and meta.creator_code)
+        return out
+
+    def test_directory_pairs_sidecars(self, tmp_path):
+        ad = _apple_double(self.RESOURCES)
+        (tmp_path / "app").write_bytes(b"data fork")
+        (tmp_path / "._app").write_bytes(ad)
+        (tmp_path / "sub").mkdir()
+        (tmp_path / "sub" / "tool").write_bytes(b"tool")
+        (tmp_path / "sub" / "._tool").write_bytes(ad)
+        (tmp_path / "__MACOSX").mkdir()
+        (tmp_path / "zipped").write_bytes(b"zipped")
+        (tmp_path / "__MACOSX" / "._zipped").write_bytes(ad)
+
+        leaves = self._leaves(tmp_path)
+        expected = set()
+        for owner in ("app", "sub/tool", "zipped"):
+            expected |= {owner, f"{owner}/..namedfork/rsrc/CODE/#1", f"{owner}/..namedfork/rsrc/CODE/#2"}
+        assert set(leaves) == expected
+        assert leaves["app"] == (b"data fork", "APPL", "test")
+        assert leaves["sub/tool"] == (b"tool", "APPL", "test")
+        assert leaves["app/..namedfork/rsrc/CODE/#1"][0] == b"\x4e\x75"
+
+    def test_standalone_apple_double(self, tmp_path):
+        path = tmp_path / "app.rsrc"
+        path.write_bytes(_apple_double(self.RESOURCES))
+        assert unretro.detect_format(str(path)) == unretro.ContainerFormat.AppleDouble
+
+        loader = unretro.Loader(path=str(path)).with_numeric_identifiers()
+        got = {e.path: e.read() for e in loader}
+        rsrc = f"{path}/..namedfork/rsrc"
+        assert got == {f"{rsrc}/CODE/#1": b"\x4e\x75", f"{rsrc}/CODE/#2": b"\x4e\x71"}
+
+    @pytest.mark.parametrize("version", [0x00010000, 0x00020000])
+    def test_apple_double_is_not_macbinary(self, tmp_path, version):
+        path = tmp_path / "app.bin"
+        path.write_bytes(_apple_double(self.RESOURCES, version=version))
+        assert unretro.detect_format(str(path)) == unretro.ContainerFormat.AppleDouble
+        assert not any(e.path.endswith("/_____") for e in unretro.Loader(path=str(path)))
+
+    def test_bare_resource_fork(self, tmp_path):
+        path = tmp_path / "app.rsrc"
+        path.write_bytes(_resource_fork(self.RESOURCES))
+        assert unretro.detect_format(str(path)) == unretro.ContainerFormat.ResourceFork
+
+        loader = unretro.Loader(path=str(path)).with_numeric_identifiers()
+        got = {e.path: e.read() for e in loader}
+        rsrc = f"{path}/..namedfork/rsrc"
+        assert got == {f"{rsrc}/CODE/#1": b"\x4e\x75", f"{rsrc}/CODE/#2": b"\x4e\x71"}
+
+    def test_bare_resource_fork_in_directory(self, tmp_path):
+        (tmp_path / "app.rsrc").write_bytes(_resource_fork(self.RESOURCES))
+        assert set(self._leaves(tmp_path)) == {
+            "app.rsrc/..namedfork/rsrc/CODE/#1",
+            "app.rsrc/..namedfork/rsrc/CODE/#2",
+        }
+
+    def test_random_bytes_are_not_a_resource_fork(self, tmp_path):
+        import random
+        rng = random.Random(1234)
+        for size in (16, 300, 4096):
+            path = tmp_path / f"noise{size}"
+            path.write_bytes(bytes(rng.getrandbits(8) for _ in range(size)))
+            assert unretro.detect_format(str(path)) is None
+
+    def test_truncated_resource_fork_is_not_detected(self, tmp_path):
+        fork = _resource_fork(self.RESOURCES)
+        path = tmp_path / "cut.rsrc"
+        path.write_bytes(fork[:-1])
+        assert unretro.detect_format(str(path)) is None
+
+    def test_macbinary_is_not_a_resource_fork(self, tmp_path):
+        path = tmp_path / "app.dat"
+        path.write_bytes(_macbinary_with_resources(self.RESOURCES))
+        assert unretro.detect_format(str(path)) == unretro.ContainerFormat.MacBinary
 
 
 # =============================================================================

@@ -74,6 +74,12 @@ Default features are `std` + `full`.
 
 Feature flags are described in [Cargo.toml](Cargo.toml).
 
+Classic Mac resources always appear as `<owner>/..namedfork/rsrc/<TYPE>/<name or #id>`,
+whether the fork comes from MacBinary/AppleSingle/archives/HFS, an AppleDouble sidecar
+(`._name`, `__MACOSX/.../._name`, paired in archives and plain directories alike), a
+standalone AppleDouble file, or a bare resource-fork file. See
+[docs/USAGE.md](docs/USAGE.md#classic-mac-resource-forks).
+
 ## Stability and Scope
 
 - Traversal is visitor-based (`Loader::visit`, `Loader::visit_with_report`).
