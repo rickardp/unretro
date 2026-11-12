@@ -46,11 +46,16 @@ Run these before opening a PR when relevant to your changes.
 cargo test
 cargo test --no-default-features
 cargo test --no-default-features --features std,common
+cargo test --no-default-features --features std,xz
 cargo test --no-default-features --features std,macintosh
 cargo test --no-default-features --features std,amiga
 cargo clippy --all-targets --all-features
 cargo fmt --all -- --check
+cargo check --lib --target wasm32-unknown-unknown --no-default-features --features no_std,wasm
 ```
+
+CI runs all of these. The last one guards the `no_std` + `wasm32` build of the native
+decoders (it needs `rustup target add wasm32-unknown-unknown`).
 
 ### Python binding checks
 
@@ -104,6 +109,44 @@ UNRETRO_STUFFIT_ORACLE=/path/to/oracle cargo test --all-features --lib sit::
   crate's) use `std`: `cargo test --no-default-features --features no_std,...` does
   not compile. Run them with `std` enabled (`--all-features` is fine) and check the
   `no_std` build with `cargo check --no-default-features --features no_std,macintosh`.
+
+The ARJ reader (`src/formats/dos/arj.rs`) is clean-room as well: it is written from
+ARJ's `TECHNOTE` header description and from black-box experiments with the `arj`
+tool, without consulting the source of any ARJ or LHA implementation. Keep it that
+way. `testdata/arj/` holds synthetic archives (see its `README.md`);
+`tests/arj_fixtures.rs` checks them through the public API.
+
+The HFS Plus/HFSX reader (`src/formats/macintosh/hfsplus.rs`) is clean-room as well: it
+is written from Apple Technical Note TN1150 "HFS Plus Volume Format" and from black-box
+experiments with `hdiutil` and mounted volumes, without consulting the source of any
+HFS Plus implementation. Keep it that way. `testdata/hfsplus/` holds images made by
+macOS with `manifest.tsv` (expected paths, sizes and FNV-1a 64 hashes; see its
+`README.md`); `tests/hfsplus_fixtures.rs` checks them through the public API, and the
+unit tests in `hfsplus.rs` and `hfs.rs` cover synthetic and hostile volumes.
+
+## LHA Reader
+
+The LHA reader (`src/formats/amiga/lzh/`) is a clean-room implementation too: it is
+written only from the prose specification in `docs/lha/`. Do not consult the source of
+other LHA implementations when changing it; if the specification is unclear or wrong
+against the test data, fix the specification first.
+
+- `testdata/lha/` holds synthetic archives with `manifest.tsv` (expected paths, lengths,
+  CRC-16 and FNV-1a 64 hashes, confirmed by independent tools; see its `README.md`);
+  `tests/lha_fixtures.rs` checks them through the public API, and the unit tests under
+  `lzh/` check the header parser and each decoder. Forms the specification describes
+  that no fixture holds (and hostile inputs) are built byte by byte in those tests.
+- The same tests also check a local manifest of real archives when `UNRETRO_LHA_ORACLE`
+  names its directory (never committed). When it is unset they print
+  `UNRETRO_LHA_ORACLE not set, skipping ...` and pass:
+
+```bash
+UNRETRO_LHA_ORACLE=/path/to/oracle cargo test --all-features --test lha_fixtures
+UNRETRO_LHA_ORACLE=/path/to/oracle cargo test --all-features --lib lzh::
+```
+
+- Check the `no_std` build with
+  `cargo check --no-default-features --features no_std,amiga`.
 
 ## Adding a New Format
 

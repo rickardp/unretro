@@ -1,0 +1,481 @@
+set	kind	path	size	fnv64
+plain	data	Read Me.txt	1500	ef509d1650f4b570
+plain	data	Docs/readme.txt	14	458c7007e0e978f8
+plain	data	Docs/Notes/Deep/nested.txt	725	9cb2476f74142f54
+plain	empty	empty.txt	0	cbf29ce484222325
+plain	data	Forks/both.bin	3000	747dbb2c36572fa0
+plain	rsrc	Forks/both.bin	1070	0633b2566ea2ee83
+plain	res	Forks/both.bin/..namedfork/rsrc/TEXT/#128	12	b4f2bf9f32c9f43d
+plain	res	Forks/both.bin/..namedfork/rsrc/TEXT/#129	700	c93830bff7d733eb
+plain	res	Forks/both.bin/..namedfork/rsrc/STR#/#-5	8	ef1e36375c34f543
+plain	data	Forks/rsrc-only	0	cbf29ce484222325
+plain	rsrc	Forks/rsrc-only	2810	c0d2f3c8d4194433
+plain	res	Forks/rsrc-only/..namedfork/rsrc/DATA/#0	2500	f336593b8016a21c
+plain	data	Names/Café déjà vu Ångström.txt	15	d8cd7a1296481eaa
+plain	data	Names/日本語のファイル.txt	4	e062a19100c0fb69
+plain	data	Names/party 🎉 time.txt	6	834a69193c9539d5
+plain	data	Names/Date 11_12_98.txt	25	ffc2a1fbcdb19199
+plain	data	Names/Über_Ordner/inside.txt	43	4c4d0ff1ace5fcd6
+plain	data	Links/original.txt	5000	e65e20ffc1618f97
+plain	data	Links/hardlink.txt	5000	e65e20ffc1618f97
+plain	data	Links/Elsewhere/third name.txt	5000	e65e20ffc1618f97
+plain	symlink	Links/symlink.txt	0	0000000000000000
+plain	symlink	Links/symlink to folder	0	0000000000000000
+plain	data	Many/tiny 000.txt	14	573ff6176148e287
+plain	data	Many/tiny 001.txt	14	573c94176146062a
+plain	data	Many/tiny 002.txt	14	5746b617614e9475
+plain	data	Many/tiny 003.txt	14	57434c17614baa80
+plain	data	Many/tiny 004.txt	14	57324e17613d3ab3
+plain	data	Many/tiny 005.txt	14	572eec17613a5e56
+plain	data	Many/tiny 006.txt	14	57392e1761432301
+plain	data	Many/tiny 007.txt	14	5735b41761401ddc
+plain	data	Many/tiny 008.txt	14	5724b6176131ae0f
+plain	data	Many/tiny 009.txt	14	57215417612ed1b2
+plain	data	Many/tiny 010.txt	14	4fdcab175d75f80c
+plain	data	Many/tiny 011.txt	14	4fe025175d78fd31
+plain	data	Many/tiny 012.txt	14	4fd5e3175d703886
+plain	data	Many/tiny 013.txt	14	4fd945175d7314e3
+plain	data	Many/tiny 014.txt	14	4fea43175d8184b0
+plain	data	Many/tiny 015.txt	14	4fedad175d846ea5
+plain	data	Many/tiny 016.txt	14	4fe38b175d7be05a
+plain	data	Many/tiny 017.txt	14	4fe6ed175d7ebcb7
+plain	data	Many/tiny 018.txt	14	4fc18b175d5ef9f4
+plain	data	Many/tiny 019.txt	14	4fc4e5175d61c8b9
+plain	data	Many/tiny 020.txt	14	46c684175831b63d
+plain	data	Many/tiny 021.txt	14	46c31a17582ecc48
+plain	data	Many/tiny 022.txt	14	46bfa417582bcdef
+plain	data	Many/tiny 023.txt	14	46bc42175828f192
+plain	data	Many/tiny 024.txt	14	46b8dc1758260e69
+plain	data	Many/tiny 025.txt	14	46b5821758233fa4
+plain	data	Many/tiny 026.txt	14	46b21c1758205c7b
+plain	data	Many/tiny 027.txt	14	46aeba17581d801e
+plain	data	Many/tiny 028.txt	14	46e1a4175848b455
+plain	data	Many/tiny 029.txt	14	46de3a175845ca60
+plain	data	Many/tiny 030.txt	14	3db0391752ed3742
+plain	data	Many/tiny 031.txt	14	3db39b1752f0139f
+plain	data	Many/tiny 032.txt	14	3db7111752f311f8
+plain	data	Many/tiny 033.txt	14	3dba7b1752f5fbed
+plain	data	Many/tiny 034.txt	14	3da2b11752e1c5ce
+plain	data	Many/tiny 035.txt	14	3da6131752e4a22b
+plain	data	Many/tiny 036.txt	14	3da9791752e78554
+plain	data	Many/tiny 037.txt	14	3dacd31752ea5419
+plain	data	Many/tiny 038.txt	14	3dcb791753046bba
+plain	data	Many/tiny 039.txt	14	3dcedb1753074817
+plain	data	Many/tiny 040.txt	14	349a0a174da8e7db
+plain	data	Many/tiny 041.txt	14	3496a8174da60b7e
+plain	data	Many/tiny 042.txt	14	34a0ca174dae99c9
+plain	data	Many/tiny 043.txt	14	349d70174dabcb04
+plain	data	Many/tiny 044.txt	14	34a792174db4594f
+plain	data	Many/tiny 045.txt	14	34a430174db17cf2
+plain	data	Many/tiny 046.txt	14	34ae72174dba419d
+plain	data	Many/tiny 047.txt	14	34ab08174db757a8
+plain	data	Many/tiny 048.txt	14	34b52a174dbfe5f3
+plain	data	Many/tiny 049.txt	14	34b1c8174dbd0996
+plain	data	Many/tiny 050.txt	14	2bf07f1748c0ce00
+plain	data	Many/tiny 051.txt	14	2bf3e91748c3b7f5
+plain	data	Many/tiny 052.txt	14	2be9c71748bb29aa
+plain	data	Many/tiny 053.txt	14	2bed291748be0607
+plain	data	Many/tiny 054.txt	14	2be2e71748b5415c
+plain	data	Many/tiny 055.txt	14	2be6611748b84681
+plain	data	Many/tiny 056.txt	14	2bdc1f1748af81d6
+plain	data	Many/tiny 057.txt	14	2bdf811748b25e33
+plain	data	Many/tiny 058.txt	14	2bd55f1748a9cfe8
+plain	data	Many/tiny 059.txt	14	2bd8c91748acb9dd
+plain	data	Many/tiny 060.txt	14	248d581744ee20b1
+plain	data	Many/tiny 061.txt	14	2489de1744eb1b8c
+plain	data	Many/tiny 062.txt	14	2486781744e83863
+plain	data	Many/tiny 063.txt	14	2483161744e55c06
+plain	data	Many/tiny 064.txt	14	249ae01744f99225
+plain	data	Many/tiny 065.txt	14	2497761744f6a830
+plain	data	Many/tiny 066.txt	14	2494201744f3e037
+plain	data	Many/tiny 067.txt	14	2490be1744f103da
+plain	data	Many/tiny 068.txt	14	2472181744d6ec39
+plain	data	Many/tiny 069.txt	14	246ebe1744d41d74
+plain	data	Many/tiny 070.txt	14	1b770d173fa9a1b6
+plain	data	Many/tiny 071.txt	14	1b7a6f173fac7e13
+plain	data	Many/tiny 072.txt	14	1b7dd5173faf613c
+plain	data	Many/tiny 073.txt	14	1b814f173fb26661
+plain	data	Many/tiny 074.txt	14	1b84b5173fb5498a
+plain	data	Many/tiny 075.txt	14	1b8817173fb825e7
+plain	data	Many/tiny 076.txt	14	1b8b6d173fbaede0
+plain	data	Many/tiny 077.txt	14	1b8ed7173fbdd7d5
+plain	data	Many/tiny 078.txt	14	1b5bed173f92a39e
+plain	data	Many/tiny 079.txt	14	1b5f4f173f957ffb
+plain	data	Many/tiny 080.txt	14	1260ce173a65371f
+plain	data	Many/tiny 081.txt	14	125d6c173a625ac2
+plain	data	Many/tiny 082.txt	14	1267ae173a6b1f6d
+plain	data	Many/tiny 083.txt	14	126444173a683578
+plain	data	Many/tiny 084.txt	14	125346173a59c5ab
+plain	data	Many/tiny 085.txt	14	124fe4173a56e94e
+plain	data	Many/tiny 086.txt	14	125a06173a5f7799
+plain	data	Many/tiny 087.txt	14	1256ac173a5ca8d4
+plain	data	Many/tiny 088.txt	14	127c0e173a7c6b97
+plain	data	Many/tiny 089.txt	14	1278ac173a798f3a
+plain	data	Many/tiny 090.txt	14	094aa3173520ee84
+plain	data	Many/tiny 091.txt	14	094dfd173523bd49
+plain	data	Many/tiny 092.txt	14	0943db17351b2efe
+plain	data	Many/tiny 093.txt	14	09473d17351e0b5b
+plain	data	Many/tiny 094.txt	14	09583b17352c7b28
+plain	data	Many/tiny 095.txt	14	095ba517352f651d
+plain	data	Many/tiny 096.txt	14	095163173526a072
+plain	data	Many/tiny 097.txt	14	0954c51735297ccf
+plain	data	Many/tiny 098.txt	14	0965c3173537ec9c
+plain	data	Many/tiny 099.txt	14	09693d17353af1c1
+plain	data	Many/tiny 100.txt	14	f6d35e10e21291b2
+plain	data	Many/tiny 101.txt	14	f6d6c010e2156e0f
+plain	data	Many/tiny 102.txt	14	f6da3610e2186c68
+plain	data	Many/tiny 103.txt	14	f6dda010e21b565d
+plain	data	Many/tiny 104.txt	14	f6c5d610e207203e
+plain	data	Many/tiny 105.txt	14	f6c93810e209fc9b
+plain	data	Many/tiny 106.txt	14	f6cc9e10e20cdfc4
+plain	data	Many/tiny 107.txt	14	f6cff810e20fae89
+plain	data	Many/tiny 108.txt	14	f6ee9e10e229c62a
+plain	data	Many/tiny 109.txt	14	f6f20010e22ca287
+plain	data	Many/tiny 110.txt	14	ffe9a910e75710ad
+plain	data	Many/tiny 111.txt	14	ffe63f10e75426b8
+plain	data	Many/tiny 112.txt	14	ffe2c910e751285f
+plain	data	Many/tiny 113.txt	14	ffdf6710e74e4c02
+plain	data	Many/tiny 114.txt	14	ffdc0110e74b68d9
+plain	data	Many/tiny 115.txt	14	ffd8a710e7489a14
+plain	data	Many/tiny 116.txt	14	ffd54110e745b6eb
+plain	data	Many/tiny 117.txt	14	ffd1df10e742da8e
+plain	data	Many/tiny 118.txt	14	0004c910e76e0ec5
+plain	data	Many/tiny 119.txt	14	00015f10e76b24d0
+plain	data	Many/tiny 120.txt	14	08ffd010ec9b527c
+plain	data	Many/tiny 121.txt	14	09034a10ec9e57a1
+plain	data	Many/tiny 122.txt	14	08f90810ec9592f6
+plain	data	Many/tiny 123.txt	14	08fc6a10ec986f53
+plain	data	Many/tiny 124.txt	14	090d6810eca6df20
+plain	data	Many/tiny 125.txt	14	0910d210eca9c915
+plain	data	Many/tiny 126.txt	14	0906b010eca13aca
+plain	data	Many/tiny 127.txt	14	090a1210eca41727
+plain	data	Many/tiny 128.txt	14	08e4b010ec845464
+plain	data	Many/tiny 129.txt	14	08e80a10ec872329
+plain	data	Many/tiny 130.txt	14	12161b10f1dfd177
+plain	data	Many/tiny 131.txt	14	1212b910f1dcf51a
+plain	data	Many/tiny 132.txt	14	121cdb10f1e58365
+plain	data	Many/tiny 133.txt	14	12197110f1e29970
+plain	data	Many/tiny 134.txt	14	12087310f1d429a3
+plain	data	Many/tiny 135.txt	14	12051110f1d14d46
+plain	data	Many/tiny 136.txt	14	120f5310f1da11f1
+plain	data	Many/tiny 137.txt	14	120bd910f1d70ccc
+plain	data	Many/tiny 138.txt	14	11fadb10f1c89cff
+plain	data	Many/tiny 139.txt	14	11f77910f1c5c0a2
+plain	data	Many/tiny 140.txt	14	d49a3210cecefc26
+plain	data	Many/tiny 141.txt	14	d49d9410ced1d883
+plain	data	Many/tiny 142.txt	14	d4a0fa10ced4bbac
+plain	data	Many/tiny 143.txt	14	d4a47410ced7c0d1
+plain	data	Many/tiny 144.txt	14	d4a7da10cedaa3fa
+plain	data	Many/tiny 145.txt	14	d4ab3c10cedd8057
+plain	data	Many/tiny 146.txt	14	d4ae9210cee04850
+plain	data	Many/tiny 147.txt	14	d4b1fc10cee33245
+plain	data	Many/tiny 148.txt	14	d47f1210ceb7fe0e
+plain	data	Many/tiny 149.txt	14	d4827410cebada6b
+plain	data	Many/tiny 150.txt	14	ddb07d10d4137b21
+plain	data	Many/tiny 151.txt	14	ddad0310d41075fc
+plain	data	Many/tiny 152.txt	14	dda99d10d40d92d3
+plain	data	Many/tiny 153.txt	14	dda63b10d40ab676
+plain	data	Many/tiny 154.txt	14	ddbe0510d41eec95
+plain	data	Many/tiny 155.txt	14	ddba9b10d41c02a0
+plain	data	Many/tiny 156.txt	14	ddb74510d4193aa7
+plain	data	Many/tiny 157.txt	14	ddb3e310d4165e4a
+plain	data	Many/tiny 158.txt	14	dd953d10d3fc46a9
+plain	data	Many/tiny 159.txt	14	dd91e310d3f977e4
+plain	data	Many/tiny 160.txt	14	e6c6a410d957bcf0
+plain	data	Many/tiny 161.txt	14	e6ca0e10d95aa6e5
+plain	data	Many/tiny 162.txt	14	e6bfec10d952189a
+plain	data	Many/tiny 163.txt	14	e6c34e10d954f4f7
+plain	data	Many/tiny 164.txt	14	e6b90c10d94c304c
+plain	data	Many/tiny 165.txt	14	e6bc8610d94f3571
+plain	data	Many/tiny 166.txt	14	e6b24410d94670c6
+plain	data	Many/tiny 167.txt	14	e6b5a610d9494d23
+plain	data	Many/tiny 168.txt	14	e6ab8410d940bed8
+plain	data	Many/tiny 169.txt	14	e6aeee10d943a8cd
+plain	data	Many/tiny 170.txt	14	ef702f10de3fd6cb
+plain	data	Many/tiny 171.txt	14	ef6ccd10de3cfa6e
+plain	data	Many/tiny 172.txt	14	ef76ef10de4588b9
+plain	data	Many/tiny 173.txt	14	ef739510de42b9f4
+plain	data	Many/tiny 174.txt	14	ef7db710de4b483f
+plain	data	Many/tiny 175.txt	14	ef7a5510de486be2
+plain	data	Many/tiny 176.txt	14	ef849710de51308d
+plain	data	Many/tiny 177.txt	14	ef812d10de4e4698
+plain	data	Many/tiny 178.txt	14	ef8b4f10de56d4e3
+plain	data	Many/tiny 179.txt	14	ef87ed10de53f886
+plain	data	Many/tiny 180.txt	14	b2611610bb8b81ca
+plain	data	Many/tiny 181.txt	14	b2647810bb8e5e27
+plain	data	Many/tiny 182.txt	14	b267ce10bb912620
+plain	data	Many/tiny 183.txt	14	b26b3810bb941015
+plain	data	Many/tiny 184.txt	14	b2536e10bb7fd9f6
+plain	data	Many/tiny 185.txt	14	b256d010bb82b653
+plain	data	Many/tiny 186.txt	14	b25a3610bb85997c
+plain	data	Many/tiny 187.txt	14	b25db010bb889ea1
+plain	data	Many/tiny 188.txt	14	b245d610bb744d52
+plain	data	Many/tiny 189.txt	14	b2493810bb7729af
+plain	data	Many/tiny 190.txt	14	bb774110c0cfca65
+plain	data	Many/tiny 191.txt	14	bb73d710c0cce070
+plain	data	Many/tiny 192.txt	14	bb708110c0ca1877
+plain	data	Many/tiny 193.txt	14	bb6d1f10c0c73c1a
+plain	data	Many/tiny 194.txt	14	bb69b910c0c458f1
+plain	data	Many/tiny 195.txt	14	bb663f10c0c153cc
+plain	data	Many/tiny 196.txt	14	bb62d910c0be70a3
+plain	data	Many/tiny 197.txt	14	bb5f7710c0bb9446
+plain	data	Many/tiny 198.txt	14	bb5c2110c0b8cc4d
+plain	data	Many/tiny 199.txt	14	bb58b710c0b5e258
+plain	data	Many/tiny 200.txt	14	acd16228ab1081c5
+plain	data	Many/tiny 201.txt	14	accdf828ab0d97d0
+plain	data	Many/tiny 202.txt	14	accaa228ab0acfd7
+plain	data	Many/tiny 203.txt	14	acc74028ab07f37a
+plain	data	Many/tiny 204.txt	14	acc3da28ab051051
+plain	data	Many/tiny 205.txt	14	acc06028ab020b2c
+plain	data	Many/tiny 206.txt	14	acbcfa28aaff2803
+plain	data	Many/tiny 207.txt	14	acb99828aafc4ba6
+plain	data	Many/tiny 208.txt	14	acb64228aaf983ad
+plain	data	Many/tiny 209.txt	14	acb2d828aaf699b8
+plain	data	Many/tiny 210.txt	14	a3bb3728a5cc392a
+plain	data	Many/tiny 211.txt	14	a3be9928a5cf1587
+plain	data	Many/tiny 212.txt	14	a3c1ef28a5d1dd80
+plain	data	Many/tiny 213.txt	14	a3c55928a5d4c775
+plain	data	Many/tiny 214.txt	14	a3ad8f28a5c09156
+plain	data	Many/tiny 215.txt	14	a3b0f128a5c36db3
+plain	data	Many/tiny 216.txt	14	a3b45728a5c650dc
+plain	data	Many/tiny 217.txt	14	a3b7d128a5c95601
+plain	data	Many/tiny 218.txt	14	a39ff728a5b504b2
+plain	data	Many/tiny 219.txt	14	a3a35928a5b7e10f
+plain	data	Many/tiny 220.txt	14	be911428b53cdd6f
+plain	data	Many/tiny 221.txt	14	be8db228b53a0112
+plain	data	Many/tiny 222.txt	14	be97f428b542c5bd
+plain	data	Many/tiny 223.txt	14	be948a28b53fdbc8
+plain	data	Many/tiny 224.txt	14	be838c28b5316bfb
+plain	data	Many/tiny 225.txt	14	be802a28b52e8f9e
+plain	data	Many/tiny 226.txt	14	be8a4c28b5371de9
+plain	data	Many/tiny 227.txt	14	be86f228b5344f24
+plain	data	Many/tiny 228.txt	14	beac5428b55411e7
+plain	data	Many/tiny 229.txt	14	bea8f228b551358a
+plain	data	Many/tiny 230.txt	14	b57ae928aff894d4
+plain	data	Many/tiny 231.txt	14	b57e4328affb6399
+plain	data	Many/tiny 232.txt	14	b5742128aff2d54e
+plain	data	Many/tiny 233.txt	14	b5778328aff5b1ab
+plain	data	Many/tiny 234.txt	14	b5888128b0042178
+plain	data	Many/tiny 235.txt	14	b58beb28b0070b6d
+plain	data	Many/tiny 236.txt	14	b581a928affe46c2
+plain	data	Many/tiny 237.txt	14	b5850b28b001231f
+plain	data	Many/tiny 238.txt	14	b5960928b00f92ec
+plain	data	Many/tiny 239.txt	14	b5998328b0129811
+plain	data	Many/tiny 240.txt	14	8a2b762897708719
+plain	data	Many/tiny 241.txt	14	8a281c28976db854
+plain	data	Many/tiny 242.txt	14	8a24b628976ad52b
+plain	data	Many/tiny 243.txt	14	8a2154289767f8ce
+plain	data	Many/tiny 244.txt	14	8a391e28977c2eed
+plain	data	Many/tiny 245.txt	14	8a35b428977944f8
+plain	data	Many/tiny 246.txt	14	8a323e289776469f
+plain	data	Many/tiny 247.txt	14	8a2edc2897736a42
+plain	data	Many/tiny 248.txt	14	8a46b6289787bb91
+plain	data	Many/tiny 249.txt	14	8a433c289784b66c
+plain	data	Many/tiny 250.txt	14	81154b28922c3e7e
+plain	data	Many/tiny 251.txt	14	8118ad28922f1adb
+plain	data	Many/tiny 252.txt	14	811c13289231fe04
+plain	data	Many/tiny 253.txt	14	811f6d289234ccc9
+plain	data	Many/tiny 254.txt	14	8122d3289237aff2
+plain	data	Many/tiny 255.txt	14	81263528923a8c4f
+plain	data	Many/tiny 256.txt	14	8129ab28923d8aa8
+plain	data	Many/tiny 257.txt	14	812d15289240749d
+plain	data	Many/tiny 258.txt	14	81306b2892433c96
+plain	data	Many/tiny 259.txt	14	8133cd28924618f3
+plain	data	Many/tiny 260.txt	14	9c57e828a1f947e3
+plain	data	Many/tiny 261.txt	14	9c548628a1f66b86
+plain	data	Many/tiny 262.txt	14	9c5ec828a1ff3031
+plain	data	Many/tiny 263.txt	14	9c5b4e28a1fc2b0c
+plain	data	Many/tiny 264.txt	14	9c659028a204efb7
+plain	data	Many/tiny 265.txt	14	9c622e28a202135a
+plain	data	Many/tiny 266.txt	14	9c6c5028a20aa1a5
+plain	data	Many/tiny 267.txt	14	9c68e628a207b7b0
+plain	data	Many/tiny 268.txt	14	9c3cc828a1e249cb
+plain	data	Many/tiny 269.txt	14	9c396628a1df6d6e
+plain	data	Many/tiny 270.txt	14	9341bd289cb4ff48
+plain	data	Many/tiny 271.txt	14	934527289cb7e93d
+plain	data	Many/tiny 272.txt	14	933ae5289caf2492
+plain	data	Many/tiny 273.txt	14	933e47289cb200ef
+plain	data	Many/tiny 274.txt	14	933425289ca972a4
+plain	data	Many/tiny 275.txt	14	93377f289cac4169
+plain	data	Many/tiny 276.txt	14	932d5d289ca3b31e
+plain	data	Many/tiny 277.txt	14	9330bf289ca68f7b
+plain	data	Many/tiny 278.txt	14	935cdd289ccbfd60
+plain	data	Many/tiny 279.txt	14	936047289ccee755
+plain	data	Many/tiny 280.txt	14	f2f6ca28d3095c8d
+plain	data	Many/tiny 281.txt	14	f2f36028d3067298
+plain	data	Many/tiny 282.txt	14	f2efea28d303743f
+plain	data	Many/tiny 283.txt	14	f2ec8828d30097e2
+plain	data	Many/tiny 284.txt	14	f2e92228d2fdb4b9
+plain	data	Many/tiny 285.txt	14	f2e5c828d2fae5f4
+plain	data	Many/tiny 286.txt	14	f2e26228d2f802cb
+plain	data	Many/tiny 287.txt	14	f2df0028d2f5266e
+plain	data	Many/tiny 288.txt	14	f311ea28d3205aa5
+plain	data	Many/tiny 289.txt	14	f30e8028d31d70b0
+plain	data	Many/tiny 290.txt	14	e9e07f28cdc4dd92
+plain	data	Many/tiny 291.txt	14	e9e3e128cdc7b9ef
+plain	data	Many/tiny 292.txt	14	e9e75728cdcab848
+plain	data	Many/tiny 293.txt	14	e9eac128cdcda23d
+plain	data	Many/tiny 294.txt	14	e9d2f728cdb96c1e
+plain	data	Many/tiny 295.txt	14	e9d65928cdbc487b
+plain	data	Many/tiny 296.txt	14	e9d9bf28cdbf2ba4
+plain	data	Many/tiny 297.txt	14	e9dd1928cdc1fa69
+plain	data	Many/tiny 298.txt	14	e9fbbf28cddc120a
+plain	data	Many/tiny 299.txt	14	e9ff2128cddeee67
+plain	data	Many/tiny 300.txt	14	f7a7621fb7db0438
+plain	data	Many/tiny 301.txt	14	f7aacc1fb7ddee2d
+plain	data	Many/tiny 302.txt	14	f7a08a1fb7d52982
+plain	data	Many/tiny 303.txt	14	f7a3ec1fb7d805df
+plain	data	Many/tiny 304.txt	14	f799ca1fb7cf7794
+plain	data	Many/tiny 305.txt	14	f79d241fb7d24659
+plain	data	Many/tiny 306.txt	14	f793021fb7c9b80e
+plain	data	Many/tiny 307.txt	14	f796641fb7cc946b
+plain	data	Many/tiny 308.txt	14	f7c2821fb7f20250
+plain	data	Many/tiny 309.txt	14	f7c5ec1fb7f4ec45
+plain	data	Many/tiny 310.txt	14	00bd8d1fbd1f4cd3
+plain	data	Many/tiny 311.txt	14	00ba2b1fbd1c7076
+plain	data	Many/tiny 312.txt	14	00c46d1fbd253521
+plain	data	Many/tiny 313.txt	14	00c0f31fbd222ffc
+plain	data	Many/tiny 314.txt	14	00cb351fbd2af4a7
+plain	data	Many/tiny 315.txt	14	00c7d31fbd28184a
+plain	data	Many/tiny 316.txt	14	00d1f51fbd30a695
+plain	data	Many/tiny 317.txt	14	00ce8b1fbd2dbca0
+plain	data	Many/tiny 318.txt	14	00a26d1fbd084ebb
+plain	data	Many/tiny 319.txt	14	009f0b1fbd05725e
+plain	data	Many/tiny 320.txt	14	e72df01faec3d7ee
+plain	data	Many/tiny 321.txt	14	e731521faec6b44b
+plain	data	Many/tiny 322.txt	14	e734b81faec99774
+plain	data	Many/tiny 323.txt	14	e738121faecc6639
+plain	data	Many/tiny 324.txt	14	e73b781faecf4962
+plain	data	Many/tiny 325.txt	14	e73eda1faed225bf
+plain	data	Many/tiny 326.txt	14	e742501faed52418
+plain	data	Many/tiny 327.txt	14	e745ba1faed80e0d
+plain	data	Many/tiny 328.txt	14	e749101faedad606
+plain	data	Many/tiny 329.txt	14	e74c721faeddb263
+plain	data	Many/tiny 330.txt	14	ee911b1fb2968c09
+plain	data	Many/tiny 331.txt	14	ee8dc11fb293bd44
+plain	data	Many/tiny 332.txt	14	ee8a5b1fb290da1b
+plain	data	Many/tiny 333.txt	14	ee86f91fb28dfdbe
+plain	data	Many/tiny 334.txt	14	ee9ec31fb2a233dd
+plain	data	Many/tiny 335.txt	14	ee9b591fb29f49e8
+plain	data	Many/tiny 336.txt	14	ee97e31fb29c4b8f
+plain	data	Many/tiny 337.txt	14	ee94811fb2996f32
+plain	data	Many/tiny 338.txt	14	eeac5b1fb2adc081
+plain	data	Many/tiny 339.txt	14	eea8e11fb2aabb5c
+plain	data	Many/tiny 340.txt	14	19e08e1fcb1e99c4
+plain	data	Many/tiny 341.txt	14	19e3e81fcb216889
+plain	data	Many/tiny 342.txt	14	19d9c61fcb18da3e
+plain	data	Many/tiny 343.txt	14	19dd281fcb1bb69b
+plain	data	Many/tiny 344.txt	14	19ee261fcb2a2668
+plain	data	Many/tiny 345.txt	14	19f1901fcb2d105d
+plain	data	Many/tiny 346.txt	14	19e74e1fcb244bb2
+plain	data	Many/tiny 347.txt	14	19eab01fcb27280f
+plain	data	Many/tiny 348.txt	14	19fbae1fcb3597dc
+plain	data	Many/tiny 349.txt	14	19ff281fcb389d01
+plain	data	Many/tiny 350.txt	14	22f6b91fd062e25f
+plain	data	Many/tiny 351.txt	14	22f3571fd0600602
+plain	data	Many/tiny 352.txt	14	22fd991fd068caad
+plain	data	Many/tiny 353.txt	14	22fa2f1fd065e0b8
+plain	data	Many/tiny 354.txt	14	22e9311fd05770eb
+plain	data	Many/tiny 355.txt	14	22e5cf1fd054948e
+plain	data	Many/tiny 356.txt	14	22eff11fd05d22d9
+plain	data	Many/tiny 357.txt	14	22ec971fd05a5414
+plain	data	Many/tiny 358.txt	14	2311f91fd07a16d7
+plain	data	Many/tiny 359.txt	14	230e971fd0773a7a
+plain	data	Many/tiny 360.txt	14	09d3dc1fc263d29a
+plain	data	Many/tiny 361.txt	14	09d73e1fc266aef7
+plain	data	Many/tiny 362.txt	14	09da941fc26976f0
+plain	data	Many/tiny 363.txt	14	09ddfe1fc26c60e5
+plain	data	Many/tiny 364.txt	14	09c6341fc2582ac6
+plain	data	Many/tiny 365.txt	14	09c9961fc25b0723
+plain	data	Many/tiny 366.txt	14	09ccfc1fc25dea4c
+plain	data	Many/tiny 367.txt	14	09d0761fc260ef71
+plain	data	Many/tiny 368.txt	14	09b89c1fc24c9e22
+plain	data	Many/tiny 369.txt	14	09bbfe1fc24f7a7f
+plain	data	Many/tiny 370.txt	14	1137071fc63686b5
+plain	data	Many/tiny 371.txt	14	11339d1fc6339cc0
+plain	data	Many/tiny 372.txt	14	1130471fc630d4c7
+plain	data	Many/tiny 373.txt	14	112ce51fc62df86a
+plain	data	Many/tiny 374.txt	14	11297f1fc62b1541
+plain	data	Many/tiny 375.txt	14	1126051fc628101c
+plain	data	Many/tiny 376.txt	14	11229f1fc6252cf3
+plain	data	Many/tiny 377.txt	14	111f3d1fc6225096
+plain	data	Many/tiny 378.txt	14	111be71fc61f889d
+plain	data	Many/tiny 379.txt	14	11187d1fc61c9ea8
+plain	data	Many/tiny 380.txt	14	3c866a1fdebe7940
+plain	data	Many/tiny 381.txt	14	3c89d41fdec16335
+plain	data	Many/tiny 382.txt	14	3c7fb21fdeb8d4ea
+plain	data	Many/tiny 383.txt	14	3c83141fdebbb147
+plain	data	Many/tiny 384.txt	14	3c78d21fdeb2ec9c
+plain	data	Many/tiny 385.txt	14	3c7c4c1fdeb5f1c1
+plain	data	Many/tiny 386.txt	14	3c720a1fdead2d16
+plain	data	Many/tiny 387.txt	14	3c756c1fdeb00973
+plain	data	Many/tiny 388.txt	14	3c6b4a1fdea77b28
+plain	data	Many/tiny 389.txt	14	3c6eb41fdeaa651d
+plain	data	Many/tiny 390.txt	14	452ff51fe3a6931b
+plain	data	Many/tiny 391.txt	14	452c931fe3a3b6be
+plain	data	Many/tiny 392.txt	14	4536b51fe3ac4509
+plain	data	Many/tiny 393.txt	14	45335b1fe3a97644
+plain	data	Many/tiny 394.txt	14	453d7d1fe3b2048f
+plain	data	Many/tiny 395.txt	14	453a1b1fe3af2832
+plain	data	Many/tiny 396.txt	14	45445d1fe3b7ecdd
+plain	data	Many/tiny 397.txt	14	4540f31fe3b502e8
+plain	data	Many/tiny 398.txt	14	454b151fe3bd9133
+plain	data	Many/tiny 399.txt	14	4547b31fe3bab4d6
+plain	data	Many/tiny 400.txt	14	d82eb5f6092a9f53
+plain	data	Many/tiny 401.txt	14	d82b53f60927c2f6
+plain	data	Many/tiny 402.txt	14	d83595f6093087a1
+plain	data	Many/tiny 403.txt	14	d8321bf6092d827c
+plain	data	Many/tiny 404.txt	14	d83c5df609364727
+plain	data	Many/tiny 405.txt	14	d838fbf609336aca
+plain	data	Many/tiny 406.txt	14	d8431df6093bf915
+plain	data	Many/tiny 407.txt	14	d83fb3f609390f20
+plain	data	Many/tiny 408.txt	14	d81395f60913a13b
+plain	data	Many/tiny 409.txt	14	d81033f60910c4de
+plain	data	Many/tiny 410.txt	14	cf188af603e656b8
+plain	data	Many/tiny 411.txt	14	cf1bf4f603e940ad
+plain	data	Many/tiny 412.txt	14	cf11b2f603e07c02
+plain	data	Many/tiny 413.txt	14	cf1514f603e3585f
+plain	data	Many/tiny 414.txt	14	cf0af2f603daca14
+plain	data	Many/tiny 415.txt	14	cf0e4cf603dd98d9
+plain	data	Many/tiny 416.txt	14	cf042af603d50a8e
+plain	data	Many/tiny 417.txt	14	cf078cf603d7e6eb
+plain	data	Many/tiny 418.txt	14	cf33aaf603fd54d0
+plain	data	Many/tiny 419.txt	14	cf3714f604003ec5
+plain	data	Fragmented/big.bin	151675	5c0a9fc90fa22290
+plain	data	Fragmented/fork.bin	8197	ebba77d5d0357e18
+plain	rsrc	Fragmented/fork.bin	45366	2922f487fbcdaae7
+plain	res	Fragmented/fork.bin/..namedfork/rsrc/BLOB/#1000	45056	d714f5c197caf285
+hfsx	data	Read Me.txt	1500	ef509d1650f4b570
+hfsx	data	Docs/readme.txt	13	0106837e0bb76ad7
+hfsx	data	Docs/Notes/Deep/nested.txt	725	9cb2476f74142f54
+hfsx	empty	empty.txt	0	cbf29ce484222325
+hfsx	data	README.TXT	6	6de5939682c37ab7
+hfsx	data	readme.txt	6	81c6524420c8a270
+hfsx	data	ReadMe.txt	6	1726e7345aed6656
+hfsx	data	Case/file.txt	8	00db5ce26b238f84
+hfsx	data	case/file.txt	8	4481b57bfbf1d2e4
+hfsx	data	case/FILE.txt	13	d1c8a480b5a688a8
+hfsx	data	Zebra.txt	6	5f7cecaeedbdb37f
+hfsx	data	apple.txt	6	f2635242cc891a8f
+hfsx	rsrc	apple.txt	323	88976b42551fc9f8
+hfsx	res	apple.txt/..namedfork/rsrc/TEXT/#128	13	65a34b46a37188ac
+hfsx	data	École école.txt	9	08a2371410992254
+hfsx	data	école École.txt	21	ca63cc8a9cf718da
+hfsx	data	big.bin	70000	086ac90c6343431b
+apm	data	Read Me.txt	1500	ef509d1650f4b570
+apm	data	Docs/readme.txt	12	9059e18018224214
+apm	data	Docs/Notes/Deep/nested.txt	725	9cb2476f74142f54
+apm	empty	empty.txt	0	cbf29ce484222325
+apm	data	System Folder/Finder	9000	4efd94cd43380111
+apm	rsrc	System Folder/Finder	4626	4d967b6625eca60f
+apm	res	System Folder/Finder/..namedfork/rsrc/CODE/#0	300	bbe7cb72714edf0b
+apm	res	System Folder/Finder/..namedfork/rsrc/CODE/#1	4000	7bfd555f130b181b
+apm	data	Icon_	0	cbf29ce484222325
+apm	rsrc	Icon_	910	e480b1254744eb32
+apm	res	Icon_/..namedfork/rsrc/icns/#-16455	600	f6224073adfacd51
+apm	data	data.bin	20000	383e30a1ea271620
+spread	data	Read Me.txt	67	52ed8dcb19c7a162
+spread	data	filler.bin	1310720	7dec48ffd0357285
+spread	data	After/late.txt	10500	4603b2cce7740ef7
+spread	data	After/tail.bin	5000	f3d143a06e234335
+spread	data	After/hard link.txt	10500	4603b2cce7740ef7

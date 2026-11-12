@@ -105,6 +105,71 @@ impl OutputBudget {
     }
 }
 
+// Smallest nesting budget: an entry of the largest size a container may yield
+// (a sparse disk image, say) can be opened along with as much below it.
+pub(crate) const NESTING_FLOOR: u64 = 2 * MAX_DECOMPRESSED_SIZE;
+
+// Bytes allowed per input byte. Compression makes a legitimate inner
+// container far larger than its outer one, so this is generous.
+pub(crate) const NESTING_RATIO: u64 = 64;
+
+// Charge for opening a nested container, so that empty and tiny ones are
+// bounded in number as well.
+pub(crate) const NESTING_OPEN_CHARGE: u64 = 4096;
+
+// Cumulative cap on the bytes that the containers of one input yield, at all
+// nesting levels together. Per-container budgets do not compose: a container
+// whose entries alias its own bytes k times costs k^depth once every entry is
+// opened again, and each level claims its own minimum allowance.
+pub(crate) struct NestingBudget {
+    remaining: u64,
+    refused: bool,
+}
+
+impl NestingBudget {
+    pub(crate) fn for_input(input_len: usize) -> Self {
+        let scaled = (input_len as u64).saturating_mul(NESTING_RATIO);
+        Self {
+            remaining: if scaled < NESTING_FLOOR {
+                NESTING_FLOOR
+            } else {
+                scaled
+            },
+            refused: false,
+        }
+    }
+
+    // Accounts for an entry a container has yielded. The entry exists
+    // already, so this only uses up what later `open` calls may draw on.
+    pub(crate) const fn spend(&mut self, bytes: usize) {
+        self.remaining = self.remaining.saturating_sub(bytes as u64);
+    }
+
+    // Whether another nested container may be opened. `unspent` is its size
+    // when no container yielded it. A refusal is final.
+    pub(crate) fn open(&mut self, unspent: usize) -> NestingCharge {
+        let cost = NESTING_OPEN_CHARGE.saturating_add(unspent as u64);
+        if let Some(left) = self.remaining.checked_sub(cost) {
+            self.remaining = left;
+            return NestingCharge::Accepted;
+        }
+        self.remaining = 0;
+        if core::mem::replace(&mut self.refused, true) {
+            NestingCharge::Refused
+        } else {
+            NestingCharge::FirstRefused
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum NestingCharge {
+    Accepted,
+    // The first refusal, to be reported once.
+    FirstRefused,
+    Refused,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -189,5 +254,35 @@ mod tests {
         let mut budget = OutputBudget::for_input(usize::MAX, u64::MAX);
         assert_eq!(budget.remaining, MAX_DECOMPRESSED_SIZE);
         assert!(budget.charge(0, "t").is_ok());
+    }
+
+    #[test]
+    fn nesting_budget_refusal_is_final_and_flagged_once() {
+        let mut budget = NestingBudget::for_input(10);
+        assert_eq!(budget.remaining, NESTING_FLOOR);
+        budget.remaining = 3 * NESTING_OPEN_CHARGE;
+        assert_eq!(budget.open(0), NestingCharge::Accepted);
+        budget.spend(NESTING_OPEN_CHARGE as usize);
+        assert_eq!(budget.open(1), NestingCharge::FirstRefused);
+        // Would have fit before the refusal.
+        assert_eq!(budget.open(0), NestingCharge::Refused);
+    }
+
+    #[test]
+    fn nesting_budget_spending_saturates() {
+        let mut budget = NestingBudget::for_input(10);
+        budget.spend(usize::MAX);
+        budget.spend(1);
+        assert_eq!(budget.open(0), NestingCharge::FirstRefused);
+    }
+
+    #[test]
+    fn nesting_budget_scales_with_large_inputs() {
+        let input = (NESTING_FLOOR / NESTING_RATIO) as usize * 2;
+        assert_eq!(NestingBudget::for_input(input).remaining, 2 * NESTING_FLOOR);
+        assert_eq!(
+            NestingBudget::for_input(usize::MAX).remaining,
+            (usize::MAX as u64).saturating_mul(NESTING_RATIO)
+        );
     }
 }

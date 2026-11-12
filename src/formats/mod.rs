@@ -6,6 +6,10 @@
 //! - **macintosh** - Classic Macintosh formats (`HFS`, `StuffIt`, `BinHex`, `MacBinary`)
 //! - **amiga** - Amiga formats (`LHA`, `ADF`)
 //! - **game** - Game-specific formats (`SCUMM`)
+//! - **dos** - DOS/PC formats (`FAT`, `MBR`, `GPT`, `ISO 9660`, `RAR`, `ARJ`, `CUE/BIN`)
+//! - **next** - NeXT / BSD formats (NeXT disklabel, `UFS`)
+//! - **beos** - BeOS formats (`BFS`)
+//! - **lisa** - Apple Lisa formats (Lisa file system)
 
 pub mod common;
 
@@ -20,6 +24,15 @@ pub mod game;
 
 #[cfg(feature = "dos")]
 pub mod dos;
+
+#[cfg(feature = "next")]
+pub mod next;
+
+#[cfg(feature = "beos")]
+pub mod beos;
+
+#[cfg(feature = "lisa")]
+pub mod lisa;
 
 #[cfg(any(feature = "macintosh", feature = "dos"))]
 pub(crate) mod cd_sector;

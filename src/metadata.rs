@@ -6,7 +6,7 @@
 use core::fmt;
 
 use crate::compat::String;
-#[cfg(all(feature = "no_std", not(feature = "std")))]
+#[cfg(all(feature = "macintosh", feature = "no_std", not(feature = "std")))]
 use crate::compat::format;
 
 /// Metadata about a container entry.

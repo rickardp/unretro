@@ -5,3 +5,4 @@
 
 pub mod adf;
 pub mod lha;
+mod lzh;

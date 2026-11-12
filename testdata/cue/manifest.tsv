@@ -1,0 +1,23 @@
+container	sheet	track	mode	file	file_type	start	sectors	gap	pregap	size	fnv64	sha256	content
+-	mode1-2048.cue	1	MODE1/2048	mode1-2048.iso	BINARY	0	30	0	0	61440	2cb6f611a128ee8d	ca7c65bde2cb0f0d79d03260daf25d5b315de4a8f984b7497150bfb5bae67402	iso9660:CUE_M1_2048
+-	case.cue	1	MODE1/2048	mode1-2048.iso	BINARY	0	30	0	0	61440	2cb6f611a128ee8d	ca7c65bde2cb0f0d79d03260daf25d5b315de4a8f984b7497150bfb5bae67402	iso9660:CUE_M1_2048
+-	wave.cue	1	MODE1/2048	mode1-2048.iso	BINARY	0	30	0	0	61440	2cb6f611a128ee8d	ca7c65bde2cb0f0d79d03260daf25d5b315de4a8f984b7497150bfb5bae67402	iso9660:CUE_M1_2048
+-	wave.cue	2	AUDIO	tone.wav	WAVE	0	4	0	0	-	-	-	unsupported
+discs.tar.gz	mode1-2352.cue	1	MODE1/2352	mode1-2352.bin	BINARY	0	30	0	0	61440	a3874a3ffd9c2273	d980447d32cb6901ba13d6fba82e31f6e8f7554f36bc400d5aa35ebb239a9c43	iso9660:CUE_M1_2352
+discs.tar.gz	CaseDiff.cue	1	MODE1/2352	mode1-2352.bin	BINARY	0	30	0	0	61440	a3874a3ffd9c2273	d980447d32cb6901ba13d6fba82e31f6e8f7554f36bc400d5aa35ebb239a9c43	iso9660:CUE_M1_2352
+discs.tar.gz	mode2-2352.cue	1	MODE2/2352	mode2-2352.bin	BINARY	0	30	0	0	61440	cb162f2935084b2e	511fac613a8f7d006033068e60f0b6f68c994124a430ffacb73245f62b487a1f	iso9660:CUE_M2_2352
+discs.tar.gz	mixed.cue	1	MODE1/2352	mixed.bin	BINARY	0	30	0	0	61440	2de941bb7beeb5f3	797bda778a4366f320372e14beb06b9f04070c6e2b105528d0b311b15c654de6	iso9660:CUE_MIXED
+discs.tar.gz	mixed.cue	2	AUDIO	mixed.bin	BINARY	180	20	150	0	47040	7d293216a288bf34	4daa3c09279816f9b2a40be4ddb42eda9962ab7bdb7e6429e08cf2aa560722c0	pcm
+discs.tar.gz	mixed.cue	3	AUDIO	mixed.bin	BINARY	200	20	0	150	47040	0df16bea182094ad	71f6cf91f395c3e78fca1860c0bec0241ca21b3730b6560d8054092b8e386635	pcm
+discs.tar.gz	multifile.cue	1	MODE1/2352	Multi File (Track 1).bin	BINARY	0	30	0	0	61440	d70b17e89582e30e	f9d8e1a7d3abcc8e9c3c8b3f5d9108deedf1a4f8d065e6777aac8285a67f85d2	iso9660:CUE_MULTI
+discs.tar.gz	multifile.cue	2	AUDIO	Multi File (Track 2).bin	BINARY	150	20	150	0	47040	7953a6b306d0d425	132c72c0108f0c9221396580249efbfba89cd62eb0700551888cbeac1ed5bc7b	pcm
+discs.tar.gz	multifile.cue	3	AUDIO	Multi File (Track 3).bin	BINARY	150	20	150	0	47040	7818d3c4edfc3e1d	aef256ff7747378d0eab5ffba1e9790595072ff633a6232ac56cb2f07edef763	pcm
+discs.tar.gz	twodata.cue	1	MODE1/2352	twodata.bin	BINARY	0	30	0	0	61440	14548787cde2c448	458b543e02a644ee182c2a8b04c7aed1e82476fb56005491512a6aefec150e35	iso9660:CUE_TWODATA
+discs.tar.gz	twodata.cue	2	MODE1/2352	twodata.bin	BINARY	180	80	150	0	163840	538fd82f2edbd2b5	b682cf37ab1b7f4d7fbf6ec5f607806bfd221bb57cef0b4890e2d3d6ae9135fd	fat12:SECONDTRACK
+discs.tar.gz	twodata-2048.cue	1	MODE1/2048	twodata-a.iso	BINARY	0	30	0	0	61440	14548787cde2c448	458b543e02a644ee182c2a8b04c7aed1e82476fb56005491512a6aefec150e35	iso9660:CUE_TWODATA
+discs.tar.gz	twodata-2048.cue	2	MODE1/2048	twodata-b.img	BINARY	0	80	0	0	163840	538fd82f2edbd2b5	b682cf37ab1b7f4d7fbf6ec5f607806bfd221bb57cef0b4890e2d3d6ae9135fd	fat12:SECONDTRACK
+discs.tar.gz	motorola.cue	1	AUDIO	motorola.bin	MOTOROLA	0	20	0	0	47040	21108bf9713c2a45	acaf1ca3a24fa2bd055b05b031894626df863b48ef5d77cb0c03a405cf24e84f	pcm
+discs.tar.gz	motorola.cue	2	AUDIO	motorola.bin	MOTOROLA	20	20	0	0	47040	de7616aab971682d	51593320135ea033786308a32703f7fbb7b252f68f15221b75d82b419b85cbc4	pcm
+discs.tar.gz	Odd Sheet.cue	1	MODE1/2352	My Disc Image.bin	BINARY	0	30	0	0	61440	cffed36ffe001d8d	7e8bd9fa8d66f51fce7f67c694a715660a761517f29a1d1187517671e0e23a17	iso9660:CUE_ODD
+discs.tar.gz	Odd Sheet.cue	2	AUDIO	My Disc Image.bin	BINARY	30	10	0	0	23520	50607e1d317cb131	3525258d0f48d30aaa5e276d50c0221a5db9ae10e486fef2e64887544d769ec0	pcm
+discs.tar.gz	sub/deep.cue	1	AUDIO	sub/deep.bin	BINARY	0	4	0	0	9408	49186e36d1de3fa4	cd634292840fe19380cdf60096ae0b7115e17bfb0b382c0a82d25ac9de11ae81	pcm

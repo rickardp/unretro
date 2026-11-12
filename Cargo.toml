@@ -68,8 +68,6 @@ std = [
     "dep:memmap2",
     "dep:xattr",
     "dep:libc",
-    "delharc?/std",
-    "__backend_xz",
     "__backend_dos_rar",
 ]
 no_std = []
@@ -81,20 +79,22 @@ xz = []
 macintosh = []
 # No-op: StuffIt is part of `macintosh`. Kept so existing feature lists build.
 stuffit = []
-amiga = ["dep:delharc"]
+amiga = []
 game = []
 dos = []
+next = []
+beos = []
+lisa = []
 
 # Internal backend capability toggles (not part of public API contract).
-__backend_xz = ["dep:xz2"]
 __backend_dos_rar = []
 
-# All features (native only - includes xz)
-full = ["common", "xz", "macintosh", "amiga", "game", "dos"]
+# All features
+full = ["common", "xz", "macintosh", "amiga", "game", "dos", "next", "beos", "lisa"]
 all = ["full"]
 
-# WASM-compatible full feature set (excludes xz which has C deps)
-wasm = ["common", "amiga", "macintosh", "dos"]
+# WASM-compatible feature set
+wasm = ["common", "xz", "amiga", "macintosh", "dos", "next", "beos", "lisa"]
 
 [dependencies]
 # Error handling
@@ -102,10 +102,6 @@ thiserror = { version = "2.0", default-features = false }
 
 # Memory mapping
 memmap2 = { version = "0.9", optional = true }
-
-# Compression / Archives (optional)
-delharc = { version = "0.6", optional = true, default-features = false, features = ["lh1", "lz"] }
-xz2 = { version = "0.1", optional = true }
 
 # Platform-specific
 [target.'cfg(unix)'.dependencies]

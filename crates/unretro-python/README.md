@@ -125,12 +125,32 @@ Invalid combinations raise `ValueError`:
 - `ContainerFormat.Bzip2` covers `.bz2` files (and `.tar.bz2`/`.tbz2`, whose payload
   opens as TAR); bzip2 entries in ZIP archives and bzip2 blocks in UDIF disk images are
   read as well.
+- `ContainerFormat.Xz` covers `.xz` files (and `.tar.xz`/`.txz`, whose payload opens as
+  TAR) and legacy `.lzma` files (and `.tar.lzma`/`.tlz`), decoded natively; LZMA and XZ
+  entries in ZIP archives and LZMA blocks in UDIF disk images are read as well. Files
+  using BCJ filters are not supported.
+- Besides `max_depth`, nested containers are opened only within a cumulative size budget
+  per input (64 times its size, at least 8 GiB); see "Max recursion depth" in the usage
+  guide.
+- `ContainerFormat.Hfs` covers HFS, MFS, HFS Plus and HFSX volumes (bare, DiskCopy 4.2,
+  Apple Partition Map, UDIF/NDIF, raw CD sector dumps, HFS wrappers). HFS Plus hard links
+  resolve to their content; the journal is not replayed and files using transparent
+  compression (decmpfs) are not decoded; see the HFS Plus section of the usage guide.
 - `ContainerFormat.Iso9660` covers ISO 9660 CD-ROM images (Joliet / Rock Ridge names, raw
   2352-byte sector dumps); see the ISO 9660 section of the usage guide.
+- `ContainerFormat.Arj` covers ARJ archives (methods 0-4, decoded natively). Garbled
+  (password-protected) files are left out and reported; multi-volume sets are joined
+  through their first volume when the later volumes sit next to it; see the ARJ
+  section of the usage guide.
 - `ContainerFormat.StuffIt` covers classic and StuffIt 5 archives, decoded natively
   (written from the specification in [docs/stuffit/](../../docs/stuffit/README.md)).
   Files with an unreadable data fork (encrypted, corrupt, unsupported method) are left
   out with a warning; see the StuffIt section of the usage guide.
+- `ContainerFormat.Lha` covers LHA/LZH archives (header levels 0-3; methods `-lh0-`,
+  `-lh1-`, `-lh4-` to `-lh7-`, `-lz4-`, `-lzs-`, `-lz5-`), decoded natively (written
+  from the specification in [docs/lha/](../../docs/lha/README.md)). Entries that are
+  corrupt or use an unsupported method are left out with a warning; see the LHA
+  section of the usage guide.
 - `Entry.metadata` exposes optional structured metadata when available.
 - Classic Mac resources are yielded as `<owner>/..namedfork/rsrc/<TYPE>/<name or #id>`
   (`with_numeric_identifiers()` forces `#id`). AppleDouble sidecars in plain directories

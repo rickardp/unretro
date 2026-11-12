@@ -39,8 +39,13 @@ mod path_utils;
     feature = "common",
     feature = "amiga",
     feature = "game",
-    feature = "dos"
+    feature = "dos",
+    feature = "next",
+    feature = "beos",
+    feature = "lisa"
 ))]
+// Not every backend that may use it does, so some feature sets leave it idle.
+#[allow(unused_imports)]
 pub(crate) use path_utils::sanitize_archive_path;
 #[cfg(feature = "macintosh")]
 pub(crate) use path_utils::sanitize_hfs_path;
@@ -370,11 +375,11 @@ pub(crate) trait Container: Send + Sync {
 
     /// Like [`get_file`](Self::get_file), but may return owned data.
     ///
-    /// Used for AppleDouble sidecar pairing.
+    /// Used for AppleDouble sidecar pairing and ARJ volume lookup.
     ///
     /// Containers that load entries on demand (e.g. filesystem directories)
     /// cannot hand out borrowed slices and override this instead.
-    #[cfg(feature = "macintosh")]
+    #[cfg(any(feature = "macintosh", feature = "dos"))]
     fn read_file(&self, path: &str) -> Option<compat::Cow<'_, [u8]>> {
         self.get_file(path).map(compat::Cow::Borrowed)
     }
@@ -389,7 +394,7 @@ pub(crate) trait Container: Send + Sync {
     }
 
     /// Whether a sibling file exists at `path` (same path rules as `get_file`).
-    #[cfg(feature = "macintosh")]
+    #[cfg(any(feature = "macintosh", feature = "dos"))]
     fn has_file(&self, path: &str) -> bool {
         self.get_file(path).is_some()
     }

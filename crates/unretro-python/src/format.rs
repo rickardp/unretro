@@ -17,7 +17,7 @@ pub enum PyContainerFormat {
     Gzip = 2,
     /// TAR archive format.
     Tar = 3,
-    /// XZ-compressed single file.
+    /// XZ-compressed single file, or a legacy `.lzma` file.
     Xz = 4,
     /// LHA/LZH archive format.
     Lha = 5,
@@ -63,6 +63,20 @@ pub enum PyContainerFormat {
     Adf = 25,
     /// Bzip2-compressed single file.
     Bzip2 = 26,
+    /// ARJ archive.
+    Arj = 27,
+    /// Unix compress (.Z) single file.
+    Compress = 28,
+    /// NeXT disklabel-partitioned disk image.
+    NextDisklabel = 29,
+    /// UFS1 / BSD FFS volume.
+    Ufs = 30,
+    /// Be File System (BFS) volume.
+    Bfs = 31,
+    /// CUE/BIN CD image (cue sheet plus track files).
+    CueBin = 32,
+    /// Apple Lisa file system disk image.
+    LisaFs = 33,
     /// Unknown format.
     Unknown = 99,
 }
@@ -100,6 +114,13 @@ impl PyContainerFormat {
             Self::Iso9660 => "ISO 9660 Disc Image",
             Self::Adf => "Amiga Disk Image",
             Self::Bzip2 => "Bzip2 Compressed",
+            Self::Arj => "ARJ Archive",
+            Self::Compress => "Unix Compress",
+            Self::NextDisklabel => "NeXT Disk Image",
+            Self::Ufs => "UFS Disk Image",
+            Self::Bfs => "BFS Disk Image",
+            Self::CueBin => "CUE/BIN Disc Image",
+            Self::LisaFs => "Lisa Disk Image",
             Self::Unknown => "Unknown",
         }
     }
@@ -127,8 +148,15 @@ impl PyContainerFormat {
             | Self::ScummSpeech
             | Self::ImuseBundle
             | Self::Iso9660
-            | Self::Adf => true,
+            | Self::Adf
+            | Self::Arj
+            | Self::NextDisklabel
+            | Self::Ufs
+            | Self::Bfs
+            | Self::CueBin
+            | Self::LisaFs => true,
             Self::Gzip
+            | Self::Compress
             | Self::Bzip2
             | Self::Xz
             | Self::BinHex
@@ -174,6 +202,13 @@ impl From<ContainerFormat> for PyContainerFormat {
             ContainerFormat::Iso9660 => Self::Iso9660,
             ContainerFormat::Adf => Self::Adf,
             ContainerFormat::Bzip2 => Self::Bzip2,
+            ContainerFormat::Arj => Self::Arj,
+            ContainerFormat::Compress => Self::Compress,
+            ContainerFormat::NextDisklabel => Self::NextDisklabel,
+            ContainerFormat::Ufs => Self::Ufs,
+            ContainerFormat::Bfs => Self::Bfs,
+            ContainerFormat::CueBin => Self::CueBin,
+            ContainerFormat::LisaFs => Self::LisaFs,
             ContainerFormat::Unknown => Self::Unknown,
             // `ContainerFormat` is `#[non_exhaustive]`; future variants
             // surface as `Unknown` until the Python bindings are extended.

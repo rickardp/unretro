@@ -1,7 +1,7 @@
-#[cfg(feature = "macintosh")]
+#[cfg(any(feature = "macintosh", feature = "dos"))]
 use std::borrow::Cow;
 use std::fs;
-#[cfg(feature = "macintosh")]
+#[cfg(any(feature = "macintosh", feature = "dos"))]
 use std::path::Component;
 use std::path::{Path, PathBuf};
 
@@ -18,7 +18,7 @@ struct DirEntry {
 }
 
 pub struct DirectoryContainer {
-    #[cfg(feature = "macintosh")]
+    #[cfg(any(feature = "macintosh", feature = "dos"))]
     root: PathBuf,
     prefix: String,
     entries: Vec<DirEntry>,
@@ -67,7 +67,7 @@ impl DirectoryContainer {
         entries.sort_by(|a, b| a.path.cmp(&b.path));
 
         Ok(Self {
-            #[cfg(feature = "macintosh")]
+            #[cfg(any(feature = "macintosh", feature = "dos"))]
             root: path.to_path_buf(),
             prefix,
             entries,
@@ -76,7 +76,7 @@ impl DirectoryContainer {
     }
 }
 
-#[cfg(feature = "macintosh")]
+#[cfg(any(feature = "macintosh", feature = "dos"))]
 impl DirectoryContainer {
     // Sibling paths are relative to the root directory; anything that could
     // escape it is rejected.
@@ -106,7 +106,7 @@ impl Container for DirectoryContainer {
         }
     }
 
-    #[cfg(feature = "macintosh")]
+    #[cfg(any(feature = "macintosh", feature = "dos"))]
     fn read_file(&self, path: &str) -> Option<Cow<'_, [u8]>> {
         let full = self.sibling_path(path)?;
         if !full.is_file() {
@@ -139,7 +139,7 @@ impl Container for DirectoryContainer {
             && resource_fork::ResourceFork::is_valid_header(&header, fork_len)
     }
 
-    #[cfg(feature = "macintosh")]
+    #[cfg(any(feature = "macintosh", feature = "dos"))]
     fn has_file(&self, path: &str) -> bool {
         self.sibling_path(path).is_some_and(|p| p.is_file())
     }

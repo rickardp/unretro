@@ -14,19 +14,22 @@ use crate::error::{Error, Result};
 use crate::format::ContainerFormat;
 #[cfg(all(feature = "macintosh", feature = "std"))]
 use crate::formats::macintosh::resource_fork;
+use crate::limits::{NestingBudget, NestingCharge};
 use crate::source::{MmapStrategy, Source};
 use crate::{Container, ContainerInfo, DEFAULT_MAX_DEPTH, Entry, EntryType};
 
 #[cfg(feature = "common")]
 use crate::formats::common::bzip2_container::{Bzip2Container, is_bzip2_file};
+#[cfg(feature = "common")]
+use crate::formats::common::compress::{CompressContainer, is_compress_file};
 #[cfg(feature = "std")]
 use crate::formats::common::directory::DirectoryContainer;
 #[cfg(feature = "common")]
 use crate::formats::common::gzip::{GzipContainer, is_gzip_file};
 #[cfg(feature = "common")]
 use crate::formats::common::tar::{TarContainer, could_be_legacy_tar, is_tar_archive};
-#[cfg(all(feature = "xz", feature = "__backend_xz"))]
-use crate::formats::common::xz::{XzContainer, is_xz_file};
+#[cfg(feature = "xz")]
+use crate::formats::common::xz::{XzContainer, is_lzma_file, is_xz_file};
 #[cfg(feature = "common")]
 use crate::formats::common::zip::{ZipContainer, is_embedded_zip_archive, is_zip_archive};
 
@@ -35,7 +38,7 @@ use crate::formats::amiga::adf::{AdfContainer, is_adf_image};
 #[cfg(feature = "amiga")]
 use crate::formats::amiga::lha::{LhaContainer, is_lha_archive};
 
-#[cfg(feature = "macintosh")]
+#[cfg(any(feature = "macintosh", feature = "dos"))]
 use crate::compat::Cow;
 #[cfg(feature = "macintosh")]
 use crate::formats::macintosh::binhex::{BinHexContainer, is_binhex_file};
@@ -73,6 +76,12 @@ use crate::formats::game::wolf3d::{Wolf3dContainer, is_wolf3d_file};
 use crate::formats::game::imuse_bundle::{ImuseBundleContainer, is_imuse_bundle};
 
 #[cfg(feature = "dos")]
+use crate::formats::dos::arj::{self, ArjContainer, is_arj_archive};
+
+#[cfg(feature = "dos")]
+use crate::formats::dos::cue::{CueBinContainer, is_cue_sheet};
+
+#[cfg(feature = "dos")]
 use crate::formats::dos::fat::{FatContainer, is_fat_image};
 
 #[cfg(feature = "dos")]
@@ -85,13 +94,24 @@ use crate::formats::dos::iso9660::{Iso9660Container, is_iso9660_image};
 use crate::formats::dos::mbr::{MbrContainer, is_mbr_image};
 
 #[cfg(all(feature = "dos", feature = "__backend_dos_rar"))]
-use crate::formats::dos::rar::{RarContainer, is_rar_archive};
+use crate::formats::dos::rar::{self, RarContainer, is_rar_archive};
+
+#[cfg(feature = "next")]
+use crate::formats::next::disklabel::{NextDisklabelContainer, is_next_disklabel};
+#[cfg(feature = "next")]
+use crate::formats::next::ufs::{UfsContainer, is_ufs_image};
+
+#[cfg(feature = "beos")]
+use crate::formats::beos::bfs::{BfsContainer, is_bfs_image};
+
+#[cfg(feature = "lisa")]
+use crate::formats::lisa::{is_lisa_image, lisafs::LisaFsContainer};
 
 /// Internal options passed through container opening and recursion.
 #[derive(Clone, Copy, Default)]
 struct LoaderOptions {
     /// Use numeric identifiers instead of names
-    #[cfg(any(feature = "macintosh", feature = "dos"))]
+    #[cfg(any(feature = "macintosh", feature = "dos", feature = "next"))]
     numeric_identifiers: bool,
 }
 
@@ -586,7 +606,7 @@ impl Loader {
     /// The container borrows from the source, so both must be kept alive.
     fn open_container(&self) -> Result<(Option<Source>, Box<dyn Container>)> {
         let options = LoaderOptions {
-            #[cfg(any(feature = "macintosh", feature = "dos"))]
+            #[cfg(any(feature = "macintosh", feature = "dos", feature = "next"))]
             numeric_identifiers: self.numeric_identifiers,
         };
         match &self.source {
@@ -628,6 +648,45 @@ impl Loader {
                             )?);
                             return Ok((Some(source), container));
                         }
+                    }
+
+                    // Later volumes of an ARJ set sit next to the first one.
+                    #[cfg(feature = "dos")]
+                    if let Some(number) = arj::volume_number(&path_str) {
+                        if is_arj_archive(source.as_slice()) {
+                            let container = Box::new(ArjContainer::from_bytes_with_volumes(
+                                source.as_slice(),
+                                path_str.clone(),
+                                self.max_depth,
+                                number,
+                                &|number| {
+                                    let name =
+                                        arj::volume_name(path.file_name()?.to_str()?, number)?;
+                                    [name.clone(), name.to_lowercase(), name.to_uppercase()]
+                                        .iter()
+                                        .find_map(|name| fs::read(path.with_file_name(name)).ok())
+                                },
+                            )?);
+                            return Ok((Some(source), container));
+                        }
+                    }
+
+                    #[cfg(all(feature = "dos", feature = "__backend_dos_rar"))]
+                    if rar::volume_after(&path_str, 1).is_some()
+                        && is_rar_archive(source.as_slice())
+                    {
+                        let container = Box::new(RarContainer::from_bytes_with_volumes(
+                            source.as_slice(),
+                            path_str.clone(),
+                            self.max_depth,
+                            &|steps| {
+                                let name = rar::volume_after(path.file_name()?.to_str()?, steps)?;
+                                [name.clone(), name.to_lowercase(), name.to_uppercase()]
+                                    .iter()
+                                    .find_map(|name| fs::read(path.with_file_name(name)).ok())
+                            },
+                        )?);
+                        return Ok((Some(source), container));
                     }
 
                     let container = open_container_internal(
@@ -685,7 +744,7 @@ impl Loader {
         F: FnMut(&Entry<'_>) -> Result<VisitAction>,
     {
         let options = LoaderOptions {
-            #[cfg(any(feature = "macintosh", feature = "dos"))]
+            #[cfg(any(feature = "macintosh", feature = "dos", feature = "next"))]
             numeric_identifiers: self.numeric_identifiers,
         };
         let root_path = self.source_name();
@@ -697,6 +756,16 @@ impl Loader {
                 report.root_container_path = Some(info.path);
                 report.root_format = Some(info.format);
 
+                // A directory has no size of its own: each file in it is an
+                // input with its own budget.
+                let mut nesting = match (&_source, &self.source) {
+                    (Some(source), _) => Some(source.as_slice().len()),
+                    (None, LoaderSource::Bytes { data, .. }) => Some(data.len()),
+                    #[cfg(feature = "std")]
+                    (None, LoaderSource::Path(_)) => None,
+                }
+                .map(NestingBudget::for_input);
+
                 // Keep _source alive - container may borrow from it.
                 visit_container_recursive(
                     container.as_ref(),
@@ -706,6 +775,7 @@ impl Loader {
                     entry_types,
                     &mut visitor,
                     &mut report,
+                    nesting.as_mut(),
                     true,
                 )?;
             }
@@ -798,6 +868,7 @@ fn visit_container_recursive<F>(
     entry_types: EntryType,
     visitor: &mut F,
     report: &mut VisitReport,
+    mut nesting: Option<&mut NestingBudget>,
     is_root_container: bool,
 ) -> Result<()>
 where
@@ -807,10 +878,34 @@ where
     let mut visitor_error: Option<Error> = None;
 
     let visit_result = container.visit(&mut |entry: &Entry<'_>| {
+        if let Some(budget) = nesting.as_deref_mut() {
+            budget.spend(entry.data.len());
+        }
+
         // Apply path filter if set - must match whole path segments.
         if let PathFilter::Prefix(filter) = path_filter {
             if !path_matches_prefix(entry.path, filter) {
                 return Ok(true);
+            }
+        }
+
+        // A later volume of an ARJ or RAR set is read through the volume
+        // before it, so listing it again would duplicate its files.
+        #[cfg(feature = "dos")]
+        if depth > 1 {
+            if let Some(rel) = extract_relative_path(entry.path, &prefix) {
+                let earlier = arj::volume_number(&rel)
+                    .filter(|&number| number > 0 && is_arj_archive(entry.data))
+                    .and_then(|number| arj::volume_name(&rel, number - 1));
+                #[cfg(feature = "__backend_dos_rar")]
+                let earlier = earlier.or_else(|| {
+                    is_rar_archive(entry.data)
+                        .then(|| rar::volume_before(&rel))
+                        .flatten()
+                });
+                if earlier.is_some_and(|earlier| container.has_file(&earlier)) {
+                    return Ok(true);
+                }
             }
         }
 
@@ -956,7 +1051,19 @@ where
         };
 
         // Recurse into containers AFTER calling visitor, based on return value.
-        if recurse && is_container && depth > 1 {
+        let mut own_nesting = None;
+        if recurse
+            && is_container
+            && depth > 1
+            && admit_nested(
+                nesting.as_deref_mut(),
+                &mut own_nesting,
+                entry.data.len(),
+                true,
+                entry.path,
+                report,
+            )
+        {
             let open_result = {
                 // Only used inside the matching cfg-gated block of the closure
                 // below — omit the binding entirely when the feature is off so
@@ -982,7 +1089,15 @@ where
                                 }
                             }
                         }
-                        container.get_file(sibling_path).map(<[u8]>::to_vec)
+                        if let Some(data) = container.get_file(sibling_path) {
+                            return Some(data.to_vec());
+                        }
+                        // Siblings named by full path, such as ARJ volumes.
+                        #[cfg(feature = "dos")]
+                        if let Some(rel) = extract_relative_path(sibling_path, &prefix) {
+                            return container.read_file(&rel).map(Cow::into_owned);
+                        }
+                        None
                     },
                     detected_format,
                 )
@@ -996,6 +1111,7 @@ where
                 entry_types,
                 visitor,
                 report,
+                nesting.as_deref_mut().or(own_nesting.as_mut()),
             ) {
                 visitor_error = Some(err);
                 return Err(visitor_error_sentinel());
@@ -1029,7 +1145,17 @@ where
                 } else {
                     true
                 };
-                if recurse && depth > 1 {
+                if recurse
+                    && depth > 1
+                    && admit_nested(
+                        nesting.as_deref_mut(),
+                        &mut own_nesting,
+                        rsrc.len(),
+                        false,
+                        &rsrc_path,
+                        report,
+                    )
+                {
                     let open_result = open_container_internal(
                         &rsrc,
                         &rsrc_path,
@@ -1047,6 +1173,7 @@ where
                         entry_types,
                         visitor,
                         report,
+                        nesting.as_deref_mut().or(own_nesting.as_mut()),
                     ) {
                         visitor_error = Some(err);
                         return Err(visitor_error_sentinel());
@@ -1083,6 +1210,36 @@ where
     Ok(())
 }
 
+// Whether a nested container of `len` bytes may be opened; `yielded` when
+// the parent container yielded those bytes as an entry. Without a shared
+// budget the parent is a directory and the file starts one of its own.
+fn admit_nested(
+    shared: Option<&mut NestingBudget>,
+    own: &mut Option<NestingBudget>,
+    len: usize,
+    yielded: bool,
+    path: &str,
+    report: &mut VisitReport,
+) -> bool {
+    let Some(budget) = shared else {
+        *own = Some(NestingBudget::for_input(len));
+        return true;
+    };
+    match budget.open(if yielded { 0 } else { len }) {
+        NestingCharge::Accepted => true,
+        NestingCharge::FirstRefused => {
+            report.push_diagnostic(
+                TraversalDiagnosticCode::NestedContainerOpenFailed,
+                path,
+                "the entries of this input exceed its size budget; \
+                 this and all further nested containers are not opened",
+            );
+            false
+        }
+        NestingCharge::Refused => false,
+    }
+}
+
 // Open failures become diagnostics; only visitor errors propagate.
 #[allow(clippy::too_many_arguments)]
 fn visit_nested<F>(
@@ -1094,6 +1251,7 @@ fn visit_nested<F>(
     entry_types: EntryType,
     visitor: &mut F,
     report: &mut VisitReport,
+    nesting: Option<&mut NestingBudget>,
 ) -> Result<()>
 where
     F: FnMut(&Entry<'_>) -> Result<VisitAction>,
@@ -1107,6 +1265,7 @@ where
             entry_types,
             visitor,
             report,
+            nesting,
             false,
         ),
         Err(err) => {
@@ -1140,7 +1299,7 @@ fn last_path_component(path: &str) -> &str {
     path.rsplit(['/', '\\']).next().unwrap_or(path)
 }
 
-#[cfg(any(feature = "common", all(feature = "xz", feature = "__backend_xz")))]
+#[cfg(any(feature = "common", feature = "xz"))]
 // Matches `std::path::Path::file_stem` semantics without requiring `std::path`
 // (this code compiles under `no_std`). Specifically:
 //   * "foo.ext"    -> Some("foo")
@@ -1162,15 +1321,15 @@ fn path_file_stem(path: &str) -> Option<&str> {
     }
 }
 
-// Name of the payload of a single-file compressed wrapper. `.tgz`, `.txz`
-// and `.tbz2`/`.tbz`/`.tb2` are shorthand for `.tar.gz`, `.tar.xz` and
-// `.tar.bz2`, so the payload keeps a `.tar` name.
-#[cfg(any(feature = "common", all(feature = "xz", feature = "__backend_xz")))]
+// Name of the payload of a single-file compressed wrapper. `.tgz`, `.txz`,
+// `.tlz` and `.tbz2`/`.tbz`/`.tb2` are shorthand for `.tar.gz`, `.tar.xz`,
+// `.tar.lzma` and `.tar.bz2`, so the payload keeps a `.tar` name.
+#[cfg(any(feature = "common", feature = "xz"))]
 fn decompressed_name(path: &str) -> String {
     let stem = path_file_stem(path).unwrap_or("unknown");
     match path_extension(path) {
         Some(ext)
-            if ["tgz", "txz", "tbz2", "tbz", "tb2"]
+            if ["tgz", "txz", "tlz", "tbz2", "tbz", "tb2"]
                 .iter()
                 .any(|short| ext.eq_ignore_ascii_case(short)) =>
         {
@@ -1198,15 +1357,18 @@ fn open_container_internal(
         return Err(Error::MaxDepthExceeded);
     }
 
-    #[cfg(not(any(feature = "macintosh", feature = "dos")))]
+    #[cfg(not(any(feature = "macintosh", feature = "dos", feature = "next")))]
     let _ = options;
     #[cfg(not(any(
         feature = "common",
-        all(feature = "xz", feature = "__backend_xz"),
+        feature = "xz",
         feature = "amiga",
         feature = "macintosh",
         feature = "game",
-        feature = "dos"
+        feature = "dos",
+        feature = "next",
+        feature = "beos",
+        feature = "lisa"
     )))]
     let _ = prefix;
 
@@ -1265,7 +1427,21 @@ fn open_container_internal(
                 depth,
             )?))
         }
-        #[cfg(all(feature = "xz", feature = "__backend_xz"))]
+        #[cfg(feature = "common")]
+        Some(ContainerFormat::Compress) => {
+            let mut inner_name = decompressed_name(path);
+            // `.taz` is shorthand for `.tar.Z`.
+            if path_extension(path).is_some_and(|ext| ext.eq_ignore_ascii_case("taz")) {
+                inner_name.push_str(".tar");
+            }
+            Ok(Box::new(CompressContainer::from_bytes(
+                data,
+                prefix.to_string(),
+                inner_name,
+                depth,
+            )?))
+        }
+        #[cfg(feature = "xz")]
         Some(ContainerFormat::Xz) => {
             let inner_name = decompressed_name(path);
             Ok(Box::new(XzContainer::from_bytes(
@@ -1394,6 +1570,43 @@ fn open_container_internal(
             prefix.to_string(),
             depth,
         )?)),
+        #[cfg(feature = "dos")]
+        Some(ContainerFormat::Arj) => Ok(Box::new(ArjContainer::from_bytes(
+            data,
+            prefix.to_string(),
+            depth,
+        )?)),
+        #[cfg(feature = "dos")]
+        Some(ContainerFormat::CueBin) => Ok(Box::new(CueBinContainer::from_bytes(
+            data,
+            prefix.to_string(),
+            depth,
+        )?)),
+        #[cfg(feature = "next")]
+        Some(ContainerFormat::NextDisklabel) => Ok(Box::new(NextDisklabelContainer::from_bytes(
+            data,
+            prefix.to_string(),
+            depth,
+            options.numeric_identifiers,
+        )?)),
+        #[cfg(feature = "next")]
+        Some(ContainerFormat::Ufs) => Ok(Box::new(UfsContainer::from_bytes(
+            data,
+            prefix.to_string(),
+            depth,
+        )?)),
+        #[cfg(feature = "beos")]
+        Some(ContainerFormat::Bfs) => Ok(Box::new(BfsContainer::from_bytes(
+            data,
+            prefix.to_string(),
+            depth,
+        )?)),
+        #[cfg(feature = "lisa")]
+        Some(ContainerFormat::LisaFs) => Ok(Box::new(LisaFsContainer::from_bytes(
+            data,
+            prefix.to_string(),
+            depth,
+        )?)),
         Some(ContainerFormat::Unknown) | None => Err(Error::unsupported(format!(
             "Could not detect container format for: {path}"
         ))),
@@ -1453,6 +1666,36 @@ where
         }
     }
 
+    // Later volumes of an ARJ set are siblings named after this one.
+    #[cfg(feature = "dos")]
+    if let Some(number) = arj::volume_number(path) {
+        let format = pre_detected_format.or_else(|| detect_format(path, Some(data)));
+        if matches!(format, Some(ContainerFormat::Arj)) {
+            return Ok(Box::new(ArjContainer::from_bytes_with_volumes(
+                data,
+                prefix.to_string(),
+                depth,
+                number,
+                &|number| arj::volume_name(path, number).and_then(|name| get_sibling(&name)),
+            )?));
+        }
+    }
+
+    #[cfg(all(feature = "dos", feature = "__backend_dos_rar"))]
+    if rar::volume_after(path, 1).is_some() {
+        let format = pre_detected_format.or_else(|| detect_format(path, Some(data)));
+        if matches!(format, Some(ContainerFormat::Rar)) {
+            return Ok(Box::new(RarContainer::from_bytes_with_volumes(
+                data,
+                prefix.to_string(),
+                depth,
+                &|steps| rar::volume_after(path, steps).and_then(|name| get_sibling(&name)),
+            )?));
+        }
+    }
+
+    // CueBin sibling wiring goes here
+
     // For other formats, just use the normal open
     open_container_internal(data, path, prefix, depth, options, pre_detected_format)
 }
@@ -1478,11 +1721,14 @@ pub fn detect_format(path: &str, data: Option<&[u8]>) -> Option<ContainerFormat>
     let data = data?;
     #[cfg(not(any(
         feature = "common",
-        all(feature = "xz", feature = "__backend_xz"),
+        feature = "xz",
         feature = "amiga",
         feature = "dos",
         feature = "macintosh",
-        feature = "game"
+        feature = "game",
+        feature = "next",
+        feature = "beos",
+        feature = "lisa"
     )))]
     let _ = data;
 
@@ -1492,10 +1738,12 @@ pub fn detect_format(path: &str, data: Option<&[u8]>) -> Option<ContainerFormat>
     // Helper macro to check format with content validation.
     #[cfg(any(
         feature = "common",
-        all(feature = "xz", feature = "__backend_xz"),
         feature = "amiga",
         feature = "dos",
-        feature = "macintosh"
+        feature = "macintosh",
+        feature = "next",
+        feature = "beos",
+        feature = "lisa"
     ))]
     macro_rules! try_format {
         ($check:expr, $format:expr) => {
@@ -1519,14 +1767,24 @@ pub fn detect_format(path: &str, data: Option<&[u8]>) -> Option<ContainerFormat>
             #[cfg(feature = "common")]
             ContainerFormat::Bzip2 => try_format!(is_bzip2_file, ContainerFormat::Bzip2),
             #[cfg(feature = "common")]
+            ContainerFormat::Compress => try_format!(is_compress_file, ContainerFormat::Compress),
+            #[cfg(feature = "common")]
             ContainerFormat::Tar => {
                 // For .tar extension, try POSIX magic first, then legacy validation
                 if is_tar_archive(data) || could_be_legacy_tar(data) {
                     return Some(ContainerFormat::Tar);
                 }
             }
-            #[cfg(all(feature = "xz", feature = "__backend_xz"))]
-            ContainerFormat::Xz => try_format!(is_xz_file, ContainerFormat::Xz),
+            #[cfg(feature = "xz")]
+            ContainerFormat::Xz => {
+                // Legacy `.lzma` has no magic, so it needs its own extension.
+                let legacy = path_extension(path).is_some_and(|ext| {
+                    ext.eq_ignore_ascii_case("lzma") || ext.eq_ignore_ascii_case("tlz")
+                });
+                if is_xz_file(data) || (legacy && is_lzma_file(data)) {
+                    return Some(ContainerFormat::Xz);
+                }
+            }
             #[cfg(feature = "amiga")]
             ContainerFormat::Lha => try_format!(is_lha_archive, ContainerFormat::Lha),
             #[cfg(feature = "amiga")]
@@ -1534,7 +1792,12 @@ pub fn detect_format(path: &str, data: Option<&[u8]>) -> Option<ContainerFormat>
             #[cfg(all(feature = "dos", feature = "__backend_dos_rar"))]
             ContainerFormat::Rar => try_format!(is_rar_archive, ContainerFormat::Rar),
             #[cfg(feature = "macintosh")]
-            ContainerFormat::Hfs => try_format!(is_hfs_image, ContainerFormat::Hfs),
+            ContainerFormat::Hfs => {
+                // A Lisa disk in a DiskCopy 4.2 wrapper is not an HFS image.
+                #[cfg(feature = "lisa")]
+                try_format!(is_lisa_image, ContainerFormat::LisaFs);
+                try_format!(is_hfs_image, ContainerFormat::Hfs);
+            }
             #[cfg(feature = "macintosh")]
             ContainerFormat::StuffIt => try_format!(is_stuffit_archive, ContainerFormat::StuffIt),
             #[cfg(feature = "macintosh")]
@@ -1570,6 +1833,18 @@ pub fn detect_format(path: &str, data: Option<&[u8]>) -> Option<ContainerFormat>
             ContainerFormat::Fat => try_format!(is_fat_image, ContainerFormat::Fat),
             #[cfg(feature = "dos")]
             ContainerFormat::Iso9660 => try_format!(is_iso9660_image, ContainerFormat::Iso9660),
+            #[cfg(feature = "dos")]
+            ContainerFormat::Arj => try_format!(is_arj_archive, ContainerFormat::Arj),
+            // A cue sheet is plain text without a magic number, so it is
+            // only probed under its own extension.
+            #[cfg(feature = "dos")]
+            ContainerFormat::CueBin => try_format!(is_cue_sheet, ContainerFormat::CueBin),
+            #[cfg(feature = "next")]
+            ContainerFormat::Ufs => try_format!(is_ufs_image, ContainerFormat::Ufs),
+            #[cfg(feature = "beos")]
+            ContainerFormat::Bfs => try_format!(is_bfs_image, ContainerFormat::Bfs),
+            #[cfg(feature = "lisa")]
+            ContainerFormat::LisaFs => try_format!(is_lisa_image, ContainerFormat::LisaFs),
             _ => {}
         }
     }
@@ -1594,12 +1869,16 @@ pub fn detect_format(path: &str, data: Option<&[u8]>) -> Option<ContainerFormat>
     if is_bzip2_file(data) {
         return Some(ContainerFormat::Bzip2);
     }
+    #[cfg(feature = "common")]
+    if is_compress_file(data) {
+        return Some(ContainerFormat::Compress);
+    }
     // Only detect TAR by POSIX magic in content-based detection (no extension)
     #[cfg(feature = "common")]
     if is_tar_archive(data) {
         return Some(ContainerFormat::Tar);
     }
-    #[cfg(all(feature = "xz", feature = "__backend_xz"))]
+    #[cfg(feature = "xz")]
     if is_xz_file(data) {
         return Some(ContainerFormat::Xz);
     }
@@ -1609,6 +1888,30 @@ pub fn detect_format(path: &str, data: Option<&[u8]>) -> Option<ContainerFormat>
         if is_lha_archive(data) {
             return Some(ContainerFormat::Lha);
         }
+    }
+
+    // Volumes identified by a checked label or superblock at a fixed offset
+    // (NeXT label at 0, BFS at 512, UFS at 8192). Probed before the two-byte
+    // HFS signature at 1024 and the 0x55AA boot sector formats, which their
+    // boot areas can imitate; the label precedes the volumes it describes.
+    #[cfg(feature = "next")]
+    {
+        if is_next_disklabel(data) {
+            return Some(ContainerFormat::NextDisklabel);
+        }
+        if is_ufs_image(data) {
+            return Some(ContainerFormat::Ufs);
+        }
+    }
+    #[cfg(feature = "beos")]
+    if is_bfs_image(data) {
+        return Some(ContainerFormat::Bfs);
+    }
+
+    // Before HFS: a Lisa disk in a DiskCopy 4.2 wrapper is not an HFS image.
+    #[cfg(feature = "lisa")]
+    if is_lisa_image(data) {
+        return Some(ContainerFormat::LisaFs);
     }
 
     #[cfg(feature = "macintosh")]
@@ -1665,7 +1968,8 @@ pub fn detect_format(path: &str, data: Option<&[u8]>) -> Option<ContainerFormat>
         // then MBR (generic 0x55AA signature with partition entries),
         // then ISO 9660 ("CD001" at sector 16; after the partition maps, so
         // isohybrid images keep opening as their partition table),
-        // then RAR (distinctive magic, no ambiguity)
+        // then RAR and ARJ (distinctive magic, no ambiguity; ARJ also needs
+        // a CRC-checked header)
         if is_fat_image(data) {
             return Some(ContainerFormat::Fat);
         }
@@ -1681,6 +1985,9 @@ pub fn detect_format(path: &str, data: Option<&[u8]>) -> Option<ContainerFormat>
         #[cfg(feature = "__backend_dos_rar")]
         if is_rar_archive(data) {
             return Some(ContainerFormat::Rar);
+        }
+        if is_arj_archive(data) {
+            return Some(ContainerFormat::Arj);
         }
     }
 
@@ -1712,7 +2019,7 @@ pub fn detect_format(path: &str, data: Option<&[u8]>) -> Option<ContainerFormat>
 ///
 /// Entry paths are formatted as `{prefix}/{relative_path}`.
 /// This extracts just the `relative_path` portion.
-#[cfg(feature = "macintosh")]
+#[cfg(any(feature = "macintosh", feature = "dos"))]
 fn extract_relative_path<'a>(full_path: &'a str, prefix: &str) -> Option<Cow<'a, str>> {
     // Filesystem directory entries on Windows are joined with `\\`; the
     // result always uses `/` so sidecar path conventions apply unchanged.
@@ -1746,7 +2053,7 @@ fn path_matches_prefix(entry_path: &str, filter: &str) -> bool {
 mod tests {
     use super::*;
 
-    #[cfg(any(feature = "common", all(feature = "xz", feature = "__backend_xz")))]
+    #[cfg(any(feature = "common", feature = "xz"))]
     #[test]
     fn decompressed_name_expands_tar_shorthand() {
         assert_eq!(decompressed_name("dir/a.txt.gz"), "a.txt");
@@ -1833,6 +2140,199 @@ mod tests {
             "other.lha/file.mod",
             "archive.lha/file.mod"
         ));
+    }
+
+    #[cfg(all(feature = "common", feature = "xz"))]
+    mod xz {
+        use super::*;
+
+        // The `xz` tool on a python3 tarfile (USTAR) with "docs/readme.txt"
+        // and "data.bin", and `xz` output for b"first, " followed by python3
+        // lzma.compress(b"second").
+        const TAR_XZ: &[u8] =
+            b"\xfd\x37\x7a\x58\x5a\x00\x00\x04\xe6\xd6\xb4\x46\x04\xc0\xcb\x01\x80\x50\x21\x01\
+            \x16\x00\x00\x00\x00\x00\x00\x00\xaa\x80\xdb\xf9\xe0\x27\xff\x00\xc3\x5d\x00\x32\
+            \x1b\xc8\x8e\x74\xd3\xdb\xa0\x0c\x9d\xd3\xd7\x8f\xb6\xa9\x19\xec\x38\xb8\x59\xbd\
+            \x36\xc2\x8c\xf1\xaf\xb8\xd0\xf7\xc1\x29\x25\x34\x89\x4b\x5d\x66\x2e\xe6\x3b\xbc\
+            \x8e\x29\x8c\x06\x1b\x7a\x30\x79\xe1\x79\x41\x15\x63\x4c\x1b\x08\xee\xe3\xd3\xcf\
+            \xfd\x00\x92\x02\xd3\x40\x24\xb7\x3c\x57\x70\x33\xe5\x0d\xf0\xc3\x27\xfe\x89\xf5\
+            \x01\x03\xa5\x14\x42\x6f\xea\xeb\x62\x5c\xae\xae\xd6\x6d\x64\xa7\x2c\xfb\xe7\xee\
+            \x07\x2e\x21\x4a\x49\xba\xcf\xa2\xed\xdc\x4f\x58\xc8\xfc\x29\x72\x7d\x1d\x1e\x0c\
+            \xa5\x1d\x86\xd9\xb7\xea\xa2\xe8\x29\x3d\xa7\x31\xb3\x52\x63\x03\xf9\x66\xe1\xf9\
+            \xd4\x7c\x6c\xad\x0e\xbe\x62\x36\xcd\x91\x0b\x31\x5c\xe4\xe5\xc9\x41\x84\x0d\x37\
+            \x1d\xab\x14\x25\x09\x54\xef\x2a\xd4\xd4\x70\xc1\x05\xa0\x9b\xbd\x81\x5a\x70\x45\
+            \x2f\x16\x8a\x6f\x1c\xfe\x80\x35\x88\x9e\x27\x5a\x08\x00\x00\x00\x07\x37\x0b\x07\
+            \x07\x3f\xf6\x8a\x00\x01\xe7\x01\x80\x50\x00\x00\xdc\x4e\x91\x74\xb1\xc4\x67\xfb\
+            \x02\x00\x00\x00\x00\x04\x59\x5a";
+        const TWO_STREAMS: &[u8] =
+            b"\xfd\x37\x7a\x58\x5a\x00\x00\x04\xe6\xd6\xb4\x46\x04\xc0\x0b\x07\x21\x01\x16\x00\
+            \x00\x00\x00\x00\x00\x00\x00\x00\x59\x08\x17\xe6\x01\x00\x06\x66\x69\x72\x73\x74\
+            \x2c\x20\x00\x00\x71\x23\x65\xe0\x0a\x4c\x0e\xec\x00\x01\x27\x07\xed\x92\x27\x64\
+            \x1f\xb6\xf3\x7d\x01\x00\x00\x00\x00\x04\x59\x5a\xfd\x37\x7a\x58\x5a\x00\x00\x04\
+            \xe6\xd6\xb4\x46\x02\x00\x21\x01\x16\x00\x00\x00\x74\x2f\xe5\xa3\x01\x00\x05\x73\
+            \x65\x63\x6f\x6e\x64\x00\x00\x00\x38\xe8\x88\xc5\xc6\x30\xb4\x74\x00\x01\x1e\x06\
+            \xc1\x2f\xa4\x1d\x1f\xb6\xf3\x7d\x01\x00\x00\x00\x00\x04\x59\x5a";
+
+        type Listing = Vec<(String, Vec<u8>)>;
+
+        fn leaves(data: &[u8], name: &str) -> Result<Listing> {
+            let mut entries = Listing::new();
+            Loader::from_bytes(data.to_vec(), name).visit(EntryType::Leaves, |e| {
+                entries.push((e.path.to_string(), e.data.to_vec()));
+                Ok(VisitAction::Continue)
+            })?;
+            Ok(entries)
+        }
+
+        fn tar_listing(name: &str, inner: &str) -> Listing {
+            let data: Vec<u8> = (0..64).collect();
+            vec![
+                (format!("{name}/{inner}/data.bin"), data),
+                (
+                    format!("{name}/{inner}/docs/readme.txt"),
+                    b"hello from tar\n".to_vec(),
+                ),
+            ]
+        }
+
+        #[test]
+        fn tar_xz_lists_the_inner_files() {
+            assert_eq!(
+                leaves(TAR_XZ, "t.tar.xz").unwrap(),
+                tar_listing("t.tar.xz", "t.tar")
+            );
+        }
+
+        #[test]
+        fn txz_lists_the_inner_files() {
+            for name in ["t.txz", "T.TXZ"] {
+                let stem = &name[..1];
+                assert_eq!(
+                    leaves(TAR_XZ, name).unwrap(),
+                    tar_listing(name, &format!("{stem}.tar")),
+                    "{name}"
+                );
+            }
+        }
+
+        #[test]
+        fn detected_by_content_without_extension() {
+            for name in ["archive", "archive.dat", "archive.gz", "archive.bin"] {
+                assert_eq!(
+                    detect_format(name, Some(TAR_XZ)),
+                    Some(ContainerFormat::Xz),
+                    "{name}"
+                );
+            }
+            assert_eq!(
+                detect_format("t.xz", Some(TAR_XZ)),
+                Some(ContainerFormat::Xz)
+            );
+            // The extension alone is not enough.
+            assert_eq!(detect_format("t.xz", Some(b"7zXZ plain text")), None);
+
+            // POSIX tar magic is found in the payload of an extensionless file.
+            assert_eq!(
+                leaves(TAR_XZ, "archive").unwrap(),
+                tar_listing("archive", "archive")
+            );
+        }
+
+        #[test]
+        fn streams_are_concatenated_and_padding_skipped() {
+            let expected = vec![("t.txt.xz/t.txt".to_string(), b"first, second".to_vec())];
+            assert_eq!(leaves(TWO_STREAMS, "t.txt.xz").unwrap(), expected);
+            let padded = [TWO_STREAMS, &[0u8; 700]].concat();
+            assert_eq!(leaves(&padded, "t.txt.xz").unwrap(), expected);
+        }
+
+        // python3 lzma.compress(format=FORMAT_ALONE) of the same tar.
+        const TAR_LZMA: &[u8] = b"\
+            \x5d\x00\x00\x80\x00\xff\xff\xff\xff\xff\xff\xff\xff\x00\x32\x1b\xc8\x8e\x74\xd3\
+            \xdb\xa0\x0c\x9d\xd3\xd7\x8f\xb6\xa9\x19\xec\x38\xb8\x59\xbd\x36\xc2\x8c\xf1\xaf\
+            \xb8\xd0\xf7\xc1\x29\x25\x34\x89\x4b\x5d\x66\x2e\xe6\x3b\xbc\x8e\x29\x8c\x06\x1b\
+            \x7a\x30\x79\xe1\x79\x41\x15\x63\x4c\x1b\x08\xee\xe3\xd3\xcf\xfd\x00\x92\x02\xd3\
+            \x40\x24\xb7\x3c\x57\x70\x33\xe5\x0d\xf0\xc3\x27\xfe\x89\xf5\x01\x03\xa5\x14\x42\
+            \x6f\xea\xeb\x62\x5c\xae\xae\xd6\x6d\x64\xa7\x2c\xfb\xe7\xee\x07\x2e\x21\x4a\x49\
+            \xba\xcf\xa2\xed\xdc\x4f\x58\xc8\xfc\x29\x72\x7d\x1d\x1e\x0c\xa5\x1d\x86\xd9\xb7\
+            \xea\xa2\xe8\x29\x3d\xa7\x31\xb3\x52\x63\x03\xf9\x66\xe1\xf9\xd4\x7c\x6c\xad\x0e\
+            \xbe\x62\x36\xcd\x91\x0b\x31\x5c\xe4\xe5\xc9\x41\x84\x0d\x37\x1d\xab\x14\x25\x09\
+            \x54\xef\x2a\xd4\xd4\x70\xc1\x05\xa0\x9b\xbd\x81\x5a\x70\x45\x2f\x16\x8a\x6f\x1c\
+            \xfe\x80\x35\x88\x9e\x2a\x70\x58\xa2\xff\xff\x13\x8b\x4a\x00";
+
+        #[test]
+        fn legacy_lzma_is_opened_by_extension_only() {
+            for name in ["t.tar.lzma", "T.TAR.LZMA"] {
+                let stem = &name[..5];
+                assert_eq!(
+                    leaves(TAR_LZMA, name).unwrap(),
+                    tar_listing(name, stem),
+                    "{name}"
+                );
+            }
+            for name in ["t.tlz", "T.TLZ"] {
+                assert_eq!(
+                    leaves(TAR_LZMA, name).unwrap(),
+                    tar_listing(name, &format!("{}.tar", &name[..1])),
+                    "{name}"
+                );
+            }
+            // No magic: other names, `.xz` included, do not select it.
+            for name in ["t", "t.xz", "t.txz", "t.bin", "t.tar"] {
+                assert_eq!(detect_format(name, Some(TAR_LZMA)), None, "{name}");
+            }
+            assert_eq!(detect_format("t.lzma", Some(b"plain text, not lzma")), None);
+            // An xz stream under a legacy name is still an xz stream.
+            assert_eq!(
+                leaves(TAR_XZ, "t.tlz").unwrap(),
+                tar_listing("t.tlz", "t.tar")
+            );
+
+            let trailing = [TAR_LZMA, b"garbage"].concat();
+            let mut seen = 0;
+            let report = Loader::from_bytes(trailing, "t.tar.lzma")
+                .visit_with_report(EntryType::All, |_| {
+                    seen += 1;
+                    Ok(VisitAction::Continue)
+                })
+                .unwrap();
+            assert_eq!(seen, 0);
+            let message = &report.diagnostics[0].message;
+            assert!(message.contains("lzma"), "{message}");
+        }
+
+        // Entries seen and the diagnostics reported for a file that fails to open.
+        fn failure(data: &[u8]) -> (usize, Vec<String>) {
+            let mut seen = 0;
+            let report = Loader::from_bytes(data.to_vec(), "t.tar.xz")
+                .visit_with_report(EntryType::All, |_| {
+                    seen += 1;
+                    Ok(VisitAction::Continue)
+                })
+                .unwrap();
+            let messages = report.diagnostics.into_iter().map(|d| d.message);
+            (seen, messages.collect())
+        }
+
+        #[test]
+        fn corrupt_and_truncated_files_are_reported() {
+            let mut corrupt = TAR_XZ.to_vec();
+            corrupt[TAR_XZ.len() / 2] ^= 0x04;
+            let (seen, messages) = failure(&corrupt);
+            assert_eq!(seen, 0);
+            assert!(messages[0].contains("xz"), "{messages:?}");
+
+            for cut in [6, 12, TAR_XZ.len() / 2, TAR_XZ.len() - 1] {
+                let (seen, messages) = failure(&TAR_XZ[..cut]);
+                assert_eq!(seen, 0, "cut {cut}");
+                assert!(messages[0].contains("xz"), "cut {cut}: {messages:?}");
+            }
+
+            let trailing = [TAR_XZ, b"garbage"].concat();
+            let (seen, messages) = failure(&trailing);
+            assert_eq!(seen, 0);
+            assert!(messages[0].contains("xz"), "{messages:?}");
+        }
     }
 
     #[cfg(feature = "common")]

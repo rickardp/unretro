@@ -84,6 +84,8 @@ pub(crate) mod byte_search;
 mod huffman;
 mod lzss;
 mod ppm;
+pub mod rar15;
+pub mod rar20;
 mod rar29;
 pub mod rar5;
 mod vm;

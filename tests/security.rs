@@ -467,3 +467,195 @@ fn write_fat12_entry(image: &mut [u8], fat_offset: usize, cluster: u16, value: u
         image[byte_offset + 1] = ((value >> 4) & 0xFF) as u8;
     }
 }
+
+// ============================================================================
+// V11: Nested containers whose entries alias the same bytes
+// ============================================================================
+
+const HFSPLUS_BLOCK: usize = 512;
+const HFSPLUS_NODE: usize = 4096;
+
+// HFS Plus fork data: logical size, then (start block, block count) extents.
+fn hfsplus_fork(size: usize, extents: &[(u32, u32)]) -> [u8; 80] {
+    let mut fork = [0u8; 80];
+    fork[0..8].copy_from_slice(&(size as u64).to_be_bytes());
+    for (i, (start, count)) in extents.iter().enumerate() {
+        fork[16 + i * 8..20 + i * 8].copy_from_slice(&start.to_be_bytes());
+        fork[20 + i * 8..24 + i * 8].copy_from_slice(&count.to_be_bytes());
+    }
+    fork
+}
+
+// Catalog file record in the root folder, data fork only.
+fn hfsplus_file_record(name: &str, id: u32, data_fork: [u8; 80]) -> Vec<u8> {
+    let name: Vec<u16> = name.encode_utf16().collect();
+    let mut record = Vec::new();
+    record.extend(((6 + 2 * name.len()) as u16).to_be_bytes());
+    record.extend(2u32.to_be_bytes());
+    record.extend((name.len() as u16).to_be_bytes());
+    for unit in &name {
+        record.extend(unit.to_be_bytes());
+    }
+    let data = record.len();
+    record.resize(data + 248, 0);
+    record[data + 1] = 2;
+    record[data + 8..data + 12].copy_from_slice(&id.to_be_bytes());
+    record[data + 88..data + 168].copy_from_slice(&data_fork);
+    record
+}
+
+// Catalog B-tree: header node, then one leaf per 14 records.
+fn hfsplus_catalog(records: &[Vec<u8>]) -> Vec<u8> {
+    let chunks: Vec<&[Vec<u8>]> = records.chunks(14).collect();
+    let mut catalog = vec![0u8; HFSPLUS_NODE];
+    catalog[8] = 1;
+    catalog[10..12].copy_from_slice(&3u16.to_be_bytes());
+    catalog[24..28].copy_from_slice(&1u32.to_be_bytes());
+    catalog[32..34].copy_from_slice(&(HFSPLUS_NODE as u16).to_be_bytes());
+    for (i, chunk) in chunks.iter().enumerate() {
+        let mut node = vec![0u8; HFSPLUS_NODE];
+        let next = if i + 1 < chunks.len() {
+            i as u32 + 2
+        } else {
+            0
+        };
+        node[0..4].copy_from_slice(&next.to_be_bytes());
+        node[8] = 0xFF;
+        node[9] = 1;
+        node[10..12].copy_from_slice(&(chunk.len() as u16).to_be_bytes());
+        let mut offset = 14;
+        for (slot, record) in chunk.iter().enumerate() {
+            node[offset..offset + record.len()].copy_from_slice(record);
+            let at = HFSPLUS_NODE - 2 * (slot + 1);
+            node[at..at + 2].copy_from_slice(&(offset as u16).to_be_bytes());
+            offset += record.len();
+        }
+        let at = HFSPLUS_NODE - 2 * (chunk.len() + 1);
+        node[at..at + 2].copy_from_slice(&(offset as u16).to_be_bytes());
+        catalog.extend(node);
+    }
+    catalog
+}
+
+// Volume of three reserved blocks, the catalog, then `data_blocks` blocks.
+// Returns the image and the first data block.
+fn hfsplus_volume(catalog: &[u8], data_blocks: usize) -> (Vec<u8>, u32) {
+    let catalog_blocks = catalog.len() / HFSPLUS_BLOCK;
+    let first = 3 + catalog_blocks;
+    let blocks = first + data_blocks;
+    let mut image = vec![0u8; blocks * HFSPLUS_BLOCK];
+    image[3 * HFSPLUS_BLOCK..][..catalog.len()].copy_from_slice(catalog);
+    let header = &mut image[1024..1536];
+    header[0..4].copy_from_slice(b"H+\x00\x04");
+    header[40..44].copy_from_slice(&(HFSPLUS_BLOCK as u32).to_be_bytes());
+    header[44..48].copy_from_slice(&(blocks as u32).to_be_bytes());
+    header[272..352].copy_from_slice(&hfsplus_fork(catalog.len(), &[(3, catalog_blocks as u32)]));
+    (image, first as u32)
+}
+
+// `files` files in one volume, all with the extents and size that
+// `data_fork(first data block)` gives.
+fn hfsplus_aliasing_volume(
+    files: usize,
+    data_blocks: usize,
+    data_fork: impl Fn(u32) -> [u8; 80],
+) -> (Vec<u8>, u32) {
+    let catalog = |first: u32| {
+        let records: Vec<Vec<u8>> = (0..files)
+            .map(|i| hfsplus_file_record(&format!("v{i}.img"), 16 + i as u32, data_fork(first)))
+            .collect();
+        hfsplus_catalog(&records)
+    };
+    let first = 3 + (catalog(0).len() / HFSPLUS_BLOCK) as u32;
+    hfsplus_volume(&catalog(first), data_blocks)
+}
+
+// `levels` volumes inside each other, each holding the next one as `files`
+// files with the same extents: `files^levels` copies of the innermost file.
+fn hfsplus_nested_volumes(files: usize, levels: usize) -> Vec<u8> {
+    let (mut image, first) = hfsplus_aliasing_volume(1, 1, |first| hfsplus_fork(1, &[(first, 1)]));
+    image[first as usize * HFSPLUS_BLOCK] = b'x';
+    for _ in 0..levels {
+        let blocks = image.len() / HFSPLUS_BLOCK;
+        let (mut outer, first) = hfsplus_aliasing_volume(files, blocks, |first| {
+            hfsplus_fork(image.len(), &[(first, blocks as u32)])
+        });
+        outer[first as usize * HFSPLUS_BLOCK..][..image.len()].copy_from_slice(&image);
+        image = outer;
+    }
+    image
+}
+
+// Two copies of one volume, every file of which is both copies: each file is
+// the image itself, read from blocks that hold no volume structure in use.
+fn hfsplus_self_similar_volume(files: usize) -> Vec<u8> {
+    let (mut image, half) = hfsplus_aliasing_volume(files, 0, |half| {
+        hfsplus_fork(
+            2 * half as usize * HFSPLUS_BLOCK,
+            &[(half, half), (half, half)],
+        )
+    });
+    let half = half as usize * HFSPLUS_BLOCK;
+    image[1024 + 44..1024 + 48].copy_from_slice(&((2 * half / HFSPLUS_BLOCK) as u32).to_be_bytes());
+    let copy = image.clone();
+    image.extend(copy);
+    image
+}
+
+fn budget_diagnostics(report: &unretro::VisitReport) -> usize {
+    report
+        .diagnostics
+        .iter()
+        .filter(|d| {
+            d.code == unretro::TraversalDiagnosticCode::NestedContainerOpenFailed
+                && d.message.contains("size budget")
+        })
+        .count()
+}
+
+#[test]
+fn test_v11_honest_nested_volumes_are_listed_in_full() {
+    let report = Loader::from_bytes(hfsplus_nested_volumes(2, 3), "nested.img")
+        .visit_with_report(EntryType::Leaves, |entry| {
+            assert_eq!(entry.data, b"x");
+            Ok(VisitAction::Continue)
+        })
+        .unwrap();
+    assert_eq!(report.visited_leaves, 8);
+    assert!(report.diagnostics.is_empty(), "{:?}", report.diagnostics);
+}
+
+#[test]
+fn test_v11_aliased_nested_volumes_stop_at_the_budget() {
+    // 4^16 leaves from a 166 KiB image if every level were opened.
+    let image = hfsplus_nested_volumes(4, 16);
+    assert!(image.len() < 200 * 1024);
+    let report = Loader::from_bytes(image, "nested.img")
+        .visit_with_report(EntryType::Leaves, |_| Ok(VisitAction::Continue))
+        .unwrap();
+    assert!(report.visited_leaves > 0);
+    assert!(
+        report.visited_leaves < 4_000_000,
+        "{}",
+        report.visited_leaves
+    );
+    assert_eq!(budget_diagnostics(&report), 1, "{:?}", report.diagnostics);
+}
+
+#[test]
+fn test_v11_self_similar_volume_stops_at_the_budget() {
+    // Every file is the image again: 14^31 containers at the default depth.
+    let image = hfsplus_self_similar_volume(14);
+    assert!(image.len() < 20 * 1024);
+    let report = Loader::from_bytes(image, "self.img")
+        .visit_with_report(EntryType::All, |_| Ok(VisitAction::Continue))
+        .unwrap();
+    assert_eq!(report.visited_leaves, 0);
+    assert!(report.visited_containers > 14);
+    assert!(
+        report.visited_containers < 1_000_000,
+        "{}",
+        report.visited_containers
+    );
+    assert_eq!(budget_diagnostics(&report), 1, "{:?}", report.diagnostics);
+}

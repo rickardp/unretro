@@ -122,7 +122,7 @@ Root vs recoverable behavior:
 | Category | Codes |
 |---|---|
 | Root failures | `RootOpenFailed`, `RootUnsupportedFormat`, `RootTraversalFailed` |
-| Recoverable nested/resource issues | `NestedContainerOpenFailed`, `NestedContainerTraversalFailed`, `ResourceForkTraversalFailed` |
+| Recoverable nested/resource issues | `NestedContainerOpenFailed` (also reported once when the nesting budget of an input is spent), `NestedContainerTraversalFailed`, `ResourceForkTraversalFailed` |
 | Recoverable at any depth, root included | `ContainerEntriesSkipped` (damaged or unsupported entries left out; the readable ones were visited) |
 
 ## Feature Layering
@@ -133,9 +133,9 @@ Public feature toggles in `Cargo.toml`:
 
 Internal implementation toggles (not API contract):
 
-- `__backend_xz`, `__backend_dos_rar`.
+- `__backend_dos_rar`.
 
-What the features add (the internal toggles are enabled by `std`):
+What the features add (the internal toggle is enabled by `std`):
 
 - `common` alone: ZIP, GZIP, BZIP2 and TAR, with native readers (`formats/common/zip.rs`,
   `gzip.rs`, `bzip2_container.rs`, `tar.rs`) over native inflate and bzip2 decoders
@@ -144,12 +144,19 @@ What the features add (the internal toggles are enabled by `std`):
 - `common` or `macintosh`: the inflate decoder, the zlib wrapper
   (`formats/common/zlib.rs`) and the bzip2 decoder, which UDIF disk images use for
   zlib- and bzip2-compressed blocks.
-- `xz` + `__backend_xz`: XZ files, and LZMA/XZ-compressed ZIP entries (`xz2`).
+- `xz`: XZ and legacy `.lzma` files (`formats/common/xz.rs`).
+- `common`, `xz` or `macintosh`: the native `.xz` stream decoder
+  (`formats/common/xz_decode.rs`) and LZMA/LZMA2 decoder (`formats/common/lzma.rs`),
+  which have no dependencies and build for `no_std` + `alloc`. ZIP uses them for
+  LZMA and XZ entries and UDIF disk images for LZMA blocks.
 
 StuffIt has no backend toggle: its reader (`formats/macintosh/sit/`) has no dependencies,
-builds for `no_std` + `alloc` and is part of `macintosh`. Only its method 14 needs
-`common`, for the native inflate decoder. The public `stuffit` feature is a no-op kept
+builds for `no_std` + `alloc` and is part of `macintosh`, including method 14, which
+uses the native inflate decoder. The public `stuffit` feature is a no-op kept
 for existing feature lists.
+
+LHA has no backend toggle either: its reader (`formats/amiga/lzh/`) has no dependencies,
+builds for `no_std` + `alloc` and is part of `amiga`.
 
 Design intent:
 
@@ -162,13 +169,22 @@ Design intent:
 
 - `common/`: directory, zip, gzip, bzip2, tar, xz
 - `macintosh/`: hfs, stuffit, compactpro, binhex, macbinary, apple_double, resource_fork
+  - `hfs.rs` locates the volume (UDIF/NDIF decoding, raw CD sectors, DiskCopy 4.2,
+    partition maps, HFS wrapper), reads HFS and MFS, and is the container for all four
+    volume formats. `hfsplus.rs` is the HFS Plus/HFSX volume reader it dispatches to on
+    the volume signature (clean-room, from Apple Technical Note TN1150); it has no
+    container of its own and shares `ForkBudget` with the HFS reader.
   - `stuffit.rs` is the container glue (paths, forks as entries, output budget,
     skipped-entry diagnostics); `sit/` holds the classic and StuffIt 5 parsers and one
     decoder per compression method. `sit/` is written only from the prose specification
     in `docs/stuffit/` (clean-room; see its README).
 - `amiga/`: lha, adf
+  - `lha.rs` is the container glue (paths, sorting, the per-archive decoding budget,
+    skipped-entry diagnostics); `lzh/` holds the header parser for levels 0 to 3 and one decoder per
+    method family. `lzh/` is written only from the prose specification in `docs/lha/`
+    (clean-room; see its README).
 - `game/`: scumm, wad, pak, wolf3d
-- `dos/`: fat, mbr, gpt, iso9660, rar
+- `dos/`: fat, mbr, gpt, iso9660, rar, arj
 - `cd_sector.rs`: raw 2352-byte CD sector access shared by hfs and iso9660
 
 Each implementation provides container open/visit behavior and metadata extraction matching core contracts.

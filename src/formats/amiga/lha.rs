@@ -1,119 +1,77 @@
 //! LHA/LZH archive container support.
+//!
+//! Container glue over the reader in `lzh`, which is written from the format
+//! specification in `docs/lha/`.
 
-use delharc::LhaDecodeReader;
-#[cfg(not(feature = "std"))]
-use delharc::Read as _;
-#[cfg(feature = "std")]
-use std::io::Read as _;
-
-use crate::compat::{FastMap, String, Vec, format};
+use crate::compat::{FastMap, String, ToString, Vec, format};
 use crate::error::{Error, Result};
 use crate::format::ContainerFormat;
 use crate::sanitize_archive_path;
 use crate::{Container, ContainerInfo, Entry, Metadata};
 
-/// Check if data looks like an LHA archive.
+use super::lzh::{self, EntryKind};
+
+// Bytes decoded per archive, as a multiple of the bytes its entries occupy.
+// All entries are held in memory at once, so this is also the memory
+// amplification bound. The static Huffman methods can express far more
+// (methods.md 8.20). There is no minimum: one would apply again to every
+// nested archive, and seven packed bytes are enough to claim 16 MiB.
+const BUDGET_RATIO: u64 = 1024;
+
+/// Check if data starts with a valid LHA entry header.
 #[must_use]
 pub fn is_lha_archive(data: &[u8]) -> bool {
-    // LHA header at offset 2: "-lh" or "-lz"
-    if data.len() < 5 {
-        return false;
-    }
-    &data[2..5] == b"-lh" || &data[2..5] == b"-lz"
+    lzh::detect(data)
 }
 
-/// Internal entry storage.
 struct LhaEntry {
     path: String,
     data: Vec<u8>,
-    /// Compression metadata.
     metadata: Option<Metadata>,
 }
 
 /// Container for LHA/LZH archives.
 pub struct LhaContainer {
-    /// Display path prefix.
     prefix: String,
-    /// Extracted entries.
     entries: Vec<LhaEntry>,
-    /// Case-insensitive path index for sibling lookups.
+    // Case-insensitive path index for sibling lookups.
     path_index: FastMap<String, usize>,
+    skipped: Option<String>,
 }
 
 impl LhaContainer {
     /// Open an LHA archive from bytes.
     pub fn from_bytes(data: &[u8], prefix: String, _depth: u32) -> Result<Self> {
+        let mut archive = lzh::parse(data)?;
+        // Junk before the first header and bytes after the end marker buy
+        // nothing.
+        let covered = archive.end.saturating_sub(archive.start) as u64;
+        let mut budget = lzh::Budget::new(covered.saturating_mul(BUDGET_RATIO));
         let mut entries = Vec::new();
+        let mut skipped = Skipped::default();
+        let listing_end = archive.incomplete.then(|| archive.findings.last().cloned());
 
-        let mut lha = LhaDecodeReader::new(data)
-            .map_err(|e| Error::invalid_format(format!("Invalid LHA archive: {e}")))?;
-
-        loop {
-            let header = lha.header();
-            let entry_path = header.parse_pathname_to_str();
-
-            // Skip directories
-            if !header.is_directory() {
-                // Get compression method from header
-                let metadata = lha_compression_metadata(header);
-
-                let max_size = crate::limits::max_decompressed_size();
-                // The header size is only a hint; real growth follows decoded data.
-                let mut file_data =
-                    Vec::with_capacity(crate::limits::prealloc_hint(header.original_size));
-                let mut read_buf = [0_u8; 65536];
-                loop {
-                    // delharc 0.6 only re-exports its own `Read` trait when its
-                    // `std` feature is off. With `std` on the `LhaDecodeReader`
-                    // implements `std::io::Read` directly and `read_all` is gone.
-                    #[cfg(feature = "std")]
-                    let read = match lha.read(&mut read_buf) {
-                        Ok(n) => n,
-                        Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
-                        Err(e) => {
-                            return Err(Error::decompression(format!(
-                                "Error extracting from LHA: {e}"
-                            )));
-                        }
-                    };
-                    #[cfg(not(feature = "std"))]
-                    let read = lha.read_all(&mut read_buf).map_err(|e| {
-                        Error::decompression(format!("Error extracting from LHA: {e}"))
-                    })?;
-                    if read == 0 {
-                        break;
-                    }
-                    file_data.extend_from_slice(&read_buf[..read]);
-                    if file_data.len() > max_size {
-                        return Err(Error::decompression(format!(
-                            "LHA entry '{}' decompressed size exceeds {} byte limit",
-                            entry_path, max_size
-                        )));
-                    }
-                }
-
-                entries.push(LhaEntry {
-                    path: entry_path,
-                    data: file_data,
-                    metadata,
-                });
-            }
-
-            match lha.next_file() {
-                Ok(true) => continue,
-                Ok(false) => break,
-                Err(e) => {
-                    return Err(Error::invalid_format(format!(
-                        "Error reading LHA archive: {e}"
-                    )));
-                }
+        // Directories and symbolic links have no contents to visit.
+        for entry in archive
+            .entries
+            .iter()
+            .filter(|entry| entry.kind == EntryKind::File)
+        {
+            // An entry error delivers no contents and never stops the
+            // reading of later entries (container.md 1.2).
+            match lzh::read_entry(data, entry, &mut budget, &mut archive.findings) {
+                Ok(data) => entries.push(LhaEntry {
+                    path: escape_c1(&entry.path),
+                    data,
+                    metadata: compression_metadata(&entry.method_id),
+                }),
+                Err(err) => skipped.entry(&entry.path, &err),
             }
         }
 
         // Sort for consistent ordering
         entries.sort_by(|a, b| a.path.cmp(&b.path));
 
-        // Build case-insensitive path index for sibling lookups
         let path_index =
             crate::formats::build_path_index(entries.iter().enumerate().map(|(i, e)| (i, &e.path)));
 
@@ -121,6 +79,7 @@ impl LhaContainer {
             prefix,
             entries,
             path_index,
+            skipped: skipped.summary(listing_end),
         })
     }
 
@@ -129,42 +88,65 @@ impl LhaContainer {
     }
 }
 
-/// Get compression metadata from LHA header.
-fn lha_compression_metadata(header: &delharc::LhaHeader) -> Option<Metadata> {
-    // The compression field is a 5-byte string like "-lh5-"
-    let comp = &header.compression;
+#[derive(Default)]
+struct Skipped {
+    entries: usize,
+    first: Option<String>,
+}
 
-    // Extract method name from the compression string
-    let method_name = match comp {
-        b"-lh0-" | b"-lz4-" | b"-pm0-" => return None, // Stored, no compression
-        b"-lh1-" => "lh1",
-        b"-lh2-" => "lh2",
-        b"-lh3-" => "lh3",
-        b"-lh4-" => "lh4",
-        b"-lh5-" => "lh5",
-        b"-lh6-" => "lh6",
-        b"-lh7-" => "lh7",
-        b"-lh8-" => "lh8",
-        b"-lh9-" => "lh9",
-        b"-lha-" => "lha",
-        b"-lhx-" => "lhx",
-        b"-lzs-" => "lzs",
-        b"-lz5-" => "lz5",
-        b"-pm1-" => "pm1",
-        b"-pm2-" => "pm2",
-        _ => {
-            // Try to extract from unknown format
-            if comp.len() >= 4 && comp[0] == b'-' {
-                return Some(
-                    Metadata::new()
-                        .with_compression_method(String::from_utf8_lossy(&comp[1..4]).into_owned()),
-                );
-            }
-            return None;
+impl Skipped {
+    fn entry(&mut self, path: &str, err: &Error) {
+        self.entries += 1;
+        if self.first.is_none() {
+            self.first = Some(format!("{path}: {err}"));
         }
-    };
+    }
 
-    Some(Metadata::new().with_compression_method(method_name))
+    // `listing_end`: the entry list is incomplete, with the reason if known.
+    fn summary(self, listing_end: Option<Option<String>>) -> Option<String> {
+        let entries = self.first.map(|first| {
+            format!(
+                "{} unreadable entries left out, first: {first}",
+                self.entries
+            )
+        });
+        let listing = listing_end.map(|reason| match reason {
+            Some(reason) => {
+                let reason = reason.strip_prefix("LHA: ").unwrap_or(&reason);
+                format!("entry list is incomplete ({reason})")
+            }
+            None => "entry list is incomplete".to_string(),
+        });
+        match (listing, entries) {
+            (Some(listing), Some(entries)) => Some(format!("LHA: {listing}; {entries}")),
+            (Some(message), None) | (None, Some(message)) => Some(format!("LHA: {message}")),
+            (None, None) => None,
+        }
+    }
+}
+
+// Bytes 80 to 9F of a name that is not UTF-8 arrive as the C1 control
+// characters (DECISION 14), which the path sanitiser would all turn into
+// "_". Written as "%XX" they stay apart.
+fn escape_c1(path: &str) -> String {
+    let mut escaped = String::with_capacity(path.len());
+    for ch in path.chars() {
+        if ('\u{80}'..='\u{9F}').contains(&ch) {
+            escaped.push_str(&format!("%{:02X}", u32::from(ch)));
+        } else {
+            escaped.push(ch);
+        }
+    }
+    escaped
+}
+
+// The three characters of a "-xxx-" identifier; nothing for stored data.
+fn compression_metadata(method_id: &[u8; 5]) -> Option<Metadata> {
+    if matches!(method_id, b"-lh0-" | b"-lz4-") {
+        return None;
+    }
+    let name = String::from_utf8_lossy(&method_id[1..4]).into_owned();
+    Some(Metadata::new().with_compression_method(name))
 }
 
 impl Container for LhaContainer {
@@ -182,6 +164,10 @@ impl Container for LhaContainer {
             visitor(&e)?;
         }
         Ok(())
+    }
+
+    fn skipped_entries(&self) -> Option<String> {
+        self.skipped.clone()
     }
 
     fn info(&self) -> ContainerInfo {
@@ -220,32 +206,56 @@ mod tests {
         crc
     }
 
-    // Level-0 header for one stored (-lh0-) entry, then the end-of-archive byte.
-    fn stored_archive(name: &[u8], data: &[u8], declared_size: u32) -> Vec<u8> {
+    // Level-0 header and data of one entry.
+    fn entry(method: &[u8; 5], name: &[u8], packed: &[u8], unpacked: u32, crc: u16) -> Vec<u8> {
         let mut header = Vec::new();
-        header.extend_from_slice(b"-lh0-");
-        header.extend_from_slice(&(data.len() as u32).to_le_bytes());
-        header.extend_from_slice(&declared_size.to_le_bytes());
+        header.extend_from_slice(method);
+        header.extend_from_slice(&(packed.len() as u32).to_le_bytes());
+        header.extend_from_slice(&unpacked.to_le_bytes());
         header.extend_from_slice(&[0; 4]); // timestamp
         header.push(0x20); // attribute
         header.push(0); // header level
         header.push(name.len() as u8);
         header.extend_from_slice(name);
-        header.extend_from_slice(&crc16_arc(data).to_le_bytes());
+        header.extend_from_slice(&crc.to_le_bytes());
 
         let checksum = header.iter().fold(0u8, |sum, &b| sum.wrapping_add(b));
-        let mut archive = vec![header.len() as u8, checksum];
-        archive.extend_from_slice(&header);
-        archive.extend_from_slice(data);
+        let mut entry = vec![header.len() as u8, checksum];
+        entry.extend_from_slice(&header);
+        entry.extend_from_slice(packed);
+        entry
+    }
+
+    // One stored (-lh0-) entry, then the end-of-archive byte.
+    fn stored_archive(name: &[u8], data: &[u8], declared_size: u32) -> Vec<u8> {
+        let mut archive = entry(b"-lh0-", name, data, declared_size, crc16_arc(data));
         archive.push(0);
         archive
+    }
+
+    // "-lh5-" entry of `blocks` blocks, each 65,535 matches of length 256
+    // at distance 1 with all tables in the single-symbol form: 16,776,960
+    // spaces from seven bytes (methods.md 4.4 to 4.6, 8.20).
+    fn run_entry(name: &[u8], blocks: usize, unpacked: u32, fill: u8) -> Vec<u8> {
+        let block = ((0xFFFFu64 << 40) | (509 << 12)).to_be_bytes();
+        let packed = block[1..].repeat(blocks);
+        let crc = crc16_arc(&vec![fill; unpacked as usize]);
+        entry(b"-lh5-", name, &packed, unpacked, crc)
+    }
+
+    fn open(archive: &[u8]) -> LhaContainer {
+        LhaContainer::from_bytes(archive, "a.lha".into(), 0).unwrap()
+    }
+
+    fn paths(container: &LhaContainer) -> Vec<&str> {
+        container.entries.iter().map(|e| e.path.as_str()).collect()
     }
 
     #[test]
     fn extracts_stored_entry() {
         let data = b"hello lha";
         let archive = stored_archive(b"hello.txt", data, data.len() as u32);
-        let container = LhaContainer::from_bytes(&archive, "a.lha".into(), 0).unwrap();
+        let container = open(&archive);
         assert_eq!(container.entries.len(), 1);
         assert_eq!(container.entries[0].path, "hello.txt");
         assert_eq!(container.entries[0].data, data);
@@ -255,22 +265,197 @@ mod tests {
     fn extracts_entry_larger_than_prealloc_limit() {
         let data: Vec<u8> = (0..PREALLOC_LIMIT + 4096).map(|i| i as u8).collect();
         let archive = stored_archive(b"big.bin", &data, data.len() as u32);
-        let container = LhaContainer::from_bytes(&archive, "a.lha".into(), 0).unwrap();
+        let container = open(&archive);
         assert_eq!(container.entries[0].data, data);
     }
 
     #[test]
     fn huge_declared_size_does_not_drive_allocation() {
-        // 4 GiB claimed, 4 bytes present.
+        // 4 GiB claimed, 4 bytes present: more than stored data can hold.
         let archive = stored_archive(b"bomb.bin", b"tiny", u32::MAX);
-        match LhaContainer::from_bytes(&archive, "a.lha".into(), 0) {
-            Ok(container) => {
-                for entry in &container.entries {
-                    assert!(entry.data.len() <= 4);
-                    assert!(entry.data.capacity() <= PREALLOC_LIMIT);
-                }
-            }
-            Err(err) => assert!(matches!(err, Error::DecompressionError { .. }), "{err}"),
+        let container = open(&archive);
+        assert!(container.entries.is_empty());
+        let message = container.skipped_entries().unwrap();
+        assert!(message.contains("1 unreadable entries"), "{message}");
+        assert!(message.contains("bomb.bin"), "{message}");
+    }
+
+    #[test]
+    fn unreadable_entries_do_not_hide_the_others() {
+        let mut archive = stored_archive(b"first.txt", b"one", 3);
+        archive.pop();
+        // "-lh2-" is unsupported; the header sum changes with the identifier.
+        let mut unsupported = stored_archive(b"second.bin", b"two", 3);
+        unsupported.pop();
+        unsupported[5] = b'2';
+        unsupported[1] = unsupported[1].wrapping_add(2);
+        archive.extend_from_slice(&unsupported);
+        let mut damaged = stored_archive(b"third.txt", b"three", 5);
+        damaged.pop();
+        *damaged.last_mut().unwrap() ^= 1;
+        archive.extend_from_slice(&damaged);
+        archive.extend_from_slice(&stored_archive(b"last.txt", b"four", 4));
+
+        let container = open(&archive);
+        let paths: Vec<&str> = container.entries.iter().map(|e| e.path.as_str()).collect();
+        assert_eq!(paths, ["first.txt", "last.txt"]);
+        assert_eq!(container.get_file("LAST.TXT"), Some(&b"four"[..]));
+        assert_eq!(container.get_file("second.bin"), None);
+        let message = container.skipped_entries().unwrap();
+        assert!(message.contains("2 unreadable entries"), "{message}");
+        assert!(message.contains("second.bin"), "{message}");
+        assert!(message.contains("unsupported method -lh2-"), "{message}");
+    }
+
+    #[test]
+    fn unreadable_tail_is_reported() {
+        let mut archive = stored_archive(b"a.txt", b"data", 4);
+        archive.pop();
+        archive.extend_from_slice(&[0x1A; 40]);
+        let container = open(&archive);
+        assert_eq!(container.entries.len(), 1);
+        let message = container.skipped_entries().unwrap();
+        assert!(message.contains("incomplete"), "{message}");
+    }
+
+    #[test]
+    fn detection_needs_a_valid_header_at_the_start() {
+        let archive = stored_archive(b"a.txt", b"data", 4);
+        assert!(is_lha_archive(&archive));
+        // The method identifier alone is not enough.
+        let mut bad_sum = archive.clone();
+        bad_sum[1] ^= 1;
+        assert!(!is_lha_archive(&bad_sum));
+        assert!(!is_lha_archive(b"xx-lh5-"));
+        // Leading junk is not sniffed, but an explicit open finds the start.
+        let prefixed = [&[0x55; 300][..], &archive].concat();
+        assert!(!is_lha_archive(&prefixed));
+        let container = LhaContainer::from_bytes(&prefixed, "a.exe".into(), 0).unwrap();
+        assert_eq!(container.entries[0].data, b"data");
+        assert_eq!(container.skipped_entries(), None);
+    }
+
+    #[test]
+    fn failed_entry_does_not_use_up_the_allowance() {
+        // Claims far more than it can deliver and fails in its first table.
+        let mut archive = entry(b"-lh5-", b"BAD.BIN", &[0xFF; 40], 60_000, 0);
+        archive.extend_from_slice(&stored_archive(b"GOOD.TXT", b"good", 4));
+        let container = open(&archive);
+        assert_eq!(paths(&container), ["GOOD.TXT"]);
+        let message = container.skipped_entries().unwrap();
+        assert!(message.contains("1 unreadable entries"), "{message}");
+        assert!(message.contains("BAD.BIN"), "{message}");
+        assert!(message.contains("corrupt"), "{message}");
+
+        // The same with a claim above the allowance: refused, not charged.
+        let mut archive = entry(b"-lh5-", b"BAD.BIN", &[0xFF; 40], 16 << 20, 0);
+        archive.extend_from_slice(&stored_archive(b"GOOD.TXT", b"good", 4));
+        let container = open(&archive);
+        assert_eq!(paths(&container), ["GOOD.TXT"]);
+        let message = container.skipped_entries().unwrap();
+        assert!(message.contains("output limit"), "{message}");
+    }
+
+    #[test]
+    fn allowance_follows_the_archive_length_without_a_minimum() {
+        // 39 bytes that would unpack to 16 MiB.
+        let mut bomb = run_entry(b"B", 1, 0xFFFF * 256, b' ');
+        bomb.push(0);
+        assert!(bomb.len() < 40);
+        let container = open(&bomb);
+        assert!(container.entries.is_empty());
+        let message = container.skipped_entries().unwrap();
+        assert!(message.contains("output limit"), "{message}");
+
+        // Bytes behind the end marker and in front of the archive are not
+        // part of it and buy nothing.
+        let padded = [&[0x55; 4096][..], &bomb, &[0x55; 1 << 20]].concat();
+        assert!(open(&padded).entries.is_empty());
+
+        // What fits in 1024 times the entry's own bytes is delivered.
+        let mut small = run_entry(b"S", 1, 32 * 1024, b' ');
+        small.push(0);
+        assert_eq!(open(&small).entries[0].data, vec![b' '; 32 * 1024]);
+    }
+
+    #[test]
+    fn allowance_covers_all_entries_together() {
+        // 64 entries of 60,000 bytes each from seven packed bytes.
+        const EACH: u32 = 60_000;
+        let mut archive = Vec::new();
+        for index in 0..64u8 {
+            archive.extend_from_slice(&run_entry(&[b'A' + index], 1, EACH, b' '));
         }
+        archive.push(0);
+        let allowance = (archive.len() as u64 - 1) * BUDGET_RATIO;
+        let container = open(&archive);
+        let total: u64 = container.entries.iter().map(|e| e.data.len() as u64).sum();
+        assert!(total <= allowance, "{total}");
+        assert_eq!(total, allowance / u64::from(EACH) * u64::from(EACH));
+        let skipped = 64 - container.entries.len();
+        assert!(skipped > 0);
+        let message = container.skipped_entries().unwrap();
+        assert!(
+            message.contains(&format!("{skipped} unreadable entries")),
+            "{message}"
+        );
+
+        // Entries that decode in full and fail their CRC use it up as well:
+        // the work is bounded even when nothing is delivered. Each takes
+        // two passes (the zero-window retry).
+        let mut archive = Vec::new();
+        for index in 0..64u8 {
+            let mut bad = run_entry(&[b'A' + index], 1, EACH, b' ');
+            let crc_at = bad.len() - 7 - 2;
+            bad[crc_at] ^= 0x55;
+            bad[1] = bad[1]
+                .wrapping_add(bad[crc_at])
+                .wrapping_sub(bad[crc_at] ^ 0x55);
+            archive.extend_from_slice(&bad);
+        }
+        archive.extend_from_slice(&stored_archive(b"last.txt", b"four", 4));
+        let container = open(&archive);
+        // The stored entry needs four bytes of what is left.
+        assert_eq!(paths(&container), ["last.txt"]);
+        let message = container.skipped_entries().unwrap();
+        assert!(message.contains("64 unreadable entries"), "{message}");
+    }
+
+    #[test]
+    fn zero_window_retry_delivers_without_a_diagnostic() {
+        let mut archive = run_entry(b"Z", 1, 600, 0);
+        archive.push(0);
+        let container = open(&archive);
+        assert_eq!(container.entries[0].data, vec![0; 600]);
+        assert_eq!(container.skipped_entries(), None);
+    }
+
+    #[test]
+    fn c1_characters_stay_distinct() {
+        let mut archive = entry(b"-lh0-", b"\x81.TXT", b"one", 3, crc16_arc(b"one"));
+        archive.extend_from_slice(&stored_archive(b"\x82.TXT", b"two", 3));
+        let container = open(&archive);
+        assert_eq!(paths(&container), ["%81.TXT", "%82.TXT"]);
+        let mut visited = Vec::new();
+        container
+            .visit(&mut |entry| {
+                visited.push((entry.path.to_string(), entry.data.to_vec()));
+                Ok(true)
+            })
+            .unwrap();
+        assert_eq!(
+            visited,
+            [
+                ("a.lha/%81.TXT".to_string(), b"one".to_vec()),
+                ("a.lha/%82.TXT".to_string(), b"two".to_vec()),
+            ]
+        );
+        assert_eq!(container.get_file("%82.txt"), Some(&b"two"[..]));
+        // Well-formed UTF-8 and ISO 8859-1 letters are left alone.
+        assert_eq!(
+            escape_c1("d\u{e9}j\u{e0}/\u{a0}x"),
+            "d\u{e9}j\u{e0}/\u{a0}x"
+        );
+        assert_eq!(escape_c1("\u{80}\u{9f}\u{7f}"), "%80%9F\u{7f}");
     }
 }

@@ -24,9 +24,11 @@ pub enum ContainerFormat {
     /// `TAR` archive format.
     #[cfg(feature = "common")]
     Tar,
+    /// Unix `compress` (`.Z`, LZW) single file.
+    #[cfg(feature = "common")]
+    Compress,
 
-    // XZ format (requires native library - not WASM safe)
-    /// `XZ`-compressed single file.
+    /// `XZ`-compressed single file, or a legacy `.lzma` file.
     #[cfg(feature = "xz")]
     Xz,
 
@@ -44,7 +46,7 @@ pub enum ContainerFormat {
     Rar,
 
     // Classic Macintosh formats (macintosh feature)
-    /// Classic Macintosh `HFS` disk image.
+    /// Macintosh disk image: `HFS`, `MFS`, `HFS Plus` or `HFSX` volume.
     #[cfg(feature = "macintosh")]
     Hfs,
     /// `StuffIt` archive (`.sit`).
@@ -102,6 +104,30 @@ pub enum ContainerFormat {
     /// `ISO 9660` CD-ROM image (with `Joliet` / `Rock Ridge` names).
     #[cfg(feature = "dos")]
     Iso9660,
+    /// `ARJ` archive.
+    #[cfg(feature = "dos")]
+    Arj,
+    /// `CUE/BIN` CD image (cue sheet plus track files).
+    #[cfg(feature = "dos")]
+    CueBin,
+
+    // NeXT / BSD formats
+    /// `NeXT` disklabel-partitioned disk image.
+    #[cfg(feature = "next")]
+    NextDisklabel,
+    /// `UFS1` / BSD `FFS` volume (`NeXTSTEP`, `OPENSTEP`, `4.3BSD`, `4.4BSD`).
+    #[cfg(feature = "next")]
+    Ufs,
+
+    // BeOS formats
+    /// Be File System (`BFS`) volume.
+    #[cfg(feature = "beos")]
+    Bfs,
+
+    // Apple Lisa formats
+    /// Apple Lisa file system disk image (`DiskCopy 4.2`, `DART` or raw tagged blocks).
+    #[cfg(feature = "lisa")]
+    LisaFs,
 
     /// Unknown/unsupported format.
     Unknown,
@@ -121,6 +147,8 @@ impl ContainerFormat {
             Self::Bzip2 => "Bzip2 Compressed",
             #[cfg(feature = "common")]
             Self::Tar => "TAR Archive",
+            #[cfg(feature = "common")]
+            Self::Compress => "Unix Compress",
             #[cfg(feature = "xz")]
             Self::Xz => "XZ Compressed",
             #[cfg(feature = "amiga")]
@@ -165,6 +193,18 @@ impl ContainerFormat {
             Self::Gpt => "GPT Disk Image",
             #[cfg(feature = "dos")]
             Self::Iso9660 => "ISO 9660 Disc Image",
+            #[cfg(feature = "dos")]
+            Self::Arj => "ARJ Archive",
+            #[cfg(feature = "dos")]
+            Self::CueBin => "CUE/BIN Disc Image",
+            #[cfg(feature = "next")]
+            Self::NextDisklabel => "NeXT Disk Image",
+            #[cfg(feature = "next")]
+            Self::Ufs => "UFS Disk Image",
+            #[cfg(feature = "beos")]
+            Self::Bfs => "BFS Disk Image",
+            #[cfg(feature = "lisa")]
+            Self::LisaFs => "Lisa Disk Image",
             Self::Unknown => "Unknown",
         }
     }
@@ -200,8 +240,10 @@ impl ContainerFormat {
             "bz2" | "bzip2" => Some(Self::Bzip2),
             #[cfg(feature = "common")]
             "tar" => Some(Self::Tar),
+            #[cfg(feature = "common")]
+            "z" => Some(Self::Compress),
             #[cfg(feature = "xz")]
-            "xz" => Some(Self::Xz),
+            "xz" | "lzma" | "tlz" => Some(Self::Xz),
             #[cfg(feature = "amiga")]
             "lha" | "lzh" | "lzs" => Some(Self::Lha),
             #[cfg(feature = "amiga")]
@@ -232,6 +274,16 @@ impl ContainerFormat {
             "bun" => Some(Self::ImuseBundle),
             #[cfg(feature = "dos")]
             "ima" | "flp" | "vfd" => Some(Self::Fat),
+            #[cfg(feature = "dos")]
+            "arj" => Some(Self::Arj),
+            #[cfg(feature = "dos")]
+            "cue" => Some(Self::CueBin),
+            #[cfg(feature = "next")]
+            "ufs" => Some(Self::Ufs),
+            #[cfg(feature = "beos")]
+            "bfs" => Some(Self::Bfs),
+            #[cfg(feature = "lisa")]
+            "dc42" => Some(Self::LisaFs),
             // With `macintosh`, "iso" hints at HFS first (hybrid Mac discs).
             #[cfg(all(feature = "dos", not(feature = "macintosh")))]
             "iso" => Some(Self::Iso9660),
@@ -241,7 +293,7 @@ impl ContainerFormat {
 
     /// Returns `true` if this format is a multi-file container (archive, disk image, etc.).
     ///
-    /// Single-file wrappers like `Gzip`, `Bzip2`, `XZ`, `MacBinary`, and `BinHex` return `false`
+    /// Single-file wrappers like `Gzip`, `Bzip2`, `Compress`, `XZ`, `MacBinary`, and `BinHex` return `false`
     /// since they encode a single file rather than a directory structure.
     #[must_use]
     pub const fn is_multi_file(&self) -> bool {
@@ -250,7 +302,7 @@ impl ContainerFormat {
             #[cfg(feature = "common")]
             Self::Zip => true,
             #[cfg(feature = "common")]
-            Self::Gzip | Self::Bzip2 => false,
+            Self::Gzip | Self::Bzip2 | Self::Compress => false,
             #[cfg(feature = "common")]
             Self::Tar => true,
             #[cfg(feature = "xz")]
@@ -270,7 +322,13 @@ impl ContainerFormat {
             #[cfg(feature = "game")]
             Self::Wad | Self::Pak | Self::Wolf3d | Self::ImuseBundle => true,
             #[cfg(feature = "dos")]
-            Self::Fat | Self::Mbr | Self::Gpt | Self::Iso9660 => true,
+            Self::Fat | Self::Mbr | Self::Gpt | Self::Iso9660 | Self::Arj | Self::CueBin => true,
+            #[cfg(feature = "next")]
+            Self::NextDisklabel | Self::Ufs => true,
+            #[cfg(feature = "beos")]
+            Self::Bfs => true,
+            #[cfg(feature = "lisa")]
+            Self::LisaFs => true,
             Self::Unknown => false,
         }
     }

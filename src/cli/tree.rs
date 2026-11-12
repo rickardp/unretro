@@ -346,6 +346,8 @@ fn format_name(format: &ContainerFormat) -> &'static str {
         ContainerFormat::Bzip2 => "BZIP2",
         #[cfg(feature = "common")]
         ContainerFormat::Tar => "TAR",
+        #[cfg(feature = "common")]
+        ContainerFormat::Compress => "COMPRESS",
         #[cfg(feature = "xz")]
         ContainerFormat::Xz => "XZ",
         #[cfg(feature = "amiga")]
@@ -390,6 +392,18 @@ fn format_name(format: &ContainerFormat) -> &'static str {
         ContainerFormat::Iso9660 => "ISO 9660",
         #[cfg(feature = "dos")]
         ContainerFormat::Rar => "RAR",
+        #[cfg(feature = "dos")]
+        ContainerFormat::Arj => "ARJ",
+        #[cfg(feature = "dos")]
+        ContainerFormat::CueBin => "CUE/BIN",
+        #[cfg(feature = "next")]
+        ContainerFormat::NextDisklabel => "NeXT Disklabel",
+        #[cfg(feature = "next")]
+        ContainerFormat::Ufs => "UFS",
+        #[cfg(feature = "beos")]
+        ContainerFormat::Bfs => "BFS",
+        #[cfg(feature = "lisa")]
+        ContainerFormat::LisaFs => "Lisa FS",
         ContainerFormat::Unknown => "Unknown",
     }
 }

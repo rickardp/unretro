@@ -1,0 +1,645 @@
+archive	entry_index	header_level	os_id	method	is_dir	name_field_raw	name_header_raw	dir_header_raw	path_utf8	name_encoding	path_status	header_offset	header_len	data_offset	packed_len	unpacked_len	crc16	status	expect_len	expect_fnv64	agree	disagree	listed_by	note
+damaged/crc-field-wrong.lha	0	0		-lh5-	0	ONE.TXT	-	-	ONE.TXT	ascii	exact	0	31	31	423	900	dc47	ok	900	7d1c1ebf7aea7c23	delharc,unar,7z,bsdtar		delharc,lsar,7z,bsdtar	
+damaged/crc-field-wrong.lha	1	0		-lh5-	0	TWO.TXT	-	-	TWO.TXT	ascii	exact	454	31	485	559	1300	bdc6	bad-crc					delharc,lsar,7z,bsdtar	file CRC field altered; packed data intact and decodes to the original bytes
+damaged/crc-field-wrong.lha	2	0		-lh0-	0	THREE.TXT	-	-	THREE.TXT	ascii	exact	1044	33	1077	30	30	788b	ok	30	7958d1a2a4487cac	delharc,unar,7z,bsdtar		delharc,lsar,7z,bsdtar	
+damaged/ext-header-past-end.lha	0	2	55	-lh0-	0	-	one.txt	-	one.txt	ascii	exact	0	41	41	30	30	788b	ok	30	7958d1a2a4487cac	delharc,unar,7z,bsdtar		delharc,lsar,7z,bsdtar	
+damaged/ext-header-past-end.lha	1	2	55	-lh0-	0	-	two.txt	-	two.txt	ascii	exact	71	36	107	30	30	788b	bad-header						first extended header size is 65520, beyond the total header size and the archive
+damaged/ext-header-too-small.lha	0	2	55	-lh0-	0	-	one.txt	-	one.txt	ascii	exact	0	41	41	30	30	788b	ok	30	7958d1a2a4487cac	delharc,unar,7z,bsdtar		delharc,lsar,7z,bsdtar	
+damaged/ext-header-too-small.lha	1	2	55	-lh0-	0	-	two.txt	-	two.txt	ascii	exact	71	36	107	30	30	788b	bad-header						first extended header size is 2, smaller than the minimum of 3
+damaged/header-crc-wrong.lha	0	2	55	-lh5-	0	-	ONE.TXT	-	ONE.TXT	ascii	exact	0	41	41	423	900	dc47	ok	900	7d1c1ebf7aea7c23	delharc,unar,7z,bsdtar		delharc,lsar,7z,bsdtar	
+damaged/header-crc-wrong.lha	1	2	55	-lh5-	0	-	TWO.TXT	-	TWO.TXT	ascii	exact	464	41	505	559	1300	bdc7	bad-header					lsar,7z	level 2 header CRC altered (first data byte of the common extended header)
+damaged/header-crc-wrong.lha	2	2	55	-lh0-	0	-	THREE.TXT	-	THREE.TXT	ascii	exact	1064	43	1107	30	30	788b	unreachable					lsar,7z	follows a header that fails its CRC
+damaged/header-level-4.lha	0	0		-lh5-	0	ONE.TXT	-	-	ONE.TXT	ascii	exact	0	31	31	423	900	dc47	ok	900	7d1c1ebf7aea7c23	delharc,unar,7z,bsdtar		delharc,lsar,7z,bsdtar	
+damaged/header-level-4.lha	1	0		-lh5-	0	TWO.TXT	-	-	TWO.TXT	ascii	exact	454	31	485	559	1300	bdc7	bad-header						header level byte is 4
+damaged/header-level-4.lha	2	0		-lh0-	0	THREE.TXT	-	-	THREE.TXT	ascii	exact	1044	33	1077	30	30	788b	unreachable						follows an unreadable header
+damaged/header-sum-wrong.lha	0	0		-lh5-	0	ONE.TXT	-	-	ONE.TXT	ascii	exact	0	31	31	423	900	dc47	ok	900	7d1c1ebf7aea7c23	delharc,unar,7z,bsdtar		delharc,lsar,7z,bsdtar	
+damaged/header-sum-wrong.lha	1	0		-lh5-	0	TWO.TXT	-	-	TWO.TXT	ascii	exact	454	31	485	559	1300	bdc7	bad-header					lsar	level 0 header checksum byte altered
+damaged/header-sum-wrong.lha	2	0		-lh0-	0	THREE.TXT	-	-	THREE.TXT	ascii	exact	1044	33	1077	30	30	788b	unreachable					lsar	follows a header that fails its checksum
+damaged/lh1-bit-flipped.lha	0	0		-lh1-	0	ONE.TXT	-	-	ONE.TXT	ascii	exact	0	31	31	472	900	dc47	ok	900	7d1c1ebf7aea7c23	delharc,unar		delharc,lsar,7z,bsdtar	
+damaged/lh1-bit-flipped.lha	1	0		-lh1-	0	TWO.TXT	-	-	TWO.TXT	ascii	exact	503	31	534	615	1300	bdc7	corrupt					delharc,lsar,7z,bsdtar	one bit altered in the middle of the packed data: wrong bytes (CRC mismatch)
+damaged/lh1-bit-flipped.lha	2	0		-lh0-	0	THREE.TXT	-	-	THREE.TXT	ascii	exact	1149	33	1182	30	30	788b	ok	30	7958d1a2a4487cac	delharc,unar,7z,bsdtar		delharc,lsar,7z,bsdtar	
+damaged/lh5-bit-flipped.lha	0	1	4d	-lh5-	0	ONE.TXT	-	-	ONE.TXT	ascii	exact	0	34	34	423	900	dc47	ok	900	7d1c1ebf7aea7c23	delharc,unar,7z,bsdtar		delharc,lsar,7z,bsdtar	
+damaged/lh5-bit-flipped.lha	1	1	4d	-lh5-	0	TWO.TXT	-	-	TWO.TXT	ascii	exact	457	34	491	559	1300	bdc7	corrupt					delharc,lsar,7z,bsdtar	one bit altered in the middle of the packed data: decoding either fails or yields wrong bytes (CRC mismatch)
+damaged/lh5-bit-flipped.lha	2	1	4d	-lh0-	0	THREE.TXT	-	-	THREE.TXT	ascii	exact	1050	36	1086	30	30	788b	ok	30	7958d1a2a4487cac	delharc,unar,7z,bsdtar		delharc,lsar,7z,bsdtar	
+damaged/lh5-stream-garbage.lha	0	2	55	-lh5-	0	-	ONE.TXT	-	ONE.TXT	ascii	exact	0	41	41	423	900	dc47	ok	900	7d1c1ebf7aea7c23	delharc,unar,7z,bsdtar		delharc,lsar,7z,bsdtar	
+damaged/lh5-stream-garbage.lha	1	2	55	-lh5-	0	-	TWO.TXT	-	TWO.TXT	ascii	exact	464	41	505	559	1300	bdc7	corrupt					delharc,lsar,7z,bsdtar	packed data replaced by FF bytes: no valid block header
+damaged/lh5-stream-garbage.lha	2	2	55	-lh0-	0	-	THREE.TXT	-	THREE.TXT	ascii	exact	1064	43	1107	30	30	788b	ok	30	7958d1a2a4487cac	delharc,unar,7z,bsdtar		delharc,lsar,7z,bsdtar	
+damaged/packed-size-past-end.lha	0	0		-lh5-	0	ONE.TXT	-	-	ONE.TXT	ascii	exact	0	31	31	423	900	dc47	ok	900	7d1c1ebf7aea7c23	delharc,unar,7z,bsdtar		delharc,lsar,7z,bsdtar	
+damaged/packed-size-past-end.lha	1	0		-lh5-	0	TWO.TXT	-	-	TWO.TXT	ascii	exact	454	31	485	559	1300	bdc7	ok	1300	bdbf974a4a31cdb3	delharc,unar,7z,bsdtar		delharc,lsar,7z,bsdtar	
+damaged/packed-size-past-end.lha	2	0		-lh0-	0	THREE.TXT	-	-	THREE.TXT	ascii	exact	1044	33	1077	2147483647	30	788b	truncated					delharc,lsar,7z,bsdtar	packed size field says 2 GiB but the archive ends after 30 bytes of data and the end marker
+damaged/stored-byte-flipped.lha	0	1	4d	-lh0-	0	ONE.TXT	-	-	ONE.TXT	ascii	exact	0	34	34	900	900	dc47	ok	900	7d1c1ebf7aea7c23	delharc,unar,7z,bsdtar		delharc,lsar,7z,bsdtar	
+damaged/stored-byte-flipped.lha	1	1	4d	-lh0-	0	TWO.TXT	-	-	TWO.TXT	ascii	exact	934	34	968	1300	1300	bdc7	bad-crc					delharc,lsar,7z,bsdtar	one stored byte altered: output has the declared length but the wrong CRC
+damaged/stored-byte-flipped.lha	2	1	4d	-lh0-	0	THREE.TXT	-	-	THREE.TXT	ascii	exact	2268	36	2304	30	30	788b	ok	30	7958d1a2a4487cac	delharc,unar,7z,bsdtar		delharc,lsar,7z,bsdtar	
+damaged/truncated-data.lha	0	0		-lh5-	0	ONE.TXT	-	-	ONE.TXT	ascii	exact	0	31	31	423	900	dc47	ok	900	7d1c1ebf7aea7c23	delharc,unar,7z,bsdtar		delharc,lsar,7z,bsdtar	
+damaged/truncated-data.lha	1	0		-lh5-	0	TWO.TXT	-	-	TWO.TXT	ascii	exact	454	31	485	559	1300	bdc7	truncated					delharc,lsar,7z,bsdtar	archive ends in the middle of this entry's packed data
+damaged/truncated-data.lha	2	0		-lh0-	0	THREE.TXT	-	-	THREE.TXT	ascii	exact	1044	33	1077	30	30	788b	missing						not present: archive ends before this header
+damaged/truncated-header.lha	0	1	4d	-lh5-	0	ONE.TXT	-	-	ONE.TXT	ascii	exact	0	34	34	423	900	dc47	ok	900	7d1c1ebf7aea7c23	delharc,unar,7z,bsdtar		delharc,lsar,7z,bsdtar	
+damaged/truncated-header.lha	1	1	4d	-lh5-	0	TWO.TXT	-	-	TWO.TXT	ascii	exact	457	34	491	559	1300	bdc7	missing						archive ends 12 bytes into this header
+damaged/truncated-header.lha	2	1	4d	-lh0-	0	THREE.TXT	-	-	THREE.TXT	ascii	exact	1050	36	1086	30	30	788b	missing						not present
+damaged/unpacked-size-huge.lha	0	0		-lh5-	0	ONE.TXT	-	-	ONE.TXT	ascii	exact	0	31	31	423	900	dc47	ok	900	7d1c1ebf7aea7c23	delharc,unar,7z,bsdtar		delharc,lsar,7z,bsdtar	
+damaged/unpacked-size-huge.lha	1	0		-lh5-	0	TWO.TXT	-	-	TWO.TXT	ascii	exact	454	31	485	559	4294967280	bdc7	corrupt					delharc,lsar,7z,bsdtar	unpacked size field says almost 4 GiB; the packed data yields 1300 bytes and then ends
+damaged/unpacked-size-huge.lha	2	0		-lh0-	0	THREE.TXT	-	-	THREE.TXT	ascii	exact	1044	33	1077	30	30	788b	ok	30	7958d1a2a4487cac	delharc,unar,7z,bsdtar		delharc,lsar,7z,bsdtar	
+end-eof-pad-1a.lha	0	0		-lh5-	0	A.TXT	-	-	A.TXT	ascii	exact	0	29	29	423	900	dc47	ok	900	7d1c1ebf7aea7c23	delharc,unar,7z,bsdtar		delharc,lsar,7z,bsdtar	
+end-eof-pad-1a.lha	1	0		-lh0-	0	B.TXT	-	-	B.TXT	ascii	exact	452	29	481	30	30	788b	ok	30	7958d1a2a4487cac	delharc,unar,7z,bsdtar		delharc,lsar,7z,bsdtar	
+end-junk.lha	0	1	4d	-lh5-	0	A.TXT	-	-	A.TXT	ascii	exact	0	32	32	423	900	dc47	ok	900	7d1c1ebf7aea7c23	delharc,unar,7z,bsdtar		delharc,lsar,7z,bsdtar	
+end-junk.lha	1	1	4d	-lh0-	0	B.TXT	-	-	B.TXT	ascii	exact	455	32	487	30	30	788b	ok	30	7958d1a2a4487cac	delharc,unar,7z,bsdtar		delharc,lsar,7z,bsdtar	
+end-no-marker.lha	0	0		-lh5-	0	A.TXT	-	-	A.TXT	ascii	exact	0	29	29	423	900	dc47	ok	900	7d1c1ebf7aea7c23	delharc,unar,7z,bsdtar		delharc,lsar,7z,bsdtar	
+end-no-marker.lha	1	0		-lh0-	0	B.TXT	-	-	B.TXT	ascii	exact	452	29	481	30	30	788b	ok	30	7958d1a2a4487cac	delharc,unar,7z,bsdtar		delharc,lsar,7z,bsdtar	
+end-zero-padding.lha	0	2	55	-lh5-	0	-	a.txt	-	a.txt	ascii	exact	0	39	39	423	900	dc47	ok	900	7d1c1ebf7aea7c23	delharc,unar,7z,bsdtar		delharc,lsar,7z,bsdtar	
+end-zero-padding.lha	1	2	55	-lh0-	0	-	b.txt	-	b.txt	ascii	exact	462	39	501	30	30	788b	ok	30	7958d1a2a4487cac	delharc,unar,7z,bsdtar		delharc,lsar,7z,bsdtar	
+h-lh1.lha	0	0		-lh1-	0	REBUILD.BIN	-	-	REBUILD.BIN	ascii	exact	0	35	35	9926	70000	5d2f	ok	70000	d7bcda9b7e23b4e6	delharc,unar		delharc,lsar,7z,bsdtar	70000 literals: the adaptive tree is rebuilt three times
+h-lh1.lha	1	0		-lh1-	0	REBUILD2.BIN	-	-	REBUILD2.BIN	ascii	exact	9961	36	9997	16152	192134	00d1	ok	192134	38a39870bf840717	delharc,unar		delharc,lsar,7z,bsdtar	40000 commands, one in eight a copy, every copy length used: tree rebuilt with copy symbols in use
+h-lh1.lha	2	0		-lh1-	0	OFFSETS.BIN	-	-	OFFSETS.BIN	ascii	exact	26149	35	26184	2481	12829	b470	ok	12829	55a98fcacdb0f963	delharc,unar		delharc,lsar,7z,bsdtar	all 64 values of the upper six offset bits
+h-lh1.lha	3	0		-lh1-	0	LENGTHS.BIN	-	-	LENGTHS.BIN	ascii	exact	28665	35	28700	705	2585	a69b	ok	2585	41be715f417ec03f	delharc,unar		delharc,lsar,7z,bsdtar	every copy length 3..60 once
+h-lh1.lha	4	0		-lh1-	0	ALLBYTES.BIN	-	-	ALLBYTES.BIN	ascii	exact	29405	36	29441	545	512	1271	ok	512	549059b647c57825	delharc,unar		delharc,lsar,7z,bsdtar	every literal value
+h-lh4.lha	0	2	55	-lh4-	0	-	one-command-blocks.txt	-	one-command-blocks.txt	ascii	exact	0	56	56	1293	300	0cc1	ok	300	0b27e9c053714da1	delharc,unar,7z		delharc,lsar,7z,bsdtar	every block holds one command; single-code tables throughout
+h-lh4.lha	1	2	55	-lh4-	0	-	small-blocks.txt	-	small-blocks.txt	ascii	exact	1349	50	1399	2060	6000	c9a1	ok	6000	5078872375400b1b	delharc,unar,7z		delharc,lsar,7z,bsdtar	blocks of 1, 2, 3, 5, ... 233 commands
+h-lh4.lha	2	2	55	-lh4-	0	-	two-symbols.bin	-	two-symbols.bin	ascii	exact	3459	49	3508	16	80	5ad1	ok	80	493aa6f85b820f17	delharc,unar,7z		delharc,lsar,7z,bsdtar	literals 00 and 01 only: command lengths 1,1; single-code temporary table
+h-lh4.lha	3	2	55	-lh4-	0	-	same-length-16.bin	-	same-length-16.bin	ascii	exact	3524	52	3576	78	144	1a07	ok	144	5b2250d1384050c1	delharc,unar,7z		delharc,lsar,7z,bsdtar	sixteen literals of equal length: single-code temporary table
+h-lh4.lha	4	2	55	-lh4-	0	-	one-offset-code.bin	-	one-offset-code.bin	ascii	exact	3654	53	3707	17	2925	cb8f	ok	2925	21bf03eaab738518	delharc,unar,7z		delharc,lsar,7z,bsdtar	all copies at distance 1: single-code offset table
+h-lh4.lha	5	2	55	-lh4-	0	-	no-copies.bin	-	no-copies.bin	ascii	exact	3724	47	3771	1544	1500	e98f	ok	1500	e344c90362f51961	delharc,unar,7z		delharc,lsar,7z,bsdtar	literals only: offset table with no codes in use
+h-lh4.lha	6	2	55	-lh4-	0	-	long-codes.bin	-	long-codes.bin	ascii	exact	5315	48	5363	1389	4180	96c2	ok	4180	92ce50b739407da9	delharc,unar,7z		delharc,lsar,7z,bsdtar	Fibonacci literal frequencies: command code lengths up to 16
+h-lh4.lha	7	2	55	-lh4-	0	-	zero-runs.bin	-	zero-runs.bin	ascii	exact	6752	47	6799	61	358	cfc1	ok	358	50b3a350a0168a89	delharc,unar,7z		delharc,lsar,7z,bsdtar	unused-symbol runs of 1, 2, 3, 18, 19, 20, 21, 163 and 252 in the command length table
+h-lh4.lha	8	2	55	-lh4-	0	-	leading-zero-run.bin	-	leading-zero-run.bin	ascii	exact	6860	54	6914	13	262	5ca9	ok	262	79ceb4e10b9dbbc6	delharc,unar,7z		delharc,lsar,7z,bsdtar	command length table starts with a run of 200 unused symbols
+h-lh4.lha	9	2	55	-lh4-	0	-	all-offset-codes.bin	-	all-offset-codes.bin	ascii	exact	6927	54	6981	2635	8025	e20e	ok	8025	7d40235d9f4fd710	delharc,unar,7z		delharc,lsar,7z,bsdtar	second block uses all 13 offset codes the window allows, with Fibonacci frequencies
+h-lh4.lha	10	2	55	-lh4-	0	-	all-lengths.bin	-	all-lengths.bin	ascii	exact	9616	49	9665	1344	33847	7b4c	ok	33847	feb27678046a403e	delharc,unar,7z		delharc,lsar,7z,bsdtar	every copy length 3..256 once: all 510 command symbols except unused literals
+h-lh5.lha	0	2	55	-lh5-	0	-	one-command-blocks.txt	-	one-command-blocks.txt	ascii	exact	0	56	56	1293	300	0cc1	ok	300	0b27e9c053714da1	delharc,unar,7z,bsdtar		delharc,lsar,7z,bsdtar	every block holds one command; single-code tables throughout
+h-lh5.lha	1	2	55	-lh5-	0	-	small-blocks.txt	-	small-blocks.txt	ascii	exact	1349	50	1399	2050	6000	c9a1	ok	6000	5078872375400b1b	delharc,unar,7z,bsdtar		delharc,lsar,7z,bsdtar	blocks of 1, 2, 3, 5, ... 233 commands
+h-lh5.lha	2	2	55	-lh5-	0	-	two-symbols.bin	-	two-symbols.bin	ascii	exact	3449	49	3498	16	80	5ad1	ok	80	493aa6f85b820f17	delharc,unar,7z,bsdtar		delharc,lsar,7z,bsdtar	literals 00 and 01 only: command lengths 1,1; single-code temporary table
+h-lh5.lha	3	2	55	-lh5-	0	-	same-length-16.bin	-	same-length-16.bin	ascii	exact	3514	52	3566	78	144	1a07	ok	144	5b2250d1384050c1	delharc,unar,7z,bsdtar		delharc,lsar,7z,bsdtar	sixteen literals of equal length: single-code temporary table
+h-lh5.lha	4	2	55	-lh5-	0	-	one-offset-code.bin	-	one-offset-code.bin	ascii	exact	3644	53	3697	17	2925	cb8f	ok	2925	21bf03eaab738518	delharc,unar,7z,bsdtar		delharc,lsar,7z,bsdtar	all copies at distance 1: single-code offset table
+h-lh5.lha	5	2	55	-lh5-	0	-	no-copies.bin	-	no-copies.bin	ascii	exact	3714	47	3761	1544	1500	e98f	ok	1500	e344c90362f51961	delharc,unar,7z,bsdtar		delharc,lsar,7z,bsdtar	literals only: offset table with no codes in use
+h-lh5.lha	6	2	55	-lh5-	0	-	long-codes.bin	-	long-codes.bin	ascii	exact	5305	48	5353	1389	4180	96c2	ok	4180	92ce50b739407da9	delharc,unar,7z,bsdtar		delharc,lsar,7z,bsdtar	Fibonacci literal frequencies: command code lengths up to 16
+h-lh5.lha	7	2	55	-lh5-	0	-	zero-runs.bin	-	zero-runs.bin	ascii	exact	6742	47	6789	61	358	cfc1	ok	358	50b3a350a0168a89	delharc,unar,7z,bsdtar		delharc,lsar,7z,bsdtar	unused-symbol runs of 1, 2, 3, 18, 19, 20, 21, 163 and 252 in the command length table
+h-lh5.lha	8	2	55	-lh5-	0	-	leading-zero-run.bin	-	leading-zero-run.bin	ascii	exact	6850	54	6904	13	262	5ca9	ok	262	79ceb4e10b9dbbc6	delharc,unar,7z,bsdtar		delharc,lsar,7z,bsdtar	command length table starts with a run of 200 unused symbols
+h-lh5.lha	9	2	55	-lh5-	0	-	all-offset-codes.bin	-	all-offset-codes.bin	ascii	exact	6917	54	6971	4597	14577	0984	ok	14577	be6451c12c616234	delharc,unar,7z,bsdtar		delharc,lsar,7z,bsdtar	second block uses all 14 offset codes the window allows, with Fibonacci frequencies
+h-lh5.lha	10	2	55	-lh5-	0	-	all-lengths.bin	-	all-lengths.bin	ascii	exact	11568	49	11617	1344	33847	7b4c	ok	33847	feb27678046a403e	delharc,unar,7z,bsdtar		delharc,lsar,7z,bsdtar	every copy length 3..256 once: all 510 command symbols except unused literals
+h-lh5.lha	11	2	55	-lh5-	0	-	block-65535.bin	-	block-65535.bin	ascii	exact	12961	49	13010	9643	70000	8adb	ok	70000	e94b2942d27faf8c	delharc,unar,7z,bsdtar		delharc,lsar,7z,bsdtar	70000 literals: one block of 65535 commands (the largest count) then one of 4465
+h-lh6.lha	0	2	55	-lh6-	0	-	one-command-blocks.txt	-	one-command-blocks.txt	ascii	exact	0	56	56	1342	300	0cc1	ok	300	0b27e9c053714da1	delharc,unar,7z,bsdtar		delharc,lsar,7z,bsdtar	every block holds one command; single-code tables throughout
+h-lh6.lha	1	2	55	-lh6-	0	-	small-blocks.txt	-	small-blocks.txt	ascii	exact	1398	50	1448	2053	6000	c9a1	ok	6000	5078872375400b1b	delharc,unar,7z,bsdtar		delharc,lsar,7z,bsdtar	blocks of 1, 2, 3, 5, ... 233 commands
+h-lh6.lha	2	2	55	-lh6-	0	-	two-symbols.bin	-	two-symbols.bin	ascii	exact	3501	49	3550	16	80	5ad1	ok	80	493aa6f85b820f17	delharc,unar,7z,bsdtar		delharc,lsar,7z,bsdtar	literals 00 and 01 only: command lengths 1,1; single-code temporary table
+h-lh6.lha	3	2	55	-lh6-	0	-	same-length-16.bin	-	same-length-16.bin	ascii	exact	3566	52	3618	78	144	1a07	ok	144	5b2250d1384050c1	delharc,unar,7z,bsdtar		delharc,lsar,7z,bsdtar	sixteen literals of equal length: single-code temporary table
+h-lh6.lha	4	2	55	-lh6-	0	-	one-offset-code.bin	-	one-offset-code.bin	ascii	exact	3696	53	3749	17	2925	cb8f	ok	2925	21bf03eaab738518	delharc,unar,7z,bsdtar		delharc,lsar,7z,bsdtar	all copies at distance 1: single-code offset table
+h-lh6.lha	5	2	55	-lh6-	0	-	no-copies.bin	-	no-copies.bin	ascii	exact	3766	47	3813	1544	1500	e98f	ok	1500	e344c90362f51961	delharc,unar,7z,bsdtar		delharc,lsar,7z,bsdtar	literals only: offset table with no codes in use
+h-lh6.lha	6	2	55	-lh6-	0	-	long-codes.bin	-	long-codes.bin	ascii	exact	5357	48	5405	1389	4180	96c2	ok	4180	92ce50b739407da9	delharc,unar,7z,bsdtar		delharc,lsar,7z,bsdtar	Fibonacci literal frequencies: command code lengths up to 16
+h-lh6.lha	7	2	55	-lh6-	0	-	zero-runs.bin	-	zero-runs.bin	ascii	exact	6794	47	6841	61	358	cfc1	ok	358	50b3a350a0168a89	delharc,unar,7z,bsdtar		delharc,lsar,7z,bsdtar	unused-symbol runs of 1, 2, 3, 18, 19, 20, 21, 163 and 252 in the command length table
+h-lh6.lha	8	2	55	-lh6-	0	-	leading-zero-run.bin	-	leading-zero-run.bin	ascii	exact	6902	54	6956	13	262	5ca9	ok	262	79ceb4e10b9dbbc6	delharc,unar,7z,bsdtar		delharc,lsar,7z,bsdtar	command length table starts with a run of 200 unused symbols
+h-lh6.lha	9	2	55	-lh6-	0	-	all-offset-codes.bin	-	all-offset-codes.bin	ascii	exact	6969	54	7023	12336	49460	812f	ok	49460	0eacd0bb5d95c6bf	delharc,unar,7z,bsdtar		delharc,lsar,7z,bsdtar	second block uses all 16 offset codes the window allows, with Fibonacci frequencies
+h-lh6.lha	10	2	55	-lh6-	0	-	all-lengths.bin	-	all-lengths.bin	ascii	exact	19359	49	19408	1344	33847	7b4c	ok	33847	feb27678046a403e	delharc,unar,7z,bsdtar		delharc,lsar,7z,bsdtar	every copy length 3..256 once: all 510 command symbols except unused literals
+h-lh7.lha	0	2	55	-lh7-	0	-	one-command-blocks.txt	-	one-command-blocks.txt	ascii	exact	0	56	56	1342	300	0cc1	ok	300	0b27e9c053714da1	delharc,unar,7z,bsdtar		delharc,lsar,7z,bsdtar	every block holds one command; single-code tables throughout
+h-lh7.lha	1	2	55	-lh7-	0	-	small-blocks.txt	-	small-blocks.txt	ascii	exact	1398	50	1448	2053	6000	c9a1	ok	6000	5078872375400b1b	delharc,unar,7z,bsdtar		delharc,lsar,7z,bsdtar	blocks of 1, 2, 3, 5, ... 233 commands
+h-lh7.lha	2	2	55	-lh7-	0	-	two-symbols.bin	-	two-symbols.bin	ascii	exact	3501	49	3550	16	80	5ad1	ok	80	493aa6f85b820f17	delharc,unar,7z,bsdtar		delharc,lsar,7z,bsdtar	literals 00 and 01 only: command lengths 1,1; single-code temporary table
+h-lh7.lha	3	2	55	-lh7-	0	-	same-length-16.bin	-	same-length-16.bin	ascii	exact	3566	52	3618	78	144	1a07	ok	144	5b2250d1384050c1	delharc,unar,7z,bsdtar		delharc,lsar,7z,bsdtar	sixteen literals of equal length: single-code temporary table
+h-lh7.lha	4	2	55	-lh7-	0	-	one-offset-code.bin	-	one-offset-code.bin	ascii	exact	3696	53	3749	17	2925	cb8f	ok	2925	21bf03eaab738518	delharc,unar,7z,bsdtar		delharc,lsar,7z,bsdtar	all copies at distance 1: single-code offset table
+h-lh7.lha	5	2	55	-lh7-	0	-	no-copies.bin	-	no-copies.bin	ascii	exact	3766	47	3813	1544	1500	e98f	ok	1500	e344c90362f51961	delharc,unar,7z,bsdtar		delharc,lsar,7z,bsdtar	literals only: offset table with no codes in use
+h-lh7.lha	6	2	55	-lh7-	0	-	long-codes.bin	-	long-codes.bin	ascii	exact	5357	48	5405	1389	4180	96c2	ok	4180	92ce50b739407da9	delharc,unar,7z,bsdtar		delharc,lsar,7z,bsdtar	Fibonacci literal frequencies: command code lengths up to 16
+h-lh7.lha	7	2	55	-lh7-	0	-	zero-runs.bin	-	zero-runs.bin	ascii	exact	6794	47	6841	61	358	cfc1	ok	358	50b3a350a0168a89	delharc,unar,7z,bsdtar		delharc,lsar,7z,bsdtar	unused-symbol runs of 1, 2, 3, 18, 19, 20, 21, 163 and 252 in the command length table
+h-lh7.lha	8	2	55	-lh7-	0	-	leading-zero-run.bin	-	leading-zero-run.bin	ascii	exact	6902	54	6956	13	262	5ca9	ok	262	79ceb4e10b9dbbc6	delharc,unar,7z,bsdtar		delharc,lsar,7z,bsdtar	command length table starts with a run of 200 unused symbols
+h-lh7.lha	9	2	55	-lh7-	0	-	all-offset-codes.bin	-	all-offset-codes.bin	ascii	exact	6969	54	7023	22040	92465	4260	ok	92465	6d03845995647e26	delharc,unar,7z,bsdtar		delharc,lsar,7z,bsdtar	second block uses all 17 offset codes the window allows, with Fibonacci frequencies
+h-lh7.lha	10	2	55	-lh7-	0	-	all-lengths.bin	-	all-lengths.bin	ascii	exact	29063	49	29112	1344	33847	7b4c	ok	33847	feb27678046a403e	delharc,unar,7z,bsdtar		delharc,lsar,7z,bsdtar	every copy length 3..256 once: all 510 command symbols except unused literals
+h-lh7.lha	11	2	55	-lh7-	0	-	block-65535.bin	-	block-65535.bin	ascii	exact	30456	49	30505	9644	70000	8adb	ok	70000	e94b2942d27faf8c	delharc,unar,7z,bsdtar		delharc,lsar,7z,bsdtar	70000 literals: one block of 65535 commands (the largest count) then one of 4465
+hdr-amiga.lha	0	0		-lh5-	0	docs/ReadMe	-	-	docs/ReadMe	ascii	exact	0	35	35	423	900	dc47	ok	900	7d1c1ebf7aea7c23	delharc,unar,7z,bsdtar		delharc,lsar,7z,bsdtar	level 0 header without extended area, slash separators
+hdr-amiga.lha	1	0	41	-lh0-	0	docs/Note.txt%00A%20file%20note	-	-	docs/Note.txt	ascii	exact	458	50	508	9	9	83ff	ok	9	e9729ad56566de8b	delharc,unar,7z,bsdtar		delharc,lsar,7z,bsdtar	name field holds the path, a zero byte and the comment 'A file note'; OS byte A
+hdr-amiga.lha	2	1	41	-lh0-	0	s/startup-sequence%00boot%20script	-	-	s/startup-sequence	ascii	exact	517	57	574	11	11	4e80	ok	11	873e8426fef96232	delharc,unar,7z,bsdtar		delharc,lsar,7z,bsdtar	level 1, whole path in the name field with slashes, then a zero byte and the comment 'boot script'
+hdr-amiga.lha	3	1	41	-lh5-	0	libs/example.library	-	-	libs/example.library	ascii	exact	585	47	632	559	1300	bdc7	ok	1300	bdbf974a4a31cdb3	delharc,unar,7z,bsdtar		delharc,lsar,7z,bsdtar	
+hdr-amiga.lha	4	2	41	-lh0-	0	-	Tool%00note%20in%20name%20header	c%FF	c/Tool	ascii	exact	1191	63	1254	5	5	0530	ok	5	02a5337d3bd2b257	delharc,unar,7z,bsdtar		delharc,lsar,7z,bsdtar	level 2, file name header holds the name, a zero byte and a comment
+hdr-amiga.lha	5	0	41	-lhd-	1	Empty/	-	-	Empty	ascii	exact	1259	31	1290	0	0	0000	ok					delharc,lsar,7z,bsdtar	
+hdr-l0-dos.lha	0	0		-lh5-	0	README.TXT	-	-	README.TXT	ascii	exact	0	34	34	423	900	dc47	ok	900	7d1c1ebf7aea7c23	delharc,unar,7z,bsdtar		delharc,lsar,7z,bsdtar	
+hdr-l0-dos.lha	1	0		-lhd-	1	DOCS\	-	-	DOCS	ascii	exact	457	29	486	0	0	0000	ok					delharc,lsar,7z,bsdtar	
+hdr-l0-dos.lha	2	0		-lh5-	0	DOCS\GUIDE.TXT	-	-	DOCS/GUIDE.TXT	ascii	exact	486	38	524	559	1300	bdc7	ok	1300	bdbf974a4a31cdb3	delharc,unar,7z,bsdtar		delharc,lsar,7z,bsdtar	
+hdr-l0-dos.lha	3	0		-lhd-	1	DOCS\SUB\	-	-	DOCS/SUB	ascii	exact	1083	33	1116	0	0	0000	ok					delharc,lsar,7z,bsdtar	
+hdr-l0-dos.lha	4	0		-lh1-	0	DOCS\SUB\DEEP\NOTE.TXT	-	-	DOCS/SUB/DEEP/NOTE.TXT	ascii	exact	1116	46	1162	246	400	dcdf	ok	400	fc6fa5ae294e7a4d	delharc,unar		delharc,lsar,7z,bsdtar	parent directory DEEP has no entry of its own
+hdr-l0-dos.lha	5	0		-lhd-	1	EMPTYDIR\	-	-	EMPTYDIR	ascii	exact	1408	33	1441	0	0	0000	ok					delharc,lsar,7z,bsdtar	
+hdr-l0-dos.lha	6	0		-lh0-	0	SRC\MAIN.C	-	-	SRC/MAIN.C	ascii	exact	1441	34	1475	30	30	788b	ok	30	7958d1a2a4487cac	delharc,unar,7z,bsdtar		delharc,lsar,7z,bsdtar	
+hdr-l0-longname.lha	0	0		-lh0-	0	L012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567.TXT	-	-	L012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567.TXT	ascii	exact	0	257	257	14	14	01f6	ok	14	f6fb1fd1279741bb	delharc,unar,7z,bsdtar		delharc,lsar,7z	longest name a level 0 header can hold (233 bytes, header size byte 255)
+hdr-l0-longname.lha	1	0		-lh0-	0	A	-	-	A	ascii	exact	271	25	296	12	12	0778	ok	12	2acbfa427c4b3ab6	delharc,unar,7z,bsdtar		delharc,lsar,7z	
+hdr-l0-unix.lha	0	0	55	-lh5-	0	readme.txt	-	-	readme.txt	ascii	exact	0	46	46	423	900	dc47	ok	900	7d1c1ebf7aea7c23	delharc,unar,7z,bsdtar		delharc,lsar,7z,bsdtar	
+hdr-l0-unix.lha	1	0	55	-lhd-	1	docs/	-	-	docs	ascii	exact	469	41	510	0	0	0000	ok					delharc,lsar,7z,bsdtar	
+hdr-l0-unix.lha	2	0	55	-lh5-	0	docs/guide.txt	-	-	docs/guide.txt	ascii	exact	510	50	560	559	1300	bdc7	ok	1300	bdbf974a4a31cdb3	delharc,unar,7z,bsdtar		delharc,lsar,7z,bsdtar	
+hdr-l0-unix.lha	3	0	55	-lh5-	0	docs/sub/deep/note.txt	-	-	docs/sub/deep/note.txt	ascii	exact	1119	58	1177	219	400	dcdf	ok	400	fc6fa5ae294e7a4d	delharc,unar,7z,bsdtar		delharc,lsar,7z,bsdtar	
+hdr-l0-unix.lha	4	0	55	-lh0-	0	src/main.c	-	-	src/main.c	ascii	exact	1396	46	1442	30	30	788b	ok	30	7958d1a2a4487cac	delharc,unar,7z,bsdtar		delharc,lsar,7z,bsdtar	
+hdr-l0-unix.lha	5	0	55	-lh0-	0	os-byte-only.txt	-	-	os-byte-only.txt	ascii	exact	1472	41	1513	2	2	07a2	ok	2	08f0de07b58d2b17	delharc,unar,7z,bsdtar		delharc,lsar,7z,bsdtar	extended area holds the OS byte only
+hdr-l1.lha	0	1	4d	-lh5-	0	README.TXT	-	-	README.TXT	ascii	exact	0	37	37	423	900	dc47	ok	900	7d1c1ebf7aea7c23	delharc,unar,7z,bsdtar		delharc,lsar,7z,bsdtar	no extended headers at all
+hdr-l1.lha	1	1	4d	-lhd-	1		-	DOCS%FF	DOCS	ascii	exact	460	40	500	0	0	0000	ok					delharc,lsar,7z,bsdtar	directory: empty name field, path in the directory header
+hdr-l1.lha	2	1	4d	-lh5-	0	GUIDE.TXT	-	DOCS%FF	DOCS/GUIDE.TXT	ascii	exact	500	49	549	559	1300	bdc7	ok	1300	bdbf974a4a31cdb3	delharc,unar,7z,bsdtar		delharc,lsar,7z,bsdtar	
+hdr-l1.lha	3	1	4d	-lh5-	0	NOTE.TXT	-	DOCS%FFSUB%FFDEEP%FF	DOCS/SUB/DEEP/NOTE.TXT	ascii	exact	1108	57	1165	219	400	dcdf	ok	400	fc6fa5ae294e7a4d	delharc,unar,7z,bsdtar		delharc,lsar,7z,bsdtar	
+hdr-l1.lha	4	1	4d	-lh0-	0	SRC\MAIN.C	-	-	SRC/MAIN.C	ascii	exact	1384	37	1421	30	30	788b	ok	30	7958d1a2a4487cac	delharc,unar,7z,bsdtar		delharc,lsar,7z,bsdtar	whole path in the name field with backslashes
+hdr-l1.lha	5	1	55	-lh0-	0	perm.txt	-	unix%FF	unix/perm.txt	ascii	exact	1451	67	1518	13	13	2e40	ok	13	c54ab543be1e60c5	delharc,unar,7z,bsdtar		delharc,lsar,7z,bsdtar	
+hdr-l1.lha	6	1	55	-lh0-	0	unix-area.txt	-	-	unix-area.txt	ascii	exact	1531	41	1572	19	19	e48f	ok	19	d587fff8aa56bc9d	delharc,unar,7z,bsdtar		delharc,lsar,7z,bsdtar	one byte of extended area between the OS byte and the first extended header size
+hdr-l1.lha	7	1	55	-lh0-	0		long-abcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghij.text	deep%FF	deep/long-abcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghij.text	ascii	exact	1591	343	1934	14	14	07f7	ok	14	32d85f2fbbfb5634	delharc,unar,7z,bsdtar		delharc,lsar,7z,bsdtar	empty name field; 300-byte name in the file name header
+hdr-l1.lha	8	1	4d	-lh0-	0	BASE.TXT	override.txt	-	override.txt	ascii	exact	1948	50	1998	17	17	cbea	ok	17	1566187eb977c0c0	delharc,unar,7z,bsdtar		delharc,lsar,7z,bsdtar	name field BASE.TXT and a file name header override.txt: the header takes precedence
+hdr-l1.lha	9	1	4d	-lh0-	0	unknown-headers.txt	-	-	unknown-headers.txt	ascii	exact	2015	111	2126	25	25	d2a6	ok	25	82c94465ff4912f2	delharc,unar,7z,bsdtar		delharc,lsar,7z,bsdtar	extended headers 7B, 3F (comment), FE (no data), 40, 41, 39 to be skipped
+hdr-l1.lha	10	1	4d	-lh5-	0	last.txt	-	-	last.txt	ascii	exact	2151	35	2186	219	400	dcdf	ok	400	fc6fa5ae294e7a4d	delharc,unar,7z,bsdtar		delharc,lsar,7z,bsdtar	
+hdr-l2.lha	0	2	55	-lh5-	0	-	readme.txt	-	readme.txt	ascii	exact	0	63	63	423	900	dc47	ok	900	7d1c1ebf7aea7c23	delharc,unar,7z,bsdtar		delharc,lsar,7z,bsdtar	
+hdr-l2.lha	1	2	55	-lhd-	1	-	-	docs%FF	docs	ascii	exact	486	58	544	0	0	0000	ok					delharc,lsar,7z,bsdtar	directory: no file name header
+hdr-l2.lha	2	2	55	-lh5-	0	-	guide.txt	docs%FF	docs/guide.txt	ascii	exact	544	70	614	559	1300	bdc7	ok	1300	bdbf974a4a31cdb3	delharc,unar,7z,bsdtar		delharc,lsar,7z,bsdtar	
+hdr-l2.lha	3	2	55	-lhd-	1	-	-	docs%FFsub%FFdeep%FF	docs/sub/deep	ascii	exact	1173	48	1221	0	0	0000	ok					delharc,lsar,7z,bsdtar	
+hdr-l2.lha	4	2	55	-lh5-	0	-	note.txt	docs%FFsub%FFdeep%FF	docs/sub/deep/note.txt	ascii	exact	1221	59	1280	219	400	dcdf	ok	400	fc6fa5ae294e7a4d	delharc,unar,7z,bsdtar		delharc,lsar,7z,bsdtar	
+hdr-l2.lha	5	2	55	-lhd-	1	-	-	emptydir%FF	emptydir	ascii	exact	1499	43	1542	0	0	0000	ok					delharc,lsar,7z,bsdtar	
+hdr-l2.lha	6	2	4d	-lh0-	0	-	main.c	src%FF	src/main.c	ascii	exact	1542	79	1621	30	30	788b	ok	30	7958d1a2a4487cac	delharc,unar,7z,bsdtar		delharc,lsar,7z,bsdtar	
+hdr-l2.lha	7	2	55	-lh0-	0	-	long-abcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghij.text	deep%FF	deep/long-abcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghij.text	ascii	exact	1651	342	1993	14	14	07f7	ok	14	32d85f2fbbfb5634	delharc,unar,7z,bsdtar		delharc,lsar,7z,bsdtar	
+hdr-l2.lha	8	2	55	-lh0-	0	-	leaf.txt	d1%FFd2%FFd3%FFd4%FFd5%FFd6%FFd7%FFd8%FFd9%FFd10%FF	d1/d2/d3/d4/d5/d6/d7/d8/d9/d10/leaf.txt	ascii	exact	2007	76	2083	11	11	fb5d	ok	11	8f429866b2ec4a8b	delharc,unar,7z,bsdtar		delharc,lsar,7z,bsdtar	
+hdr-l2.lha	9	2	55	-lh0-	0	-	no-header-crc.txt	-	no-header-crc.txt	ascii	exact	2094	46	2140	17	17	0c7c	ok	17	8b9afeb3987acb46	delharc,unar,7z,bsdtar		delharc,lsar,7z	no header CRC extended header
+hdr-l2.lha	10	2	55	-lh0-	0	-	crc-info.txt	-	crc-info.txt	ascii	exact	2157	47	2204	36	36	d63c	ok	36	6b03c3f02bf9b7a9	delharc,unar,7z,bsdtar		delharc,lsar,7z	header CRC extended header carries one extra byte
+hdr-l2.lha	11	2	57	-lh5-	0	-	size64.txt	-	size64.txt	ascii	exact	2240	63	2303	559	1300	bdc7	ok	1300	bdbf974a4a31cdb3	delharc,unar,7z,bsdtar		delharc,7z	64-bit size header repeating the 32-bit sizes
+hdr-l2.lha	12	2	4d	-lh0-	0	-	unknown-headers.txt	-	unknown-headers.txt	ascii	exact	2862	92	2954	25	25	d2a6	ok	25	82c94465ff4912f2	delharc,unar,7z,bsdtar		delharc,7z	extended headers 7B, 3F (comment), FE (no data), 39, 7D to be skipped
+hdr-l2.lha	13	2	55	-lh0-	0	-	name-after-dir.txt	swapped%FF	swapped/name-after-dir.txt	ascii	exact	2979	63	3042	36	36	05bd	ok	36	3780f0e4558280f2	delharc,unar,7z,bsdtar		delharc,7z	directory header precedes the file name header
+hdr-l2.lha	14	2	55	-lh0-	0	-	pad-pppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppp.txt	-	pad-pppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppp.txt	ascii	exact	3078	257	3335	4	4	d9e1	ok	4	038eeb0deba906e0	delharc,unar,7z,bsdtar		delharc,7z	header of 257 bytes: 256 plus the padding byte
+hdr-l2.lha	15	2	55	-lh0-	0	-	pad-qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq.txt	-	pad-qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq.txt	ascii	exact	3339	513	3852	4	4	d9e1	ok	4	038eeb0deba906e0	delharc,unar,7z,bsdtar		delharc	header of 513 bytes: 512 plus the padding byte
+hdr-l2.lha	16	2	55	-lh5-	0	-	last.txt	-	last.txt	ascii	exact	3856	42	3898	219	400	dcdf	ok	400	fc6fa5ae294e7a4d	delharc,unar,7z,bsdtar		delharc	
+hdr-l3.lha	0	3	55	-lh5-	0	-	readme.txt	-	readme.txt	ascii	exact	0	79	79	423	900	dc47	ok	900	7d1c1ebf7aea7c23	delharc,unar,7z,bsdtar		delharc,lsar,bsdtar	
+hdr-l3.lha	1	3	55	-lhd-	1	-	-	docs%FF	docs	ascii	exact	502	74	576	0	0	0000	ok					delharc,lsar,bsdtar	directory: no file name header
+hdr-l3.lha	2	3	55	-lh5-	0	-	guide.txt	docs%FF	docs/guide.txt	ascii	exact	576	88	664	559	1300	bdc7	ok	1300	bdbf974a4a31cdb3	delharc,unar,7z,bsdtar		delharc,lsar,bsdtar	
+hdr-l3.lha	3	3	55	-lhd-	1	-	-	docs%FFsub%FFdeep%FF	docs/sub/deep	ascii	exact	1223	58	1281	0	0	0000	ok					delharc,lsar,bsdtar	
+hdr-l3.lha	4	3	55	-lh5-	0	-	note.txt	docs%FFsub%FFdeep%FF	docs/sub/deep/note.txt	ascii	exact	1281	71	1352	219	400	dcdf	ok	400	fc6fa5ae294e7a4d	delharc,unar,7z,bsdtar		delharc,lsar,bsdtar	
+hdr-l3.lha	5	3	55	-lhd-	1	-	-	emptydir%FF	emptydir	ascii	exact	1571	53	1624	0	0	0000	ok					delharc,lsar,bsdtar	
+hdr-l3.lha	6	3	4d	-lh0-	0	-	main.c	src%FF	src/main.c	ascii	exact	1624	95	1719	30	30	788b	ok	30	7958d1a2a4487cac	delharc,unar,7z,bsdtar		delharc,lsar,bsdtar	
+hdr-l3.lha	7	3	55	-lh0-	0	-	long-abcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghij.text	deep%FF	deep/long-abcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghij.text	ascii	exact	1749	354	2103	14	14	07f7	ok	14	32d85f2fbbfb5634	delharc,unar,7z,bsdtar		delharc,lsar,bsdtar	
+hdr-l3.lha	8	3	55	-lh0-	0	-	leaf.txt	d1%FFd2%FFd3%FFd4%FFd5%FFd6%FFd7%FFd8%FFd9%FFd10%FF	d1/d2/d3/d4/d5/d6/d7/d8/d9/d10/leaf.txt	ascii	exact	2117	88	2205	11	11	fb5d	ok	11	8f429866b2ec4a8b	delharc,unar,7z,bsdtar		delharc,lsar,bsdtar	
+hdr-l3.lha	9	3	55	-lh0-	0	-	no-header-crc.txt	-	no-header-crc.txt	ascii	exact	2216	54	2270	17	17	0c7c	ok	17	8b9afeb3987acb46	delharc,unar,7z,bsdtar		delharc,lsar	no header CRC extended header
+hdr-l3.lha	10	3	55	-lh0-	0	-	crc-info.txt	-	crc-info.txt	ascii	exact	2287	57	2344	36	36	d63c	ok	36	6b03c3f02bf9b7a9	delharc,unar,7z,bsdtar		delharc,lsar	header CRC extended header carries one extra byte
+hdr-l3.lha	11	3	57	-lh5-	0	-	size64.txt	-	size64.txt	ascii	exact	2380	75	2455	559	1300	bdc7	ok	1300	bdbf974a4a31cdb3	delharc,unar,7z,bsdtar		delharc	64-bit size header repeating the 32-bit sizes
+hdr-l3.lha	12	3	4d	-lh0-	0	-	unknown-headers.txt	-	unknown-headers.txt	ascii	exact	3014	112	3126	25	25	d2a6	ok	25	82c94465ff4912f2	delharc,unar,7z,bsdtar		delharc	extended headers 7B, 3F (comment), FE (no data), 39, 7D to be skipped
+hdr-l3.lha	13	3	55	-lh0-	0	-	name-after-dir.txt	swapped%FF	swapped/name-after-dir.txt	ascii	exact	3151	75	3226	36	36	05bd	ok	36	3780f0e4558280f2	delharc,unar,7z,bsdtar		delharc	directory header precedes the file name header
+hdr-l3.lha	14	3	55	-lh5-	0	-	last.txt	-	last.txt	ascii	exact	3262	52	3314	219	400	dcdf	ok	400	fc6fa5ae294e7a4d	delharc,unar,7z,bsdtar		delharc	
+hdr-mixed-levels.lha	0	0		-lh5-	0	DIR0\LEVEL0.TXT	-	-	DIR0/LEVEL0.TXT	ascii	exact	0	39	39	185	300	9390	ok	300	70a0b6e50f59f926	delharc,unar,7z,bsdtar		delharc,lsar,7z,bsdtar	
+hdr-mixed-levels.lha	1	1	4d	-lh1-	0	LEVEL1.TXT	-	DIR0%FF	DIR0/LEVEL1.TXT	ascii	exact	224	45	269	223	350	ff58	ok	350	f4a10bc3adc4def1	delharc,unar		delharc,lsar,7z,bsdtar	
+hdr-mixed-levels.lha	2	2	4d	-lh0-	0	-	LEVEL2.TXT	DIR0%FF	DIR0/LEVEL2.TXT	ascii	exact	492	52	544	400	400	2be7	ok	400	e226301b8152bae2	delharc,unar,7z,bsdtar		delharc,lsar,7z,bsdtar	
+hdr-mixed-levels.lha	3	3	4d	-lzs-	0	-	LEVEL3.TXT	DIR0%FF	DIR0/LEVEL3.TXT	ascii	exact	944	64	1008	312	450	ec27	ok	450	5f5c1861cfd8bb8c	delharc,generator		delharc,lsar	
+hdr-mixed-levels.lha	4	3	4d	-lh5-	0	-	LEVEL3.TXT	DIR1%FF	DIR1/LEVEL3.TXT	ascii	exact	1320	64	1384	239	451	ffed	ok	451	e2396d342d47724d	delharc,unar,7z,bsdtar		delharc,lsar	
+hdr-mixed-levels.lha	5	1	4d	-lh0-	0	LEVEL1.TXT	-	DIR1%FF	DIR1/LEVEL1.TXT	ascii	exact	1623	45	1668	351	351	22ff	ok	351	7285ce8045869d23	delharc,unar,7z,bsdtar		delharc,lsar	
+hdr-mixed-levels.lha	6	2	4d	-lzs-	0	-	LEVEL2.TXT	DIR1%FF	DIR1/LEVEL2.TXT	ascii	exact	2019	52	2071	289	401	926a	ok	401	999e80bcbf9357a6	delharc,generator		delharc,lsar	
+hdr-mixed-levels.lha	7	0		-lh1-	0	DIR1\LEVEL0.TXT	-	-	DIR1/LEVEL0.TXT	ascii	exact	2360	39	2399	210	301	8452	ok	301	bb100e3915e293a5	delharc,unar		delharc,lsar	
+hdr-os-ids.lha	0	1	00	-lh0-	0	id-00.txt	-	os%FF	os/id-00.txt	ascii	exact	0	42	42	9	9	e1f3	ok	9	580fad3a24710c4e	delharc,unar,7z,bsdtar		delharc,lsar,7z,bsdtar	OS id byte 00
+hdr-os-ids.lha	1	2	4d	-lh0-	0	-	id-4d.txt	os%FF	os/id-4d.txt	ascii	exact	51	49	100	9	9	e08c	ok	9	7b4b113a388ff6d6	delharc,unar,7z,bsdtar		delharc,lsar,7z,bsdtar	OS id byte 4D
+hdr-os-ids.lha	2	3	55	-lh0-	0	-	id-55.txt	os%FF	os/id-55.txt	ascii	exact	109	61	170	9	9	b0e0	ok	9	83bac23a3d46d8fc	delharc,unar,7z,bsdtar		delharc,lsar,bsdtar	OS id byte 55
+hdr-os-ids.lha	3	1	41	-lh0-	0	id-41.txt	-	os%FF	os/id-41.txt	ascii	exact	179	42	221	9	9	b0b3	ok	9	7ab8fb3a3813e357	delharc,unar,7z,bsdtar		delharc,lsar,bsdtar	OS id byte 41
+hdr-os-ids.lha	4	2	6d	-lh0-	0	-	id-6d.txt	os%FF	os/id-6d.txt	ascii	exact	230	49	279	9	9	202d	ok	9	8d92c33a432fec18	delharc,unar,7z,bsdtar		delharc,lsar,bsdtar	OS id byte 6D
+hdr-os-ids.lha	5	3	48	-lh0-	0	-	id-48.txt	os%FF	os/id-48.txt	ascii	exact	288	61	349	9	9	e0b5	ok	9	7a9a593a37f9d282	delharc,unar,7z,bsdtar		delharc,lsar,bsdtar	OS id byte 48
+hdr-os-ids.lha	6	1	4b	-lh0-	0	id-4b.txt	-	os%FF	os/id-4b.txt	ascii	exact	358	42	400	9	9	408f	ok	9	7b5f713a38a14300	delharc,unar,7z,bsdtar		delharc,lsar,bsdtar	OS id byte 4B
+hdr-os-ids.lha	7	2	77	-lh0-	0	-	id-77.txt	os%FF	os/id-77.txt	ascii	exact	409	49	458	9	9	1040	ok	9	9581543a47791cf4	delharc,unar,7z,bsdtar		delharc,lsar,bsdtar	OS id byte 77
+hdr-os-ids.lha	8	3	57	-lh0-	0	-	id-57.txt	os%FF	os/id-57.txt	ascii	exact	467	61	528	9	9	d0e1	ok	9	83b3fa3a3d411976	delharc,unar,7z,bsdtar		delharc,lsar,bsdtar	OS id byte 57
+hdr-os-ids.lha	9	1	32	-lh0-	0	id-32.txt	-	os%FF	os/id-32.txt	ascii	exact	537	42	579	9	9	8102	ok	9	71a62a3a32d26981	delharc,unar,7z,bsdtar		delharc,lsar,bsdtar	OS id byte 32
+hdr-os-ids.lha	10	2	39	-lh0-	0	-	id-39.txt	os%FF	os/id-39.txt	ascii	exact	588	49	637	9	9	b105	ok	9	7180c83a32b2a6be	delharc,unar,7z,bsdtar		delharc,lsar,bsdtar	OS id byte 39
+hdr-os-ids.lha	11	3	61	-lh0-	0	-	id-61.txt	os%FF	os/id-61.txt	ascii	exact	646	61	707	9	9	7012	ok	9	8c78a53a42403169	delharc,unar,7z,bsdtar		delharc,lsar,bsdtar	OS id byte 61
+hdr-os-ids.lha	12	1	4a	-lh0-	0	id-4a.txt	-	os%FF	os/id-4a.txt	ascii	exact	716	42	758	9	9	b08f	ok	9	7b5c1b3a389e7b07	delharc,unar,7z,bsdtar		delharc,lsar,bsdtar	OS id byte 4A
+hdr-os-ids.lha	13	2	43	-lh0-	0	-	id-43.txt	os%FF	os/id-43.txt	ascii	exact	767	49	816	9	9	d0b2	ok	9	7abfbb3a38199545	delharc,unar,7z,bsdtar		delharc,lsar,bsdtar	OS id byte 43
+hdr-os-ids.lha	14	3	46	-lh0-	0	-	id-46.txt	os%FF	os/id-46.txt	ascii	exact	825	61	886	9	9	80b1	ok	9	7aaeb93a380b1eac	delharc,unar,7z,bsdtar		delharc,lsar,bsdtar	OS id byte 46
+hdr-os-ids.lha	15	1	52	-lh0-	0	id-52.txt	-	os%FF	os/id-52.txt	ascii	exact	895	42	937	9	9	80e2	ok	9	83c5043a3d4f9da7	delharc,unar,7z,bsdtar		delharc,lsar,bsdtar	OS id byte 52
+hdr-os-ids.lha	16	2	54	-lh0-	0	-	id-54.txt	os%FF	os/id-54.txt	ascii	exact	946	49	995	9	9	20e1	ok	9	83be3c3a3d49de21	delharc,unar,7z,bsdtar		delharc,lsar,bsdtar	OS id byte 54
+hdr-os-ids.lha	17	3	33	-lh0-	0	-	id-33.txt	os%FF	os/id-33.txt	ascii	exact	1004	61	1065	9	9	1103	ok	9	71a2b03a32cf645c	delharc,unar,7z,bsdtar		delharc,lsar,bsdtar	OS id byte 33
+hdr-os-ids.lha	18	1	58	-lh0-	0	id-58.txt	-	os%FF	os/id-58.txt	ascii	exact	1074	42	1116	9	9	20e4	ok	9	83b0a43a3d3e517d	delharc,unar,7z,bsdtar		delharc,lsar,bsdtar	OS id byte 58
+hdr-os-ids.lha	19	2	3f	-lh0-	0	-	id-3f.txt	os%FF	os/id-3f.txt	ascii	exact	1125	49	1174	9	9	413c	ok	9	7110923a32534345	delharc,unar,7z,bsdtar		delharc,lsar,bsdtar	OS id byte 3F (not an assigned id)
+hdr-os-ids.lha	20	3	ff	-lh0-	0	-	id-ff.txt	os%FF	os/id-ff.txt	ascii	exact	1183	61	1244	9	9	512c	ok	9	42825b3bcba9a6d2	delharc,unar,7z,bsdtar		delharc,lsar,bsdtar	OS id byte FF (not an assigned id)
+m-lh0-l0.lha	0	0		-lh0-	0	EMPTY.BIN	-	-	EMPTY.BIN	ascii	exact	0	33	33	0	0	0000	ok	0	cbf29ce484222325			delharc,lsar,7z,bsdtar	
+m-lh0-l0.lha	1	0		-lh0-	0	ONEBYTE.BIN	-	-	ONEBYTE.BIN	ascii	exact	33	35	68	1	1	30c0	ok	1	af63fc4c860222ec	delharc,unar,7z,bsdtar		delharc,lsar,7z,bsdtar	
+m-lh0-l0.lha	2	0		-lh0-	0	TEXT.TXT	-	-	TEXT.TXT	ascii	exact	69	32	101	547	547	419a	ok	547	9d968ab45b00bd0b	delharc,unar,7z,bsdtar		delharc,lsar,7z,bsdtar	
+m-lh0-l0.lha	3	0		-lh0-	0	RUNS.BIN	-	-	RUNS.BIN	ascii	exact	648	32	680	3616	3616	363a	ok	3616	c37567cd28c14a3e	delharc,unar,7z,bsdtar		delharc,lsar,7z,bsdtar	
+m-lh0-l0.lha	4	0		-lh0-	0	RANDOM.BIN	-	-	RANDOM.BIN	ascii	exact	4296	34	4330	2000	2000	22bd	ok	2000	8c67b204e186f674	delharc,unar,7z,bsdtar		delharc,lsar,7z,bsdtar	
+m-lh0-l0.lha	5	0		-lh0-	0	ZEROS.BIN	-	-	ZEROS.BIN	ascii	exact	6330	33	6363	5000	5000	0000	ok	5000	a55ccd8b52a7bfc5	delharc,unar,7z,bsdtar		delharc,lsar,7z,bsdtar	
+m-lh0-l0.lha	6	0		-lh0-	0	RAMP.BIN	-	-	RAMP.BIN	ascii	exact	11363	32	11395	768	768	47bb	ok	768	4f33c513c2e95c25	delharc,unar,7z,bsdtar		delharc,lsar,7z,bsdtar	
+m-lh0-l1.lha	0	1	4d	-lh0-	0	EMPTY.BIN	-	-	EMPTY.BIN	ascii	exact	0	36	36	0	0	0000	ok	0	cbf29ce484222325			delharc,lsar,7z,bsdtar	
+m-lh0-l1.lha	1	1	4d	-lh0-	0	ONEBYTE.BIN	-	-	ONEBYTE.BIN	ascii	exact	36	38	74	1	1	30c0	ok	1	af63fc4c860222ec	delharc,unar,7z,bsdtar		delharc,lsar,7z,bsdtar	
+m-lh0-l1.lha	2	1	4d	-lh0-	0	TEXT.TXT	-	-	TEXT.TXT	ascii	exact	75	35	110	547	547	419a	ok	547	9d968ab45b00bd0b	delharc,unar,7z,bsdtar		delharc,lsar,7z,bsdtar	
+m-lh0-l1.lha	3	1	4d	-lh0-	0	RUNS.BIN	-	-	RUNS.BIN	ascii	exact	657	35	692	3616	3616	363a	ok	3616	c37567cd28c14a3e	delharc,unar,7z,bsdtar		delharc,lsar,7z,bsdtar	
+m-lh0-l1.lha	4	1	4d	-lh0-	0	RANDOM.BIN	-	-	RANDOM.BIN	ascii	exact	4308	37	4345	2000	2000	22bd	ok	2000	8c67b204e186f674	delharc,unar,7z,bsdtar		delharc,lsar,7z,bsdtar	
+m-lh0-l1.lha	5	1	4d	-lh0-	0	ZEROS.BIN	-	-	ZEROS.BIN	ascii	exact	6345	36	6381	5000	5000	0000	ok	5000	a55ccd8b52a7bfc5	delharc,unar,7z,bsdtar		delharc,lsar,7z,bsdtar	
+m-lh0-l1.lha	6	1	4d	-lh0-	0	RAMP.BIN	-	-	RAMP.BIN	ascii	exact	11381	35	11416	768	768	47bb	ok	768	4f33c513c2e95c25	delharc,unar,7z,bsdtar		delharc,lsar,7z,bsdtar	
+m-lh0-l2.lha	0	2	4d	-lh0-	0	-	EMPTY.BIN	-	EMPTY.BIN	ascii	exact	0	43	43	0	0	0000	ok	0	cbf29ce484222325			delharc,lsar,7z,bsdtar	
+m-lh0-l2.lha	1	2	4d	-lh0-	0	-	ONEBYTE.BIN	-	ONEBYTE.BIN	ascii	exact	43	45	88	1	1	30c0	ok	1	af63fc4c860222ec	delharc,unar,7z,bsdtar		delharc,lsar,7z,bsdtar	
+m-lh0-l2.lha	2	2	4d	-lh0-	0	-	TEXT.TXT	-	TEXT.TXT	ascii	exact	89	42	131	547	547	419a	ok	547	9d968ab45b00bd0b	delharc,unar,7z,bsdtar		delharc,lsar,7z,bsdtar	
+m-lh0-l2.lha	3	2	4d	-lh0-	0	-	RUNS.BIN	-	RUNS.BIN	ascii	exact	678	42	720	3616	3616	363a	ok	3616	c37567cd28c14a3e	delharc,unar,7z,bsdtar		delharc,lsar,7z,bsdtar	
+m-lh0-l2.lha	4	2	4d	-lh0-	0	-	RANDOM.BIN	-	RANDOM.BIN	ascii	exact	4336	44	4380	2000	2000	22bd	ok	2000	8c67b204e186f674	delharc,unar,7z,bsdtar		delharc,lsar,7z,bsdtar	
+m-lh0-l2.lha	5	2	4d	-lh0-	0	-	ZEROS.BIN	-	ZEROS.BIN	ascii	exact	6380	43	6423	5000	5000	0000	ok	5000	a55ccd8b52a7bfc5	delharc,unar,7z,bsdtar		delharc,lsar,7z,bsdtar	
+m-lh0-l2.lha	6	2	4d	-lh0-	0	-	RAMP.BIN	-	RAMP.BIN	ascii	exact	11423	42	11465	768	768	47bb	ok	768	4f33c513c2e95c25	delharc,unar,7z,bsdtar		delharc,lsar,7z,bsdtar	
+m-lh0-l3.lha	0	3	4d	-lh0-	0	-	EMPTY.BIN	-	EMPTY.BIN	ascii	exact	0	53	53	0	0	0000	ok	0	cbf29ce484222325			delharc,lsar,bsdtar	
+m-lh0-l3.lha	1	3	4d	-lh0-	0	-	ONEBYTE.BIN	-	ONEBYTE.BIN	ascii	exact	53	55	108	1	1	30c0	ok	1	af63fc4c860222ec	delharc,unar,7z,bsdtar		delharc,lsar,bsdtar	
+m-lh0-l3.lha	2	3	4d	-lh0-	0	-	TEXT.TXT	-	TEXT.TXT	ascii	exact	109	52	161	547	547	419a	ok	547	9d968ab45b00bd0b	delharc,unar,7z,bsdtar		delharc,lsar,bsdtar	
+m-lh0-l3.lha	3	3	4d	-lh0-	0	-	RUNS.BIN	-	RUNS.BIN	ascii	exact	708	52	760	3616	3616	363a	ok	3616	c37567cd28c14a3e	delharc,unar,7z,bsdtar		delharc,lsar,bsdtar	
+m-lh0-l3.lha	4	3	4d	-lh0-	0	-	RANDOM.BIN	-	RANDOM.BIN	ascii	exact	4376	54	4430	2000	2000	22bd	ok	2000	8c67b204e186f674	delharc,unar,7z,bsdtar		delharc,lsar,bsdtar	
+m-lh0-l3.lha	5	3	4d	-lh0-	0	-	ZEROS.BIN	-	ZEROS.BIN	ascii	exact	6430	53	6483	5000	5000	0000	ok	5000	a55ccd8b52a7bfc5	delharc,unar,7z,bsdtar		delharc,lsar,bsdtar	
+m-lh0-l3.lha	6	3	4d	-lh0-	0	-	RAMP.BIN	-	RAMP.BIN	ascii	exact	11483	52	11535	768	768	47bb	ok	768	4f33c513c2e95c25	delharc,unar,7z,bsdtar		delharc,lsar,bsdtar	
+m-lh1-l0.lha	0	0		-lh1-	0	EMPTY.BIN	-	-	EMPTY.BIN	ascii	exact	0	33	33	0	0	0000	ok	0	cbf29ce484222325			delharc,lsar,7z,bsdtar	zero-length entry carrying a compressing method; genuine archivers store it as -lh0-
+m-lh1-l0.lha	1	0		-lh1-	0	ONEBYTE.BIN	-	-	ONEBYTE.BIN	ascii	exact	33	35	68	2	1	30c0	ok	1	af63fc4c860222ec	delharc,unar		delharc,lsar,7z,bsdtar	
+m-lh1-l0.lha	2	0		-lh1-	0	TEXT.TXT	-	-	TEXT.TXT	ascii	exact	70	32	102	318	547	419a	ok	547	9d968ab45b00bd0b	delharc,unar		delharc,lsar,7z,bsdtar	
+m-lh1-l0.lha	3	0		-lh1-	0	RUNS.BIN	-	-	RUNS.BIN	ascii	exact	420	32	452	487	3616	363a	ok	3616	c37567cd28c14a3e	delharc,unar		delharc,lsar,7z,bsdtar	
+m-lh1-l0.lha	4	0		-lh1-	0	RANDOM.BIN	-	-	RANDOM.BIN	ascii	exact	939	34	973	2061	2000	22bd	ok	2000	8c67b204e186f674	delharc,unar		delharc,lsar,7z,bsdtar	
+m-lh1-l0.lha	5	0		-lh1-	0	ZEROS.BIN	-	-	ZEROS.BIN	ascii	exact	3034	33	3067	134	5000	0000	ok	5000	a55ccd8b52a7bfc5	delharc,unar		delharc,lsar,7z,bsdtar	
+m-lh1-l0.lha	6	0		-lh1-	0	RAMP.BIN	-	-	RAMP.BIN	ascii	exact	3201	32	3233	298	768	47bb	ok	768	4f33c513c2e95c25	delharc,unar		delharc,lsar,7z,bsdtar	
+m-lh1-l1.lha	0	1	4d	-lh1-	0	EMPTY.BIN	-	-	EMPTY.BIN	ascii	exact	0	36	36	0	0	0000	ok	0	cbf29ce484222325			delharc,lsar,7z,bsdtar	zero-length entry carrying a compressing method; genuine archivers store it as -lh0-
+m-lh1-l1.lha	1	1	4d	-lh1-	0	ONEBYTE.BIN	-	-	ONEBYTE.BIN	ascii	exact	36	38	74	2	1	30c0	ok	1	af63fc4c860222ec	delharc,unar		delharc,lsar,7z,bsdtar	
+m-lh1-l1.lha	2	1	4d	-lh1-	0	TEXT.TXT	-	-	TEXT.TXT	ascii	exact	76	35	111	318	547	419a	ok	547	9d968ab45b00bd0b	delharc,unar		delharc,lsar,7z,bsdtar	
+m-lh1-l1.lha	3	1	4d	-lh1-	0	RUNS.BIN	-	-	RUNS.BIN	ascii	exact	429	35	464	487	3616	363a	ok	3616	c37567cd28c14a3e	delharc,unar		delharc,lsar,7z,bsdtar	
+m-lh1-l1.lha	4	1	4d	-lh1-	0	RANDOM.BIN	-	-	RANDOM.BIN	ascii	exact	951	37	988	2061	2000	22bd	ok	2000	8c67b204e186f674	delharc,unar		delharc,lsar,7z,bsdtar	
+m-lh1-l1.lha	5	1	4d	-lh1-	0	ZEROS.BIN	-	-	ZEROS.BIN	ascii	exact	3049	36	3085	134	5000	0000	ok	5000	a55ccd8b52a7bfc5	delharc,unar		delharc,lsar,7z,bsdtar	
+m-lh1-l1.lha	6	1	4d	-lh1-	0	RAMP.BIN	-	-	RAMP.BIN	ascii	exact	3219	35	3254	298	768	47bb	ok	768	4f33c513c2e95c25	delharc,unar		delharc,lsar,7z,bsdtar	
+m-lh1-l2.lha	0	2	4d	-lh1-	0	-	EMPTY.BIN	-	EMPTY.BIN	ascii	exact	0	43	43	0	0	0000	ok	0	cbf29ce484222325			delharc,lsar,7z,bsdtar	zero-length entry carrying a compressing method; genuine archivers store it as -lh0-
+m-lh1-l2.lha	1	2	4d	-lh1-	0	-	ONEBYTE.BIN	-	ONEBYTE.BIN	ascii	exact	43	45	88	2	1	30c0	ok	1	af63fc4c860222ec	delharc,unar		delharc,lsar,7z,bsdtar	
+m-lh1-l2.lha	2	2	4d	-lh1-	0	-	TEXT.TXT	-	TEXT.TXT	ascii	exact	90	42	132	318	547	419a	ok	547	9d968ab45b00bd0b	delharc,unar		delharc,lsar,7z,bsdtar	
+m-lh1-l2.lha	3	2	4d	-lh1-	0	-	RUNS.BIN	-	RUNS.BIN	ascii	exact	450	42	492	487	3616	363a	ok	3616	c37567cd28c14a3e	delharc,unar		delharc,lsar,7z,bsdtar	
+m-lh1-l2.lha	4	2	4d	-lh1-	0	-	RANDOM.BIN	-	RANDOM.BIN	ascii	exact	979	44	1023	2061	2000	22bd	ok	2000	8c67b204e186f674	delharc,unar		delharc,lsar,7z,bsdtar	
+m-lh1-l2.lha	5	2	4d	-lh1-	0	-	ZEROS.BIN	-	ZEROS.BIN	ascii	exact	3084	43	3127	134	5000	0000	ok	5000	a55ccd8b52a7bfc5	delharc,unar		delharc,lsar,7z,bsdtar	
+m-lh1-l2.lha	6	2	4d	-lh1-	0	-	RAMP.BIN	-	RAMP.BIN	ascii	exact	3261	42	3303	298	768	47bb	ok	768	4f33c513c2e95c25	delharc,unar		delharc,lsar,7z,bsdtar	
+m-lh1-l3.lha	0	3	4d	-lh1-	0	-	EMPTY.BIN	-	EMPTY.BIN	ascii	exact	0	53	53	0	0	0000	ok	0	cbf29ce484222325			delharc,lsar,bsdtar	zero-length entry carrying a compressing method; genuine archivers store it as -lh0-
+m-lh1-l3.lha	1	3	4d	-lh1-	0	-	ONEBYTE.BIN	-	ONEBYTE.BIN	ascii	exact	53	55	108	2	1	30c0	ok	1	af63fc4c860222ec	delharc,unar		delharc,lsar,bsdtar	
+m-lh1-l3.lha	2	3	4d	-lh1-	0	-	TEXT.TXT	-	TEXT.TXT	ascii	exact	110	52	162	318	547	419a	ok	547	9d968ab45b00bd0b	delharc,unar		delharc,lsar,bsdtar	
+m-lh1-l3.lha	3	3	4d	-lh1-	0	-	RUNS.BIN	-	RUNS.BIN	ascii	exact	480	52	532	487	3616	363a	ok	3616	c37567cd28c14a3e	delharc,unar		delharc,lsar,bsdtar	
+m-lh1-l3.lha	4	3	4d	-lh1-	0	-	RANDOM.BIN	-	RANDOM.BIN	ascii	exact	1019	54	1073	2061	2000	22bd	ok	2000	8c67b204e186f674	delharc,unar		delharc,lsar,bsdtar	
+m-lh1-l3.lha	5	3	4d	-lh1-	0	-	ZEROS.BIN	-	ZEROS.BIN	ascii	exact	3134	53	3187	134	5000	0000	ok	5000	a55ccd8b52a7bfc5	delharc,unar		delharc,lsar,bsdtar	
+m-lh1-l3.lha	6	3	4d	-lh1-	0	-	RAMP.BIN	-	RAMP.BIN	ascii	exact	3321	52	3373	298	768	47bb	ok	768	4f33c513c2e95c25	delharc,unar		delharc,lsar,bsdtar	
+m-lh4-l0.lha	0	0		-lh4-	0	EMPTY.BIN	-	-	EMPTY.BIN	ascii	exact	0	33	33	0	0	0000	ok	0	cbf29ce484222325			delharc,lsar,7z,bsdtar	zero-length entry carrying a compressing method; genuine archivers store it as -lh0-
+m-lh4-l0.lha	1	0		-lh4-	0	ONEBYTE.BIN	-	-	ONEBYTE.BIN	ascii	exact	33	35	68	7	1	30c0	ok	1	af63fc4c860222ec	delharc,unar,7z		delharc,lsar,7z,bsdtar	
+m-lh4-l0.lha	2	0		-lh4-	0	TEXT.TXT	-	-	TEXT.TXT	ascii	exact	75	32	107	283	547	419a	ok	547	9d968ab45b00bd0b	delharc,unar,7z		delharc,lsar,7z,bsdtar	
+m-lh4-l0.lha	3	0		-lh4-	0	RUNS.BIN	-	-	RUNS.BIN	ascii	exact	390	32	422	430	3616	363a	ok	3616	c37567cd28c14a3e	delharc,unar,7z		delharc,lsar,7z,bsdtar	
+m-lh4-l0.lha	4	0		-lh4-	0	RANDOM.BIN	-	-	RANDOM.BIN	ascii	exact	852	34	886	2036	2000	22bd	ok	2000	8c67b204e186f674	delharc,unar,7z		delharc,lsar,7z,bsdtar	
+m-lh4-l0.lha	5	0		-lh4-	0	ZEROS.BIN	-	-	ZEROS.BIN	ascii	exact	2922	33	2955	13	5000	0000	ok	5000	a55ccd8b52a7bfc5	delharc,unar,7z		delharc,lsar,7z,bsdtar	
+m-lh4-l0.lha	6	0		-lh4-	0	RAMP.BIN	-	-	RAMP.BIN	ascii	exact	2968	32	3000	303	768	47bb	ok	768	4f33c513c2e95c25	delharc,unar,7z		delharc,lsar,7z,bsdtar	
+m-lh4-l1.lha	0	1	4d	-lh4-	0	EMPTY.BIN	-	-	EMPTY.BIN	ascii	exact	0	36	36	0	0	0000	ok	0	cbf29ce484222325			delharc,lsar,7z,bsdtar	zero-length entry carrying a compressing method; genuine archivers store it as -lh0-
+m-lh4-l1.lha	1	1	4d	-lh4-	0	ONEBYTE.BIN	-	-	ONEBYTE.BIN	ascii	exact	36	38	74	7	1	30c0	ok	1	af63fc4c860222ec	delharc,unar,7z		delharc,lsar,7z,bsdtar	
+m-lh4-l1.lha	2	1	4d	-lh4-	0	TEXT.TXT	-	-	TEXT.TXT	ascii	exact	81	35	116	283	547	419a	ok	547	9d968ab45b00bd0b	delharc,unar,7z		delharc,lsar,7z,bsdtar	
+m-lh4-l1.lha	3	1	4d	-lh4-	0	RUNS.BIN	-	-	RUNS.BIN	ascii	exact	399	35	434	430	3616	363a	ok	3616	c37567cd28c14a3e	delharc,unar,7z		delharc,lsar,7z,bsdtar	
+m-lh4-l1.lha	4	1	4d	-lh4-	0	RANDOM.BIN	-	-	RANDOM.BIN	ascii	exact	864	37	901	2036	2000	22bd	ok	2000	8c67b204e186f674	delharc,unar,7z		delharc,lsar,7z,bsdtar	
+m-lh4-l1.lha	5	1	4d	-lh4-	0	ZEROS.BIN	-	-	ZEROS.BIN	ascii	exact	2937	36	2973	13	5000	0000	ok	5000	a55ccd8b52a7bfc5	delharc,unar,7z		delharc,lsar,7z,bsdtar	
+m-lh4-l1.lha	6	1	4d	-lh4-	0	RAMP.BIN	-	-	RAMP.BIN	ascii	exact	2986	35	3021	303	768	47bb	ok	768	4f33c513c2e95c25	delharc,unar,7z		delharc,lsar,7z,bsdtar	
+m-lh4-l2.lha	0	2	4d	-lh4-	0	-	EMPTY.BIN	-	EMPTY.BIN	ascii	exact	0	43	43	0	0	0000	ok	0	cbf29ce484222325			delharc,lsar,7z,bsdtar	zero-length entry carrying a compressing method; genuine archivers store it as -lh0-
+m-lh4-l2.lha	1	2	4d	-lh4-	0	-	ONEBYTE.BIN	-	ONEBYTE.BIN	ascii	exact	43	45	88	7	1	30c0	ok	1	af63fc4c860222ec	delharc,unar,7z		delharc,lsar,7z,bsdtar	
+m-lh4-l2.lha	2	2	4d	-lh4-	0	-	TEXT.TXT	-	TEXT.TXT	ascii	exact	95	42	137	283	547	419a	ok	547	9d968ab45b00bd0b	delharc,unar,7z		delharc,lsar,7z,bsdtar	
+m-lh4-l2.lha	3	2	4d	-lh4-	0	-	RUNS.BIN	-	RUNS.BIN	ascii	exact	420	42	462	430	3616	363a	ok	3616	c37567cd28c14a3e	delharc,unar,7z		delharc,lsar,7z,bsdtar	
+m-lh4-l2.lha	4	2	4d	-lh4-	0	-	RANDOM.BIN	-	RANDOM.BIN	ascii	exact	892	44	936	2036	2000	22bd	ok	2000	8c67b204e186f674	delharc,unar,7z		delharc,lsar,7z,bsdtar	
+m-lh4-l2.lha	5	2	4d	-lh4-	0	-	ZEROS.BIN	-	ZEROS.BIN	ascii	exact	2972	43	3015	13	5000	0000	ok	5000	a55ccd8b52a7bfc5	delharc,unar,7z		delharc,lsar,7z,bsdtar	
+m-lh4-l2.lha	6	2	4d	-lh4-	0	-	RAMP.BIN	-	RAMP.BIN	ascii	exact	3028	42	3070	303	768	47bb	ok	768	4f33c513c2e95c25	delharc,unar,7z		delharc,lsar,7z,bsdtar	
+m-lh4-l3.lha	0	3	4d	-lh4-	0	-	EMPTY.BIN	-	EMPTY.BIN	ascii	exact	0	53	53	0	0	0000	ok	0	cbf29ce484222325			delharc,lsar,bsdtar	zero-length entry carrying a compressing method; genuine archivers store it as -lh0-
+m-lh4-l3.lha	1	3	4d	-lh4-	0	-	ONEBYTE.BIN	-	ONEBYTE.BIN	ascii	exact	53	55	108	7	1	30c0	ok	1	af63fc4c860222ec	delharc,unar,7z		delharc,lsar,bsdtar	
+m-lh4-l3.lha	2	3	4d	-lh4-	0	-	TEXT.TXT	-	TEXT.TXT	ascii	exact	115	52	167	283	547	419a	ok	547	9d968ab45b00bd0b	delharc,unar,7z		delharc,lsar,bsdtar	
+m-lh4-l3.lha	3	3	4d	-lh4-	0	-	RUNS.BIN	-	RUNS.BIN	ascii	exact	450	52	502	430	3616	363a	ok	3616	c37567cd28c14a3e	delharc,unar,7z		delharc,lsar,bsdtar	
+m-lh4-l3.lha	4	3	4d	-lh4-	0	-	RANDOM.BIN	-	RANDOM.BIN	ascii	exact	932	54	986	2036	2000	22bd	ok	2000	8c67b204e186f674	delharc,unar,7z		delharc,lsar,bsdtar	
+m-lh4-l3.lha	5	3	4d	-lh4-	0	-	ZEROS.BIN	-	ZEROS.BIN	ascii	exact	3022	53	3075	13	5000	0000	ok	5000	a55ccd8b52a7bfc5	delharc,unar,7z		delharc,lsar,bsdtar	
+m-lh4-l3.lha	6	3	4d	-lh4-	0	-	RAMP.BIN	-	RAMP.BIN	ascii	exact	3088	52	3140	303	768	47bb	ok	768	4f33c513c2e95c25	delharc,unar,7z		delharc,lsar,bsdtar	
+m-lh5-l0.lha	0	0		-lh5-	0	EMPTY.BIN	-	-	EMPTY.BIN	ascii	exact	0	33	33	0	0	0000	ok	0	cbf29ce484222325			delharc,lsar,7z,bsdtar	zero-length entry carrying a compressing method; genuine archivers store it as -lh0-
+m-lh5-l0.lha	1	0		-lh5-	0	ONEBYTE.BIN	-	-	ONEBYTE.BIN	ascii	exact	33	35	68	7	1	30c0	ok	1	af63fc4c860222ec	delharc,unar,7z	bsdtar:error	delharc,lsar,7z,bsdtar	
+m-lh5-l0.lha	2	0		-lh5-	0	TEXT.TXT	-	-	TEXT.TXT	ascii	exact	75	32	107	283	547	419a	ok	547	9d968ab45b00bd0b	delharc,unar,7z,bsdtar		delharc,lsar,7z,bsdtar	
+m-lh5-l0.lha	3	0		-lh5-	0	RUNS.BIN	-	-	RUNS.BIN	ascii	exact	390	32	422	430	3616	363a	ok	3616	c37567cd28c14a3e	delharc,unar,7z,bsdtar		delharc,lsar,7z,bsdtar	
+m-lh5-l0.lha	4	0		-lh5-	0	RANDOM.BIN	-	-	RANDOM.BIN	ascii	exact	852	34	886	2036	2000	22bd	ok	2000	8c67b204e186f674	delharc,unar,7z,bsdtar		delharc,lsar,7z,bsdtar	
+m-lh5-l0.lha	5	0		-lh5-	0	ZEROS.BIN	-	-	ZEROS.BIN	ascii	exact	2922	33	2955	13	5000	0000	ok	5000	a55ccd8b52a7bfc5	delharc,unar,7z,bsdtar		delharc,lsar,7z,bsdtar	
+m-lh5-l0.lha	6	0		-lh5-	0	RAMP.BIN	-	-	RAMP.BIN	ascii	exact	2968	32	3000	303	768	47bb	ok	768	4f33c513c2e95c25	delharc,unar,7z,bsdtar		delharc,lsar,7z,bsdtar	
+m-lh5-l1.lha	0	1	4d	-lh5-	0	EMPTY.BIN	-	-	EMPTY.BIN	ascii	exact	0	36	36	0	0	0000	ok	0	cbf29ce484222325			delharc,lsar,7z,bsdtar	zero-length entry carrying a compressing method; genuine archivers store it as -lh0-
+m-lh5-l1.lha	1	1	4d	-lh5-	0	ONEBYTE.BIN	-	-	ONEBYTE.BIN	ascii	exact	36	38	74	7	1	30c0	ok	1	af63fc4c860222ec	delharc,unar,7z	bsdtar:error	delharc,lsar,7z,bsdtar	
+m-lh5-l1.lha	2	1	4d	-lh5-	0	TEXT.TXT	-	-	TEXT.TXT	ascii	exact	81	35	116	283	547	419a	ok	547	9d968ab45b00bd0b	delharc,unar,7z,bsdtar		delharc,lsar,7z,bsdtar	
+m-lh5-l1.lha	3	1	4d	-lh5-	0	RUNS.BIN	-	-	RUNS.BIN	ascii	exact	399	35	434	430	3616	363a	ok	3616	c37567cd28c14a3e	delharc,unar,7z,bsdtar		delharc,lsar,7z,bsdtar	
+m-lh5-l1.lha	4	1	4d	-lh5-	0	RANDOM.BIN	-	-	RANDOM.BIN	ascii	exact	864	37	901	2036	2000	22bd	ok	2000	8c67b204e186f674	delharc,unar,7z,bsdtar		delharc,lsar,7z,bsdtar	
+m-lh5-l1.lha	5	1	4d	-lh5-	0	ZEROS.BIN	-	-	ZEROS.BIN	ascii	exact	2937	36	2973	13	5000	0000	ok	5000	a55ccd8b52a7bfc5	delharc,unar,7z,bsdtar		delharc,lsar,7z,bsdtar	
+m-lh5-l1.lha	6	1	4d	-lh5-	0	RAMP.BIN	-	-	RAMP.BIN	ascii	exact	2986	35	3021	303	768	47bb	ok	768	4f33c513c2e95c25	delharc,unar,7z,bsdtar		delharc,lsar,7z,bsdtar	
+m-lh5-l2.lha	0	2	4d	-lh5-	0	-	EMPTY.BIN	-	EMPTY.BIN	ascii	exact	0	43	43	0	0	0000	ok	0	cbf29ce484222325			delharc,lsar,7z,bsdtar	zero-length entry carrying a compressing method; genuine archivers store it as -lh0-
+m-lh5-l2.lha	1	2	4d	-lh5-	0	-	ONEBYTE.BIN	-	ONEBYTE.BIN	ascii	exact	43	45	88	7	1	30c0	ok	1	af63fc4c860222ec	delharc,unar,7z	bsdtar:error	delharc,lsar,7z,bsdtar	
+m-lh5-l2.lha	2	2	4d	-lh5-	0	-	TEXT.TXT	-	TEXT.TXT	ascii	exact	95	42	137	283	547	419a	ok	547	9d968ab45b00bd0b	delharc,unar,7z,bsdtar		delharc,lsar,7z,bsdtar	
+m-lh5-l2.lha	3	2	4d	-lh5-	0	-	RUNS.BIN	-	RUNS.BIN	ascii	exact	420	42	462	430	3616	363a	ok	3616	c37567cd28c14a3e	delharc,unar,7z,bsdtar		delharc,lsar,7z,bsdtar	
+m-lh5-l2.lha	4	2	4d	-lh5-	0	-	RANDOM.BIN	-	RANDOM.BIN	ascii	exact	892	44	936	2036	2000	22bd	ok	2000	8c67b204e186f674	delharc,unar,7z,bsdtar		delharc,lsar,7z,bsdtar	
+m-lh5-l2.lha	5	2	4d	-lh5-	0	-	ZEROS.BIN	-	ZEROS.BIN	ascii	exact	2972	43	3015	13	5000	0000	ok	5000	a55ccd8b52a7bfc5	delharc,unar,7z,bsdtar		delharc,lsar,7z,bsdtar	
+m-lh5-l2.lha	6	2	4d	-lh5-	0	-	RAMP.BIN	-	RAMP.BIN	ascii	exact	3028	42	3070	303	768	47bb	ok	768	4f33c513c2e95c25	delharc,unar,7z,bsdtar		delharc,lsar,7z,bsdtar	
+m-lh5-l3.lha	0	3	4d	-lh5-	0	-	EMPTY.BIN	-	EMPTY.BIN	ascii	exact	0	53	53	0	0	0000	ok	0	cbf29ce484222325			delharc,lsar,bsdtar	zero-length entry carrying a compressing method; genuine archivers store it as -lh0-
+m-lh5-l3.lha	1	3	4d	-lh5-	0	-	ONEBYTE.BIN	-	ONEBYTE.BIN	ascii	exact	53	55	108	7	1	30c0	ok	1	af63fc4c860222ec	delharc,unar,7z	bsdtar:error	delharc,lsar,bsdtar	
+m-lh5-l3.lha	2	3	4d	-lh5-	0	-	TEXT.TXT	-	TEXT.TXT	ascii	exact	115	52	167	283	547	419a	ok	547	9d968ab45b00bd0b	delharc,unar,7z,bsdtar		delharc,lsar,bsdtar	
+m-lh5-l3.lha	3	3	4d	-lh5-	0	-	RUNS.BIN	-	RUNS.BIN	ascii	exact	450	52	502	430	3616	363a	ok	3616	c37567cd28c14a3e	delharc,unar,7z,bsdtar		delharc,lsar,bsdtar	
+m-lh5-l3.lha	4	3	4d	-lh5-	0	-	RANDOM.BIN	-	RANDOM.BIN	ascii	exact	932	54	986	2036	2000	22bd	ok	2000	8c67b204e186f674	delharc,unar,7z,bsdtar		delharc,lsar,bsdtar	
+m-lh5-l3.lha	5	3	4d	-lh5-	0	-	ZEROS.BIN	-	ZEROS.BIN	ascii	exact	3022	53	3075	13	5000	0000	ok	5000	a55ccd8b52a7bfc5	delharc,unar,7z,bsdtar		delharc,lsar,bsdtar	
+m-lh5-l3.lha	6	3	4d	-lh5-	0	-	RAMP.BIN	-	RAMP.BIN	ascii	exact	3088	52	3140	303	768	47bb	ok	768	4f33c513c2e95c25	delharc,unar,7z,bsdtar		delharc,lsar,bsdtar	
+m-lh6-l0.lha	0	0		-lh6-	0	EMPTY.BIN	-	-	EMPTY.BIN	ascii	exact	0	33	33	0	0	0000	ok	0	cbf29ce484222325			delharc,lsar,7z,bsdtar	zero-length entry carrying a compressing method; genuine archivers store it as -lh0-
+m-lh6-l0.lha	1	0		-lh6-	0	ONEBYTE.BIN	-	-	ONEBYTE.BIN	ascii	exact	33	35	68	7	1	30c0	ok	1	af63fc4c860222ec	delharc,unar,7z	bsdtar:error	delharc,lsar,7z,bsdtar	
+m-lh6-l0.lha	2	0		-lh6-	0	TEXT.TXT	-	-	TEXT.TXT	ascii	exact	75	32	107	283	547	419a	ok	547	9d968ab45b00bd0b	delharc,unar,7z,bsdtar		delharc,lsar,7z,bsdtar	
+m-lh6-l0.lha	3	0		-lh6-	0	RUNS.BIN	-	-	RUNS.BIN	ascii	exact	390	32	422	430	3616	363a	ok	3616	c37567cd28c14a3e	delharc,unar,7z,bsdtar		delharc,lsar,7z,bsdtar	
+m-lh6-l0.lha	4	0		-lh6-	0	RANDOM.BIN	-	-	RANDOM.BIN	ascii	exact	852	34	886	2037	2000	22bd	ok	2000	8c67b204e186f674	delharc,unar,7z,bsdtar		delharc,lsar,7z,bsdtar	
+m-lh6-l0.lha	5	0		-lh6-	0	ZEROS.BIN	-	-	ZEROS.BIN	ascii	exact	2923	33	2956	14	5000	0000	ok	5000	a55ccd8b52a7bfc5	delharc,unar,7z,bsdtar		delharc,lsar,7z,bsdtar	
+m-lh6-l0.lha	6	0		-lh6-	0	RAMP.BIN	-	-	RAMP.BIN	ascii	exact	2970	32	3002	303	768	47bb	ok	768	4f33c513c2e95c25	delharc,unar,7z,bsdtar		delharc,lsar,7z,bsdtar	
+m-lh6-l1.lha	0	1	4d	-lh6-	0	EMPTY.BIN	-	-	EMPTY.BIN	ascii	exact	0	36	36	0	0	0000	ok	0	cbf29ce484222325			delharc,lsar,7z,bsdtar	zero-length entry carrying a compressing method; genuine archivers store it as -lh0-
+m-lh6-l1.lha	1	1	4d	-lh6-	0	ONEBYTE.BIN	-	-	ONEBYTE.BIN	ascii	exact	36	38	74	7	1	30c0	ok	1	af63fc4c860222ec	delharc,unar,7z	bsdtar:error	delharc,lsar,7z,bsdtar	
+m-lh6-l1.lha	2	1	4d	-lh6-	0	TEXT.TXT	-	-	TEXT.TXT	ascii	exact	81	35	116	283	547	419a	ok	547	9d968ab45b00bd0b	delharc,unar,7z,bsdtar		delharc,lsar,7z,bsdtar	
+m-lh6-l1.lha	3	1	4d	-lh6-	0	RUNS.BIN	-	-	RUNS.BIN	ascii	exact	399	35	434	430	3616	363a	ok	3616	c37567cd28c14a3e	delharc,unar,7z,bsdtar		delharc,lsar,7z,bsdtar	
+m-lh6-l1.lha	4	1	4d	-lh6-	0	RANDOM.BIN	-	-	RANDOM.BIN	ascii	exact	864	37	901	2037	2000	22bd	ok	2000	8c67b204e186f674	delharc,unar,7z,bsdtar		delharc,lsar,7z,bsdtar	
+m-lh6-l1.lha	5	1	4d	-lh6-	0	ZEROS.BIN	-	-	ZEROS.BIN	ascii	exact	2938	36	2974	14	5000	0000	ok	5000	a55ccd8b52a7bfc5	delharc,unar,7z,bsdtar		delharc,lsar,7z,bsdtar	
+m-lh6-l1.lha	6	1	4d	-lh6-	0	RAMP.BIN	-	-	RAMP.BIN	ascii	exact	2988	35	3023	303	768	47bb	ok	768	4f33c513c2e95c25	delharc,unar,7z,bsdtar		delharc,lsar,7z,bsdtar	
+m-lh6-l2.lha	0	2	4d	-lh6-	0	-	EMPTY.BIN	-	EMPTY.BIN	ascii	exact	0	43	43	0	0	0000	ok	0	cbf29ce484222325			delharc,lsar,7z,bsdtar	zero-length entry carrying a compressing method; genuine archivers store it as -lh0-
+m-lh6-l2.lha	1	2	4d	-lh6-	0	-	ONEBYTE.BIN	-	ONEBYTE.BIN	ascii	exact	43	45	88	7	1	30c0	ok	1	af63fc4c860222ec	delharc,unar,7z	bsdtar:error	delharc,lsar,7z,bsdtar	
+m-lh6-l2.lha	2	2	4d	-lh6-	0	-	TEXT.TXT	-	TEXT.TXT	ascii	exact	95	42	137	283	547	419a	ok	547	9d968ab45b00bd0b	delharc,unar,7z,bsdtar		delharc,lsar,7z,bsdtar	
+m-lh6-l2.lha	3	2	4d	-lh6-	0	-	RUNS.BIN	-	RUNS.BIN	ascii	exact	420	42	462	430	3616	363a	ok	3616	c37567cd28c14a3e	delharc,unar,7z,bsdtar		delharc,lsar,7z,bsdtar	
+m-lh6-l2.lha	4	2	4d	-lh6-	0	-	RANDOM.BIN	-	RANDOM.BIN	ascii	exact	892	44	936	2037	2000	22bd	ok	2000	8c67b204e186f674	delharc,unar,7z,bsdtar		delharc,lsar,7z,bsdtar	
+m-lh6-l2.lha	5	2	4d	-lh6-	0	-	ZEROS.BIN	-	ZEROS.BIN	ascii	exact	2973	43	3016	14	5000	0000	ok	5000	a55ccd8b52a7bfc5	delharc,unar,7z,bsdtar		delharc,lsar,7z,bsdtar	
+m-lh6-l2.lha	6	2	4d	-lh6-	0	-	RAMP.BIN	-	RAMP.BIN	ascii	exact	3030	42	3072	303	768	47bb	ok	768	4f33c513c2e95c25	delharc,unar,7z,bsdtar		delharc,lsar,7z,bsdtar	
+m-lh6-l3.lha	0	3	4d	-lh6-	0	-	EMPTY.BIN	-	EMPTY.BIN	ascii	exact	0	53	53	0	0	0000	ok	0	cbf29ce484222325			delharc,lsar,bsdtar	zero-length entry carrying a compressing method; genuine archivers store it as -lh0-
+m-lh6-l3.lha	1	3	4d	-lh6-	0	-	ONEBYTE.BIN	-	ONEBYTE.BIN	ascii	exact	53	55	108	7	1	30c0	ok	1	af63fc4c860222ec	delharc,unar,7z	bsdtar:error	delharc,lsar,bsdtar	
+m-lh6-l3.lha	2	3	4d	-lh6-	0	-	TEXT.TXT	-	TEXT.TXT	ascii	exact	115	52	167	283	547	419a	ok	547	9d968ab45b00bd0b	delharc,unar,7z,bsdtar		delharc,lsar,bsdtar	
+m-lh6-l3.lha	3	3	4d	-lh6-	0	-	RUNS.BIN	-	RUNS.BIN	ascii	exact	450	52	502	430	3616	363a	ok	3616	c37567cd28c14a3e	delharc,unar,7z,bsdtar		delharc,lsar,bsdtar	
+m-lh6-l3.lha	4	3	4d	-lh6-	0	-	RANDOM.BIN	-	RANDOM.BIN	ascii	exact	932	54	986	2037	2000	22bd	ok	2000	8c67b204e186f674	delharc,unar,7z,bsdtar		delharc,lsar,bsdtar	
+m-lh6-l3.lha	5	3	4d	-lh6-	0	-	ZEROS.BIN	-	ZEROS.BIN	ascii	exact	3023	53	3076	14	5000	0000	ok	5000	a55ccd8b52a7bfc5	delharc,unar,7z,bsdtar		delharc,lsar,bsdtar	
+m-lh6-l3.lha	6	3	4d	-lh6-	0	-	RAMP.BIN	-	RAMP.BIN	ascii	exact	3090	52	3142	303	768	47bb	ok	768	4f33c513c2e95c25	delharc,unar,7z,bsdtar		delharc,lsar,bsdtar	
+m-lh7-l0.lha	0	0		-lh7-	0	EMPTY.BIN	-	-	EMPTY.BIN	ascii	exact	0	33	33	0	0	0000	ok	0	cbf29ce484222325			delharc,lsar,7z,bsdtar	zero-length entry carrying a compressing method; genuine archivers store it as -lh0-
+m-lh7-l0.lha	1	0		-lh7-	0	ONEBYTE.BIN	-	-	ONEBYTE.BIN	ascii	exact	33	35	68	7	1	30c0	ok	1	af63fc4c860222ec	delharc,unar,7z	bsdtar:error	delharc,lsar,7z,bsdtar	
+m-lh7-l0.lha	2	0		-lh7-	0	TEXT.TXT	-	-	TEXT.TXT	ascii	exact	75	32	107	283	547	419a	ok	547	9d968ab45b00bd0b	delharc,unar,7z,bsdtar		delharc,lsar,7z,bsdtar	
+m-lh7-l0.lha	3	0		-lh7-	0	RUNS.BIN	-	-	RUNS.BIN	ascii	exact	390	32	422	430	3616	363a	ok	3616	c37567cd28c14a3e	delharc,unar,7z,bsdtar		delharc,lsar,7z,bsdtar	
+m-lh7-l0.lha	4	0		-lh7-	0	RANDOM.BIN	-	-	RANDOM.BIN	ascii	exact	852	34	886	2037	2000	22bd	ok	2000	8c67b204e186f674	delharc,unar,7z,bsdtar		delharc,lsar,7z,bsdtar	
+m-lh7-l0.lha	5	0		-lh7-	0	ZEROS.BIN	-	-	ZEROS.BIN	ascii	exact	2923	33	2956	14	5000	0000	ok	5000	a55ccd8b52a7bfc5	delharc,unar,7z,bsdtar		delharc,lsar,7z,bsdtar	
+m-lh7-l0.lha	6	0		-lh7-	0	RAMP.BIN	-	-	RAMP.BIN	ascii	exact	2970	32	3002	303	768	47bb	ok	768	4f33c513c2e95c25	delharc,unar,7z,bsdtar		delharc,lsar,7z,bsdtar	
+m-lh7-l1.lha	0	1	4d	-lh7-	0	EMPTY.BIN	-	-	EMPTY.BIN	ascii	exact	0	36	36	0	0	0000	ok	0	cbf29ce484222325			delharc,lsar,7z,bsdtar	zero-length entry carrying a compressing method; genuine archivers store it as -lh0-
+m-lh7-l1.lha	1	1	4d	-lh7-	0	ONEBYTE.BIN	-	-	ONEBYTE.BIN	ascii	exact	36	38	74	7	1	30c0	ok	1	af63fc4c860222ec	delharc,unar,7z	bsdtar:error	delharc,lsar,7z,bsdtar	
+m-lh7-l1.lha	2	1	4d	-lh7-	0	TEXT.TXT	-	-	TEXT.TXT	ascii	exact	81	35	116	283	547	419a	ok	547	9d968ab45b00bd0b	delharc,unar,7z,bsdtar		delharc,lsar,7z,bsdtar	
+m-lh7-l1.lha	3	1	4d	-lh7-	0	RUNS.BIN	-	-	RUNS.BIN	ascii	exact	399	35	434	430	3616	363a	ok	3616	c37567cd28c14a3e	delharc,unar,7z,bsdtar		delharc,lsar,7z,bsdtar	
+m-lh7-l1.lha	4	1	4d	-lh7-	0	RANDOM.BIN	-	-	RANDOM.BIN	ascii	exact	864	37	901	2037	2000	22bd	ok	2000	8c67b204e186f674	delharc,unar,7z,bsdtar		delharc,lsar,7z,bsdtar	
+m-lh7-l1.lha	5	1	4d	-lh7-	0	ZEROS.BIN	-	-	ZEROS.BIN	ascii	exact	2938	36	2974	14	5000	0000	ok	5000	a55ccd8b52a7bfc5	delharc,unar,7z,bsdtar		delharc,lsar,7z,bsdtar	
+m-lh7-l1.lha	6	1	4d	-lh7-	0	RAMP.BIN	-	-	RAMP.BIN	ascii	exact	2988	35	3023	303	768	47bb	ok	768	4f33c513c2e95c25	delharc,unar,7z,bsdtar		delharc,lsar,7z,bsdtar	
+m-lh7-l2.lha	0	2	4d	-lh7-	0	-	EMPTY.BIN	-	EMPTY.BIN	ascii	exact	0	43	43	0	0	0000	ok	0	cbf29ce484222325			delharc,lsar,7z,bsdtar	zero-length entry carrying a compressing method; genuine archivers store it as -lh0-
+m-lh7-l2.lha	1	2	4d	-lh7-	0	-	ONEBYTE.BIN	-	ONEBYTE.BIN	ascii	exact	43	45	88	7	1	30c0	ok	1	af63fc4c860222ec	delharc,unar,7z	bsdtar:error	delharc,lsar,7z,bsdtar	
+m-lh7-l2.lha	2	2	4d	-lh7-	0	-	TEXT.TXT	-	TEXT.TXT	ascii	exact	95	42	137	283	547	419a	ok	547	9d968ab45b00bd0b	delharc,unar,7z,bsdtar		delharc,lsar,7z,bsdtar	
+m-lh7-l2.lha	3	2	4d	-lh7-	0	-	RUNS.BIN	-	RUNS.BIN	ascii	exact	420	42	462	430	3616	363a	ok	3616	c37567cd28c14a3e	delharc,unar,7z,bsdtar		delharc,lsar,7z,bsdtar	
+m-lh7-l2.lha	4	2	4d	-lh7-	0	-	RANDOM.BIN	-	RANDOM.BIN	ascii	exact	892	44	936	2037	2000	22bd	ok	2000	8c67b204e186f674	delharc,unar,7z,bsdtar		delharc,lsar,7z,bsdtar	
+m-lh7-l2.lha	5	2	4d	-lh7-	0	-	ZEROS.BIN	-	ZEROS.BIN	ascii	exact	2973	43	3016	14	5000	0000	ok	5000	a55ccd8b52a7bfc5	delharc,unar,7z,bsdtar		delharc,lsar,7z,bsdtar	
+m-lh7-l2.lha	6	2	4d	-lh7-	0	-	RAMP.BIN	-	RAMP.BIN	ascii	exact	3030	42	3072	303	768	47bb	ok	768	4f33c513c2e95c25	delharc,unar,7z,bsdtar		delharc,lsar,7z,bsdtar	
+m-lh7-l3.lha	0	3	4d	-lh7-	0	-	EMPTY.BIN	-	EMPTY.BIN	ascii	exact	0	53	53	0	0	0000	ok	0	cbf29ce484222325			delharc,lsar,bsdtar	zero-length entry carrying a compressing method; genuine archivers store it as -lh0-
+m-lh7-l3.lha	1	3	4d	-lh7-	0	-	ONEBYTE.BIN	-	ONEBYTE.BIN	ascii	exact	53	55	108	7	1	30c0	ok	1	af63fc4c860222ec	delharc,unar,7z	bsdtar:error	delharc,lsar,bsdtar	
+m-lh7-l3.lha	2	3	4d	-lh7-	0	-	TEXT.TXT	-	TEXT.TXT	ascii	exact	115	52	167	283	547	419a	ok	547	9d968ab45b00bd0b	delharc,unar,7z,bsdtar		delharc,lsar,bsdtar	
+m-lh7-l3.lha	3	3	4d	-lh7-	0	-	RUNS.BIN	-	RUNS.BIN	ascii	exact	450	52	502	430	3616	363a	ok	3616	c37567cd28c14a3e	delharc,unar,7z,bsdtar		delharc,lsar,bsdtar	
+m-lh7-l3.lha	4	3	4d	-lh7-	0	-	RANDOM.BIN	-	RANDOM.BIN	ascii	exact	932	54	986	2037	2000	22bd	ok	2000	8c67b204e186f674	delharc,unar,7z,bsdtar		delharc,lsar,bsdtar	
+m-lh7-l3.lha	5	3	4d	-lh7-	0	-	ZEROS.BIN	-	ZEROS.BIN	ascii	exact	3023	53	3076	14	5000	0000	ok	5000	a55ccd8b52a7bfc5	delharc,unar,7z,bsdtar		delharc,lsar,bsdtar	
+m-lh7-l3.lha	6	3	4d	-lh7-	0	-	RAMP.BIN	-	RAMP.BIN	ascii	exact	3090	52	3142	303	768	47bb	ok	768	4f33c513c2e95c25	delharc,unar,7z,bsdtar		delharc,lsar,bsdtar	
+m-lz4-l0.lha	0	0		-lz4-	0	EMPTY.BIN	-	-	EMPTY.BIN	ascii	exact	0	33	33	0	0	0000	ok	0	cbf29ce484222325			delharc,lsar,7z,bsdtar	
+m-lz4-l0.lha	1	0		-lz4-	0	ONEBYTE.BIN	-	-	ONEBYTE.BIN	ascii	exact	33	35	68	1	1	30c0	ok	1	af63fc4c860222ec	delharc,unar,7z,bsdtar		delharc,lsar,7z,bsdtar	
+m-lz4-l0.lha	2	0		-lz4-	0	TEXT.TXT	-	-	TEXT.TXT	ascii	exact	69	32	101	547	547	419a	ok	547	9d968ab45b00bd0b	delharc,unar,7z,bsdtar		delharc,lsar,7z,bsdtar	
+m-lz4-l0.lha	3	0		-lz4-	0	RUNS.BIN	-	-	RUNS.BIN	ascii	exact	648	32	680	3616	3616	363a	ok	3616	c37567cd28c14a3e	delharc,unar,7z,bsdtar		delharc,lsar,7z,bsdtar	
+m-lz4-l0.lha	4	0		-lz4-	0	RANDOM.BIN	-	-	RANDOM.BIN	ascii	exact	4296	34	4330	2000	2000	22bd	ok	2000	8c67b204e186f674	delharc,unar,7z,bsdtar		delharc,lsar,7z,bsdtar	
+m-lz4-l0.lha	5	0		-lz4-	0	ZEROS.BIN	-	-	ZEROS.BIN	ascii	exact	6330	33	6363	5000	5000	0000	ok	5000	a55ccd8b52a7bfc5	delharc,unar,7z,bsdtar		delharc,lsar,7z,bsdtar	
+m-lz4-l0.lha	6	0		-lz4-	0	RAMP.BIN	-	-	RAMP.BIN	ascii	exact	11363	32	11395	768	768	47bb	ok	768	4f33c513c2e95c25	delharc,unar,7z,bsdtar		delharc,lsar,7z,bsdtar	
+m-lz4-l1.lha	0	1	4d	-lz4-	0	EMPTY.BIN	-	-	EMPTY.BIN	ascii	exact	0	36	36	0	0	0000	ok	0	cbf29ce484222325			delharc,lsar,7z	
+m-lz4-l1.lha	1	1	4d	-lz4-	0	ONEBYTE.BIN	-	-	ONEBYTE.BIN	ascii	exact	36	38	74	1	1	30c0	ok	1	af63fc4c860222ec	delharc,unar,7z,bsdtar		delharc,lsar,7z	
+m-lz4-l1.lha	2	1	4d	-lz4-	0	TEXT.TXT	-	-	TEXT.TXT	ascii	exact	75	35	110	547	547	419a	ok	547	9d968ab45b00bd0b	delharc,unar,7z,bsdtar		delharc,lsar,7z	
+m-lz4-l1.lha	3	1	4d	-lz4-	0	RUNS.BIN	-	-	RUNS.BIN	ascii	exact	657	35	692	3616	3616	363a	ok	3616	c37567cd28c14a3e	delharc,unar,7z,bsdtar		delharc,lsar,7z	
+m-lz4-l1.lha	4	1	4d	-lz4-	0	RANDOM.BIN	-	-	RANDOM.BIN	ascii	exact	4308	37	4345	2000	2000	22bd	ok	2000	8c67b204e186f674	delharc,unar,7z,bsdtar		delharc,lsar,7z	
+m-lz4-l1.lha	5	1	4d	-lz4-	0	ZEROS.BIN	-	-	ZEROS.BIN	ascii	exact	6345	36	6381	5000	5000	0000	ok	5000	a55ccd8b52a7bfc5	delharc,unar,7z,bsdtar		delharc,lsar,7z	
+m-lz4-l1.lha	6	1	4d	-lz4-	0	RAMP.BIN	-	-	RAMP.BIN	ascii	exact	11381	35	11416	768	768	47bb	ok	768	4f33c513c2e95c25	delharc,unar,7z,bsdtar		delharc,lsar,7z	
+m-lz4-l2.lha	0	2	4d	-lz4-	0	-	EMPTY.BIN	-	EMPTY.BIN	ascii	exact	0	43	43	0	0	0000	ok	0	cbf29ce484222325			delharc,lsar,7z	
+m-lz4-l2.lha	1	2	4d	-lz4-	0	-	ONEBYTE.BIN	-	ONEBYTE.BIN	ascii	exact	43	45	88	1	1	30c0	ok	1	af63fc4c860222ec	delharc,unar,7z,bsdtar		delharc,lsar,7z	
+m-lz4-l2.lha	2	2	4d	-lz4-	0	-	TEXT.TXT	-	TEXT.TXT	ascii	exact	89	42	131	547	547	419a	ok	547	9d968ab45b00bd0b	delharc,unar,7z,bsdtar		delharc,lsar,7z	
+m-lz4-l2.lha	3	2	4d	-lz4-	0	-	RUNS.BIN	-	RUNS.BIN	ascii	exact	678	42	720	3616	3616	363a	ok	3616	c37567cd28c14a3e	delharc,unar,7z,bsdtar		delharc,lsar,7z	
+m-lz4-l2.lha	4	2	4d	-lz4-	0	-	RANDOM.BIN	-	RANDOM.BIN	ascii	exact	4336	44	4380	2000	2000	22bd	ok	2000	8c67b204e186f674	delharc,unar,7z,bsdtar		delharc,lsar,7z	
+m-lz4-l2.lha	5	2	4d	-lz4-	0	-	ZEROS.BIN	-	ZEROS.BIN	ascii	exact	6380	43	6423	5000	5000	0000	ok	5000	a55ccd8b52a7bfc5	delharc,unar,7z,bsdtar		delharc,lsar,7z	
+m-lz4-l2.lha	6	2	4d	-lz4-	0	-	RAMP.BIN	-	RAMP.BIN	ascii	exact	11423	42	11465	768	768	47bb	ok	768	4f33c513c2e95c25	delharc,unar,7z,bsdtar		delharc,lsar,7z	
+m-lz4-l3.lha	0	3	4d	-lz4-	0	-	EMPTY.BIN	-	EMPTY.BIN	ascii	exact	0	53	53	0	0	0000	ok	0	cbf29ce484222325			delharc,lsar	
+m-lz4-l3.lha	1	3	4d	-lz4-	0	-	ONEBYTE.BIN	-	ONEBYTE.BIN	ascii	exact	53	55	108	1	1	30c0	ok	1	af63fc4c860222ec	delharc,unar,7z,bsdtar		delharc,lsar	
+m-lz4-l3.lha	2	3	4d	-lz4-	0	-	TEXT.TXT	-	TEXT.TXT	ascii	exact	109	52	161	547	547	419a	ok	547	9d968ab45b00bd0b	delharc,unar,7z,bsdtar		delharc,lsar	
+m-lz4-l3.lha	3	3	4d	-lz4-	0	-	RUNS.BIN	-	RUNS.BIN	ascii	exact	708	52	760	3616	3616	363a	ok	3616	c37567cd28c14a3e	delharc,unar,7z,bsdtar		delharc,lsar	
+m-lz4-l3.lha	4	3	4d	-lz4-	0	-	RANDOM.BIN	-	RANDOM.BIN	ascii	exact	4376	54	4430	2000	2000	22bd	ok	2000	8c67b204e186f674	delharc,unar,7z,bsdtar		delharc,lsar	
+m-lz4-l3.lha	5	3	4d	-lz4-	0	-	ZEROS.BIN	-	ZEROS.BIN	ascii	exact	6430	53	6483	5000	5000	0000	ok	5000	a55ccd8b52a7bfc5	delharc,unar,7z,bsdtar		delharc,lsar	
+m-lz4-l3.lha	6	3	4d	-lz4-	0	-	RAMP.BIN	-	RAMP.BIN	ascii	exact	11483	52	11535	768	768	47bb	ok	768	4f33c513c2e95c25	delharc,unar,7z,bsdtar		delharc,lsar	
+m-lz5-l0.lha	0	0		-lz5-	0	EMPTY.BIN	-	-	EMPTY.BIN	ascii	exact	0	33	33	0	0	0000	ok	0	cbf29ce484222325			delharc,lsar,7z,bsdtar	zero-length entry carrying a compressing method; genuine archivers store it as -lh0-
+m-lz5-l0.lha	1	0		-lz5-	0	ONEBYTE.BIN	-	-	ONEBYTE.BIN	ascii	exact	33	35	68	2	1	30c0	ok	1	af63fc4c860222ec	delharc,unar		delharc,lsar,7z,bsdtar	
+m-lz5-l0.lha	2	0		-lz5-	0	TEXT.TXT	-	-	TEXT.TXT	ascii	exact	70	32	102	381	547	419a	ok	547	9d968ab45b00bd0b	delharc,unar		delharc,lsar,7z,bsdtar	
+m-lz5-l0.lha	3	0		-lz5-	0	RUNS.BIN	-	-	RUNS.BIN	ascii	exact	483	32	515	784	3616	363a	ok	3616	c37567cd28c14a3e	delharc,unar		delharc,lsar,7z,bsdtar	
+m-lz5-l0.lha	4	0		-lz5-	0	RANDOM.BIN	-	-	RANDOM.BIN	ascii	exact	1299	34	1333	2250	2000	22bd	ok	2000	8c67b204e186f674	delharc,unar		delharc,lsar,7z,bsdtar	
+m-lz5-l0.lha	5	0		-lz5-	0	ZEROS.BIN	-	-	ZEROS.BIN	ascii	exact	3583	33	3616	592	5000	0000	ok	5000	a55ccd8b52a7bfc5	delharc,unar		delharc,lsar,7z,bsdtar	
+m-lz5-l0.lha	6	0		-lz5-	0	RAMP.BIN	-	-	RAMP.BIN	ascii	exact	4208	32	4240	350	768	47bb	ok	768	4f33c513c2e95c25	delharc,unar		delharc,lsar,7z,bsdtar	
+m-lz5-l1.lha	0	1	4d	-lz5-	0	EMPTY.BIN	-	-	EMPTY.BIN	ascii	exact	0	36	36	0	0	0000	ok	0	cbf29ce484222325			delharc,lsar,7z	zero-length entry carrying a compressing method; genuine archivers store it as -lh0-
+m-lz5-l1.lha	1	1	4d	-lz5-	0	ONEBYTE.BIN	-	-	ONEBYTE.BIN	ascii	exact	36	38	74	2	1	30c0	ok	1	af63fc4c860222ec	delharc,unar		delharc,lsar,7z	
+m-lz5-l1.lha	2	1	4d	-lz5-	0	TEXT.TXT	-	-	TEXT.TXT	ascii	exact	76	35	111	381	547	419a	ok	547	9d968ab45b00bd0b	delharc,unar		delharc,lsar,7z	
+m-lz5-l1.lha	3	1	4d	-lz5-	0	RUNS.BIN	-	-	RUNS.BIN	ascii	exact	492	35	527	784	3616	363a	ok	3616	c37567cd28c14a3e	delharc,unar		delharc,lsar,7z	
+m-lz5-l1.lha	4	1	4d	-lz5-	0	RANDOM.BIN	-	-	RANDOM.BIN	ascii	exact	1311	37	1348	2250	2000	22bd	ok	2000	8c67b204e186f674	delharc,unar		delharc,lsar,7z	
+m-lz5-l1.lha	5	1	4d	-lz5-	0	ZEROS.BIN	-	-	ZEROS.BIN	ascii	exact	3598	36	3634	592	5000	0000	ok	5000	a55ccd8b52a7bfc5	delharc,unar		delharc,lsar,7z	
+m-lz5-l1.lha	6	1	4d	-lz5-	0	RAMP.BIN	-	-	RAMP.BIN	ascii	exact	4226	35	4261	350	768	47bb	ok	768	4f33c513c2e95c25	delharc,unar		delharc,lsar,7z	
+m-lz5-l2.lha	0	2	4d	-lz5-	0	-	EMPTY.BIN	-	EMPTY.BIN	ascii	exact	0	43	43	0	0	0000	ok	0	cbf29ce484222325			delharc,lsar,7z	zero-length entry carrying a compressing method; genuine archivers store it as -lh0-
+m-lz5-l2.lha	1	2	4d	-lz5-	0	-	ONEBYTE.BIN	-	ONEBYTE.BIN	ascii	exact	43	45	88	2	1	30c0	ok	1	af63fc4c860222ec	delharc,unar		delharc,lsar,7z	
+m-lz5-l2.lha	2	2	4d	-lz5-	0	-	TEXT.TXT	-	TEXT.TXT	ascii	exact	90	42	132	381	547	419a	ok	547	9d968ab45b00bd0b	delharc,unar		delharc,lsar,7z	
+m-lz5-l2.lha	3	2	4d	-lz5-	0	-	RUNS.BIN	-	RUNS.BIN	ascii	exact	513	42	555	784	3616	363a	ok	3616	c37567cd28c14a3e	delharc,unar		delharc,lsar,7z	
+m-lz5-l2.lha	4	2	4d	-lz5-	0	-	RANDOM.BIN	-	RANDOM.BIN	ascii	exact	1339	44	1383	2250	2000	22bd	ok	2000	8c67b204e186f674	delharc,unar		delharc,lsar,7z	
+m-lz5-l2.lha	5	2	4d	-lz5-	0	-	ZEROS.BIN	-	ZEROS.BIN	ascii	exact	3633	43	3676	592	5000	0000	ok	5000	a55ccd8b52a7bfc5	delharc,unar		delharc,lsar,7z	
+m-lz5-l2.lha	6	2	4d	-lz5-	0	-	RAMP.BIN	-	RAMP.BIN	ascii	exact	4268	42	4310	350	768	47bb	ok	768	4f33c513c2e95c25	delharc,unar		delharc,lsar,7z	
+m-lz5-l3.lha	0	3	4d	-lz5-	0	-	EMPTY.BIN	-	EMPTY.BIN	ascii	exact	0	53	53	0	0	0000	ok	0	cbf29ce484222325			delharc,lsar	zero-length entry carrying a compressing method; genuine archivers store it as -lh0-
+m-lz5-l3.lha	1	3	4d	-lz5-	0	-	ONEBYTE.BIN	-	ONEBYTE.BIN	ascii	exact	53	55	108	2	1	30c0	ok	1	af63fc4c860222ec	delharc,unar		delharc,lsar	
+m-lz5-l3.lha	2	3	4d	-lz5-	0	-	TEXT.TXT	-	TEXT.TXT	ascii	exact	110	52	162	381	547	419a	ok	547	9d968ab45b00bd0b	delharc,unar		delharc,lsar	
+m-lz5-l3.lha	3	3	4d	-lz5-	0	-	RUNS.BIN	-	RUNS.BIN	ascii	exact	543	52	595	784	3616	363a	ok	3616	c37567cd28c14a3e	delharc,unar		delharc,lsar	
+m-lz5-l3.lha	4	3	4d	-lz5-	0	-	RANDOM.BIN	-	RANDOM.BIN	ascii	exact	1379	54	1433	2250	2000	22bd	ok	2000	8c67b204e186f674	delharc,unar		delharc,lsar	
+m-lz5-l3.lha	5	3	4d	-lz5-	0	-	ZEROS.BIN	-	ZEROS.BIN	ascii	exact	3683	53	3736	592	5000	0000	ok	5000	a55ccd8b52a7bfc5	delharc,unar		delharc,lsar	
+m-lz5-l3.lha	6	3	4d	-lz5-	0	-	RAMP.BIN	-	RAMP.BIN	ascii	exact	4328	52	4380	350	768	47bb	ok	768	4f33c513c2e95c25	delharc,unar		delharc,lsar	
+m-lzs-l0.lha	0	0		-lzs-	0	EMPTY.BIN	-	-	EMPTY.BIN	ascii	exact	0	33	33	0	0	0000	ok	0	cbf29ce484222325			delharc,7z,bsdtar	zero-length entry carrying a compressing method; genuine archivers store it as -lh0-
+m-lzs-l0.lha	1	0		-lzs-	0	ONEBYTE.BIN	-	-	ONEBYTE.BIN	ascii	exact	33	35	68	2	1	30c0	ok	1	af63fc4c860222ec	delharc,generator		delharc,7z,bsdtar	
+m-lzs-l0.lha	2	0		-lzs-	0	TEXT.TXT	-	-	TEXT.TXT	ascii	exact	70	32	102	370	547	419a	ok	547	9d968ab45b00bd0b	delharc,generator		delharc,7z,bsdtar	
+m-lzs-l0.lha	3	0		-lzs-	0	RUNS.BIN	-	-	RUNS.BIN	ascii	exact	472	32	504	780	3616	363a	ok	3616	c37567cd28c14a3e	delharc,generator		delharc,7z,bsdtar	
+m-lzs-l0.lha	4	0		-lzs-	0	RANDOM.BIN	-	-	RANDOM.BIN	ascii	exact	1284	34	1318	2245	2000	22bd	ok	2000	8c67b204e186f674	delharc,generator		delharc,7z,bsdtar	
+m-lzs-l0.lha	5	0		-lzs-	0	ZEROS.BIN	-	-	ZEROS.BIN	ascii	exact	3563	33	3596	591	5000	0000	ok	5000	a55ccd8b52a7bfc5	delharc,generator		delharc,7z,bsdtar	
+m-lzs-l0.lha	6	0		-lzs-	0	RAMP.BIN	-	-	RAMP.BIN	ascii	exact	4187	32	4219	350	768	47bb	ok	768	4f33c513c2e95c25	delharc,generator		delharc,7z,bsdtar	
+m-lzs-l1.lha	0	1	4d	-lzs-	0	EMPTY.BIN	-	-	EMPTY.BIN	ascii	exact	0	36	36	0	0	0000	ok	0	cbf29ce484222325			delharc,7z	zero-length entry carrying a compressing method; genuine archivers store it as -lh0-
+m-lzs-l1.lha	1	1	4d	-lzs-	0	ONEBYTE.BIN	-	-	ONEBYTE.BIN	ascii	exact	36	38	74	2	1	30c0	ok	1	af63fc4c860222ec	delharc,generator		delharc,7z	
+m-lzs-l1.lha	2	1	4d	-lzs-	0	TEXT.TXT	-	-	TEXT.TXT	ascii	exact	76	35	111	370	547	419a	ok	547	9d968ab45b00bd0b	delharc,generator		delharc,7z	
+m-lzs-l1.lha	3	1	4d	-lzs-	0	RUNS.BIN	-	-	RUNS.BIN	ascii	exact	481	35	516	780	3616	363a	ok	3616	c37567cd28c14a3e	delharc,generator		delharc,7z	
+m-lzs-l1.lha	4	1	4d	-lzs-	0	RANDOM.BIN	-	-	RANDOM.BIN	ascii	exact	1296	37	1333	2245	2000	22bd	ok	2000	8c67b204e186f674	delharc,generator		delharc,7z	
+m-lzs-l1.lha	5	1	4d	-lzs-	0	ZEROS.BIN	-	-	ZEROS.BIN	ascii	exact	3578	36	3614	591	5000	0000	ok	5000	a55ccd8b52a7bfc5	delharc,generator		delharc,7z	
+m-lzs-l1.lha	6	1	4d	-lzs-	0	RAMP.BIN	-	-	RAMP.BIN	ascii	exact	4205	35	4240	350	768	47bb	ok	768	4f33c513c2e95c25	delharc,generator		delharc,7z	
+m-lzs-l2.lha	0	2	4d	-lzs-	0	-	EMPTY.BIN	-	EMPTY.BIN	ascii	exact	0	43	43	0	0	0000	ok	0	cbf29ce484222325			delharc,7z	zero-length entry carrying a compressing method; genuine archivers store it as -lh0-
+m-lzs-l2.lha	1	2	4d	-lzs-	0	-	ONEBYTE.BIN	-	ONEBYTE.BIN	ascii	exact	43	45	88	2	1	30c0	ok	1	af63fc4c860222ec	delharc,generator		delharc,7z	
+m-lzs-l2.lha	2	2	4d	-lzs-	0	-	TEXT.TXT	-	TEXT.TXT	ascii	exact	90	42	132	370	547	419a	ok	547	9d968ab45b00bd0b	delharc,generator		delharc,7z	
+m-lzs-l2.lha	3	2	4d	-lzs-	0	-	RUNS.BIN	-	RUNS.BIN	ascii	exact	502	42	544	780	3616	363a	ok	3616	c37567cd28c14a3e	delharc,generator		delharc,7z	
+m-lzs-l2.lha	4	2	4d	-lzs-	0	-	RANDOM.BIN	-	RANDOM.BIN	ascii	exact	1324	44	1368	2245	2000	22bd	ok	2000	8c67b204e186f674	delharc,generator		delharc,7z	
+m-lzs-l2.lha	5	2	4d	-lzs-	0	-	ZEROS.BIN	-	ZEROS.BIN	ascii	exact	3613	43	3656	591	5000	0000	ok	5000	a55ccd8b52a7bfc5	delharc,generator		delharc,7z	
+m-lzs-l2.lha	6	2	4d	-lzs-	0	-	RAMP.BIN	-	RAMP.BIN	ascii	exact	4247	42	4289	350	768	47bb	ok	768	4f33c513c2e95c25	delharc,generator		delharc,7z	
+m-lzs-l3.lha	0	3	4d	-lzs-	0	-	EMPTY.BIN	-	EMPTY.BIN	ascii	exact	0	53	53	0	0	0000	ok	0	cbf29ce484222325			delharc	zero-length entry carrying a compressing method; genuine archivers store it as -lh0-
+m-lzs-l3.lha	1	3	4d	-lzs-	0	-	ONEBYTE.BIN	-	ONEBYTE.BIN	ascii	exact	53	55	108	2	1	30c0	ok	1	af63fc4c860222ec	delharc,generator		delharc	
+m-lzs-l3.lha	2	3	4d	-lzs-	0	-	TEXT.TXT	-	TEXT.TXT	ascii	exact	110	52	162	370	547	419a	ok	547	9d968ab45b00bd0b	delharc,generator		delharc	
+m-lzs-l3.lha	3	3	4d	-lzs-	0	-	RUNS.BIN	-	RUNS.BIN	ascii	exact	532	52	584	780	3616	363a	ok	3616	c37567cd28c14a3e	delharc,generator		delharc	
+m-lzs-l3.lha	4	3	4d	-lzs-	0	-	RANDOM.BIN	-	RANDOM.BIN	ascii	exact	1364	54	1418	2245	2000	22bd	ok	2000	8c67b204e186f674	delharc,generator		delharc	
+m-lzs-l3.lha	5	3	4d	-lzs-	0	-	ZEROS.BIN	-	ZEROS.BIN	ascii	exact	3663	53	3716	591	5000	0000	ok	5000	a55ccd8b52a7bfc5	delharc,generator		delharc	
+m-lzs-l3.lha	6	3	4d	-lzs-	0	-	RAMP.BIN	-	RAMP.BIN	ascii	exact	4307	52	4359	350	768	47bb	ok	768	4f33c513c2e95c25	delharc,generator		delharc	
+names-cp437-dos.lha	0	0		-lh0-	0	%8F%8E%99.TXT	-	-	ÅÄÖ.TXT	cp437	encoding	0	31	31	14	14	c449	ok	14	68f72d2e5cf37bdc	delharc,unar,7z,bsdtar		delharc,lsar,7z	
+names-cp437-dos.lha	1	0		-lh0-	0	%90COLE\LE%80ON.TXT	-	-	ÉCOLE/LEÇON.TXT	cp437	encoding	45	39	84	13	13	258d	ok	13	cce643da14e289cb	delharc,unar,7z,bsdtar		delharc,lsar,7z	
+names-cp437-dos.lha	2	1	4d	-lh0-	0	STRA%A0E.TXT	-	M%9ANCHEN%FF	MÜNCHEN/STRAáE.TXT	cp437	encoding	97	48	145	14	14	5448	ok	14	68faa72e5cf68101	delharc,unar,7z,bsdtar		delharc,lsar,7z	
+names-cp437-dos.lha	3	2	4d	-lh0-	0	-	%9C%9D.TXT	%A5AND%A3%FF	ÑANDú/£¥.TXT	cp437	encoding	159	49	208	14	14	a448	ok	14	68f0652e5cedbc56	delharc,unar,7z,bsdtar		delharc,lsar,7z	
+names-hostile.lha	0	0		-lh0-	0	..\UP0.TXT	-	-	../UP0.TXT	ascii	policy	0	34	34	8	8	5655	ok	8	004483384c639885	delharc,unar,7z,bsdtar		delharc,lsar,7z,bsdtar	path_utf8 is the stored path with separators turned into '/', nothing removed
+names-hostile.lha	1	0		-lh0-	0	\ABS0.TXT	-	-	/ABS0.TXT	ascii	policy	42	33	75	8	8	5655	ok	8	004483384c639885	delharc,unar,7z,bsdtar		delharc,lsar,7z,bsdtar	path_utf8 is the stored path with separators turned into '/', nothing removed
+names-hostile.lha	2	0		-lh0-	0	C:\DRIVE0.TXT	-	-	C:/DRIVE0.TXT	ascii	policy	83	37	120	8	8	5655	ok	8	004483384c639885	delharc,unar,7z,bsdtar		delharc,lsar,7z,bsdtar	path_utf8 is the stored path with separators turned into '/', nothing removed
+names-hostile.lha	3	0		-lh0-	0	a//b0.txt	-	-	a//b0.txt	ascii	policy	128	33	161	8	8	5655	ok	8	004483384c639885	delharc,unar,7z,bsdtar		delharc,lsar,7z,bsdtar	path_utf8 is the stored path with separators turned into '/', nothing removed
+names-hostile.lha	4	0		-lh0-	0	./dot0.txt	-	-	./dot0.txt	ascii	policy	169	34	203	8	8	5655	ok	8	004483384c639885	delharc,unar,7z,bsdtar		delharc,lsar,7z,bsdtar	path_utf8 is the stored path with separators turned into '/', nothing removed
+names-hostile.lha	5	0		-lh0-	0	d/../x0.txt	-	-	d/../x0.txt	ascii	policy	211	35	246	8	8	5655	ok	8	004483384c639885	delharc,unar,7z,bsdtar		delharc,lsar,7z,bsdtar	path_utf8 is the stored path with separators turned into '/', nothing removed
+names-hostile.lha	6	0		-lh0-	0	/abs0.txt	-	-	/abs0.txt	ascii	policy	254	33	287	8	8	5655	ok	8	004483384c639885	delharc,unar,7z,bsdtar		delharc,lsar,7z,bsdtar	path_utf8 is the stored path with separators turned into '/', nothing removed
+names-hostile.lha	7	1	55	-lh0-	0	../../up1.txt	-	-	../../up1.txt	ascii	policy	295	40	335	8	8	5655	ok	8	004483384c639885	delharc,unar,7z,bsdtar		delharc,lsar,7z,bsdtar	path_utf8 is the stored path with separators turned into '/', nothing removed
+names-hostile.lha	8	2	55	-lh0-	0	-	up.txt	..%FF..%FF	../../up.txt	ascii	policy	343	49	392	8	8	5655	ok	8	004483384c639885	delharc,unar,7z,bsdtar		delharc,lsar,7z,bsdtar	path_utf8 is the stored path with separators turned into '/', nothing removed
+names-hostile.lha	9	2	55	-lh0-	0	-	abs.txt	%FFabs%FF	/abs/abs.txt	ascii	policy	400	49	449	8	8	5655	ok	8	004483384c639885	delharc,unar,7z,bsdtar		delharc,lsar,7z,bsdtar	path_utf8 is the stored path with separators turned into '/', nothing removed
+names-hostile.lha	10	2	55	-lh0-	0	-	dbl.txt	a%FF%FFb%FF	a//b/dbl.txt	ascii	policy	457	49	506	8	8	5655	ok	8	004483384c639885	delharc,unar,7z,bsdtar		delharc,lsar,7z,bsdtar	path_utf8 is the stored path with separators turned into '/', nothing removed
+names-hostile.lha	11	2	55	-lh0-	0	-	..	ok%FF	ok/..	ascii	policy	514	42	556	8	8	5655	ok	8	004483384c639885	delharc,unar,7z,bsdtar		delharc,lsar,7z,bsdtar	path_utf8 is the stored path with separators turned into '/', nothing removed
+names-hostile.lha	12	2	55	-lh0-	0	-	sub/../../x.txt	ok%FF	ok/sub/../../x.txt	ascii	policy	564	55	619	8	8	5655	ok	8	004483384c639885	delharc,unar,7z,bsdtar		delharc,lsar,7z,bsdtar	path_utf8 is the stored path with separators turned into '/', nothing removed
+names-hostile.lha	13	2	55	-lh0-	0	-		-		ascii	policy	627	34	661	8	8	5655	ok	8	004483384c639885	delharc,unar,7z,bsdtar		delharc,lsar,7z	empty file name and no directory
+names-hostile.lha	14	3	55	-lh0-	0	-	up.txt	..%FF..%FF	../../up.txt	ascii	policy	669	61	730	8	8	5655	ok	8	004483384c639885	delharc,unar,7z,bsdtar		delharc,lsar	path_utf8 is the stored path with separators turned into '/', nothing removed
+names-hostile.lha	15	3	55	-lh0-	0	-	abs.txt	%FFabs%FF	/abs/abs.txt	ascii	policy	738	61	799	8	8	5655	ok	8	004483384c639885	delharc,unar,7z,bsdtar		delharc,lsar	path_utf8 is the stored path with separators turned into '/', nothing removed
+names-hostile.lha	16	3	55	-lh0-	0	-	dbl.txt	a%FF%FFb%FF	a//b/dbl.txt	ascii	policy	807	61	868	8	8	5655	ok	8	004483384c639885	delharc,unar,7z,bsdtar		delharc,lsar	path_utf8 is the stored path with separators turned into '/', nothing removed
+names-hostile.lha	17	3	55	-lh0-	0	-	..	ok%FF	ok/..	ascii	policy	876	54	930	8	8	5655	ok	8	004483384c639885	delharc,unar,7z,bsdtar		delharc,lsar	path_utf8 is the stored path with separators turned into '/', nothing removed
+names-hostile.lha	18	3	55	-lh0-	0	-	sub/../../x.txt	ok%FF	ok/sub/../../x.txt	ascii	policy	938	67	1005	8	8	5655	ok	8	004483384c639885	delharc,unar,7z,bsdtar		delharc,lsar	path_utf8 is the stored path with separators turned into '/', nothing removed
+names-hostile.lha	19	3	55	-lh0-	0	-		-		ascii	policy	1013	44	1057	8	8	5655	ok	8	004483384c639885	delharc,unar,7z,bsdtar		delharc,lsar	empty file name and no directory
+names-latin1-amiga.lha	0	0		-lh0-	0	Sm%F6rg%E5sbord.txt	-	-	Smörgåsbord.txt	iso-8859-1	encoding	0	39	39	16	16	60a9	ok	16	854dfd3aa1a3d775	delharc,unar,7z,bsdtar		delharc,lsar,7z	
+names-latin1-amiga.lha	1	0	41	-lh0-	0	%DCber/Gr%F6%DFe.dat	-	-	Über/Größe.dat	iso-8859-1	encoding	55	39	94	15	15	8402	ok	15	7e55546acffcb128	delharc,unar,7z,bsdtar		delharc,lsar,7z	
+names-latin1-amiga.lha	2	1	41	-lh0-	0	Musik/%C5ngstr%F6m.mod	-	-	Musik/Ångström.mod	iso-8859-1	encoding	109	45	154	16	16	f0a8	ok	16	854a933aa1a0ed80	delharc,unar,7z,bsdtar		delharc,lsar,7z	
+names-latin1-amiga.lha	3	1	41	-lh0-	0	caf%E9%00d%E9j%E0%20vu	-	-	café	iso-8859-1	encoding	170	39	209	21	21	7a1e	ok	21	306a29ab33a3a79a	delharc,unar,7z,bsdtar		delharc,lsar,7z	
+names-latin1-amiga.lha	4	2	41	-lh0-	0	-	%E9t%E9.txt	Ann%E9e%FF	Année/été.txt	iso-8859-1	encoding	230	50	280	16	16	00a8	ok	16	85473d3aa19e2587	delharc,unar,7z,bsdtar		delharc,lsar,7z	
+names-latin1-amiga.lha	5	2	41	-lhd-	1	-	-	Ann%E9e%FFNo%EBl%FF	Année/Noël	iso-8859-1	encoding	296	45	341	0	0	0000	ok					delharc,lsar,7z	
+names-sjis.lha	0	2	4d	-lh0-	0	-	%83e%83X%83g.txt	-	テスト.txt	shift_jis	encoding	0	44	44	13	13	cb64	ok	13	b728519f6e7cc56e	delharc,unar,7z,bsdtar		delharc,lsar,7z	
+names-sjis.lha	1	2	4d	-lh0-	0	-	%83\%83t%83g.txt	%95\%FF	表/ソフト.txt	shift_jis	encoding	57	50	107	19	19	e120	ok	19	47fb723a5dd212b0	delharc,unar,7z,bsdtar		delharc,lsar,7z	second bytes equal to 5C (backslash) inside the directory and file name headers
+names-sjis.lha	2	1	48	-lh0-	0	%94\%97%CD.txt	-	%97\%92%E8%FF	予定/能力.txt	shift_jis	encoding	126	43	169	13	13	3b64	ok	13	b732739f6e8553b9	delharc,unar,7z,bsdtar		delharc,lsar,7z	Human68k OS id; second bytes equal to 5C
+names-sjis.lha	3	0		-lh0-	0	%95\\%83\%81[%83X.txt	-	-	表/ソース.txt	shift_jis	encoding	182	37	219	13	13	ab65	ok	13	b72f199f6e8284f4	delharc,unar,7z,bsdtar		delharc,lsar,7z	level 0 backslash-separated path in which two characters end in byte 5C: splitting on every 5C byte gives the wrong components
+names-sjis.lha	4	0		-lh0-	0	%B6%C0%B6%C5.TXT	-	-	ｶﾀｶﾅ.TXT	shift_jis	encoding	232	32	264	20	20	a566	ok	20	69b8b9bb81e46e11	delharc,unar,7z,bsdtar		delharc,lsar,7z	single-byte half-width katakana A1..DF
+names-special.lha	0	2	55	-lh0-	0	-	with%20space.txt	special%FF	special/with space.txt	ascii	exact	0	59	59	21	21	8f5c	ok	21	773fcf67d9bd700a	delharc,unar,7z,bsdtar		delharc,lsar,7z,bsdtar	
+names-special.lha	1	2	55	-lh0-	0	-	.hidden	special%FF	special/.hidden	ascii	exact	80	52	132	14	14	e466	ok	14	fbc663e964a69e9c	delharc,unar,7z,bsdtar		delharc,lsar,7z,bsdtar	
+names-special.lha	2	2	55	-lh0-	0	-	100%25.txt	special%FF	special/100%.txt	ascii	exact	146	53	199	15	15	05f6	ok	15	e2d311a7491e1c96	delharc,unar,7z,bsdtar		delharc,lsar,7z,bsdtar	
+names-special.lha	3	2	55	-lh0-	0	-	trailing.dot.	special%FF	special/trailing.dot.	ascii	exact	214	58	272	20	20	6000	ok	20	7acdb514917456cd	delharc,unar,7z,bsdtar		delharc,lsar,7z,bsdtar	
+names-special.lha	4	2	55	-lh0-	0	-	UPPER.TXT	special%FF	special/UPPER.TXT	ascii	exact	292	54	346	16	16	ce2b	ok	16	c8a0f4e1d46c78b4	delharc,unar,7z,bsdtar		delharc,lsar,7z,bsdtar	
+names-special.lha	5	2	55	-lh0-	0	-	upper.txt	special%FF	special/upper.txt	ascii	exact	362	54	416	16	16	1584	ok	16	0b559288ab1229f4	delharc,unar,7z,bsdtar		delharc,lsar,7z,bsdtar	
+names-special.lha	6	1	55	-lh0-	0	semi;colon.txt	-	special%FF	special/semi;colon.txt	ascii	exact	432	52	484	21	21	b97a	ok	21	a9454e7f2df0637e	delharc,unar,7z,bsdtar		delharc,lsar,7z,bsdtar	
+names-special.lha	7	1	55	-lh0-	0	question?.txt	-	special%FF	special/question?.txt	ascii	exact	505	51	556	20	20	8e34	ok	20	a15c5df67f526973	delharc,unar,7z,bsdtar		delharc,lsar,7z,bsdtar	
+names-special.lha	8	0		-lh0-	0	special\tilde~1.txt	-	-	special/tilde~1.txt	ascii	exact	576	43	619	18	18	00b8	ok	18	9dbb16828dd27b51	delharc,unar,7z,bsdtar		delharc,lsar,7z,bsdtar	
+names-special.lha	9	2	55	-lh0-	0	-	a+b=c&d.txt	special%FF	special/a+b=c&d.txt	ascii	exact	637	56	693	18	18	c689	ok	18	e4a1737b91280144	delharc,unar,7z,bsdtar		delharc,lsar,7z,bsdtar	
+names-special.lha	10	2	55	-lh0-	0	-	back\slash.txt	special%FF	special/back\slash.txt	ascii	policy	711	59	770	21	21	16ac	ok	21	dccfa51eccf7492e	delharc,unar,7z,bsdtar		delharc,lsar,7z,bsdtar	backslash inside a level 2 file name header; kept verbatim in path_utf8
+names-special.lha	11	2	55	-lh0-	0	-	twice.txt	-	twice.txt	ascii	exact	791	43	834	11	11	bc40	ok	11	72de3ba281579a10	delharc,unar,7z,bsdtar		delharc,lsar,7z,bsdtar	same path as the next entry
+names-special.lha	12	2	55	-lh0-	0	-	twice.txt	-	twice.txt	ascii	exact	845	43	888	12	12	a76e	ok	12	1bdd60c00cf4fbd4	delharc,unar,7z,bsdtar		delharc,lsar,7z,bsdtar	same path as the previous entry
+names-special.lha	13	2	4d	-lh0-	0	-	f.txt	dir-and-name\mixed/sep\	dir-and-name/mixed/sep/f.txt	ascii	policy	900	65	965	17	17	67a7	ok	17	23b75ec35eca2d3a	delharc,unar,7z,bsdtar		delharc,lsar,7z	directory header using backslash and slash instead of FF: delharc splits on all three, lsar takes the bytes as one name
+names-special.lha	14	2	55	-lh0-	0	-	f2.txt	nodirsep	nodirsep/f2.txt	ascii	exact	982	51	1033	44	44	c93c	ok	44	32114a8c37e134a2	delharc,unar,7z,bsdtar		delharc,lsar,7z	directory header without a trailing FF
+names-utf8.lha	0	2	55	-lh0-	0	-	R%C3%A9sum%C3%A9%20%E2%80%93%20na%C3%AFve%20caf%C3%A9.txt	-	Résumé – naïve café.txt	utf-8	exact	0	63	63	11	11	ccca	ok	11	33da83a5c9f36ae8	delharc,unar,7z,bsdtar		delharc,lsar,7z,bsdtar	
+names-utf8.lha	1	2	55	-lhd-	1	-	-	Dossier%20%C3%A9t%C3%A9%FF	Dossier été	utf-8	exact	74	48	122	0	0	0000	ok					delharc,lsar,7z,bsdtar	
+names-utf8.lha	2	2	55	-lh0-	0	-	%C3%86r%C3%B8sk%C3%B8bing.dat	Dossier%20%C3%A9t%C3%A9%FF	Dossier été/Ærøskøbing.dat	utf-8	exact	122	68	190	13	13	baea	ok	13	89d418f897e0580c	delharc,unar,7z,bsdtar		delharc,lsar,7z,bsdtar	
+names-utf8.lha	3	2	55	-lh0-	0	-	%E3%83%95%E3%82%A1%E3%82%A4%E3%83%AB.txt	%E6%97%A5%E6%9C%AC%E8%AA%9E%FF	日本語/ファイル.txt	utf-8	exact	203	63	266	10	10	62e5	ok	10	10ebfbf9ed274989	delharc,unar,7z,bsdtar		delharc,lsar,7z,bsdtar	
+names-utf8.lha	4	3	55	-lh0-	0	-	R%C3%A9sum%C3%A9%20%E2%80%93%20na%C3%AFve%20caf%C3%A9.txt	-	Résumé – naïve café.txt	utf-8	exact	276	73	349	11	11	ccca	ok	11	33da83a5c9f36ae8	delharc,unar,7z,bsdtar		delharc,lsar,bsdtar	
+names-utf8.lha	5	3	55	-lhd-	1	-	-	Dossier%20%C3%A9t%C3%A9%FF	Dossier été	utf-8	exact	360	58	418	0	0	0000	ok					delharc,lsar,bsdtar	
+names-utf8.lha	6	3	55	-lh0-	0	-	%C3%86r%C3%B8sk%C3%B8bing.dat	Dossier%20%C3%A9t%C3%A9%FF	Dossier été/Ærøskøbing.dat	utf-8	exact	418	80	498	13	13	baea	ok	13	89d418f897e0580c	delharc,unar,7z,bsdtar		delharc,lsar,bsdtar	
+names-utf8.lha	7	3	55	-lh0-	0	-	%E3%83%95%E3%82%A1%E3%82%A4%E3%83%AB.txt	%E6%97%A5%E6%9C%AC%E8%AA%9E%FF	日本語/ファイル.txt	utf-8	exact	511	75	586	10	10	62e5	ok	10	10ebfbf9ed274989	delharc,unar,7z,bsdtar		delharc,lsar,bsdtar	
+names-utf8.lha	8	1	55	-lh0-	0	R%C3%A9sum%C3%A9%20%E2%80%93%20na%C3%AFve%20caf%C3%A9.txt	-	-	Résumé – naïve café.txt	utf-8	exact	596	56	652	11	11	ccca	ok	11	33da83a5c9f36ae8	delharc,unar,7z,bsdtar		delharc,lsar,bsdtar	
+names-utf8.lha	9	1	55	-lhd-	1		-	Dossier%20%C3%A9t%C3%A9%FF	Dossier été	utf-8	exact	663	44	707	0	0	0000	ok					delharc,lsar,bsdtar	
+names-utf8.lha	10	1	55	-lh0-	0	%C3%86r%C3%B8sk%C3%B8bing.dat	-	Dossier%20%C3%A9t%C3%A9%FF	Dossier été/Ærøskøbing.dat	utf-8	exact	707	61	768	13	13	baea	ok	13	89d418f897e0580c	delharc,unar,7z,bsdtar		delharc,lsar,bsdtar	
+names-utf8.lha	11	1	55	-lh0-	0	%E3%83%95%E3%82%A1%E3%82%A4%E3%83%AB.txt	-	%E6%97%A5%E6%9C%AC%E8%AA%9E%FF	日本語/ファイル.txt	utf-8	exact	781	56	837	10	10	62e5	ok	10	10ebfbf9ed274989	delharc,unar,7z,bsdtar		delharc,lsar,bsdtar	
+names-utf8.lha	12	0	55	-lh0-	0	%C3%9Cbergr%C3%B6%C3%9Fe/stra%C3%9Fe.txt	-	-	Übergröße/straße.txt	utf-8	exact	847	60	907	14	14	cd99	ok	14	3672c970328a7e2d	delharc,unar,7z,bsdtar		delharc,lsar,bsdtar	
+nonstandard/initial-lh1.lha	0	0		-lh1-	0	INITIAL.BIN	-	-	INITIAL.BIN	ascii	exact	0	35	35	24	133	62b8	tool-dependent			delharc	unar:crc-mismatch:len=133:fnv64=2377e785650f20c6	delharc,lsar,7z,bsdtar	copies reaching before the start of the output, one running from before the start into real output; expected bytes assume a window initially filled with spaces
+nonstandard/initial-lh4.lha	0	2	55	-lh4-	0	-	INITIAL.BIN	-	INITIAL.BIN	ascii	exact	0	45	45	36	329	412a	tool-dependent			delharc	unar:crc-mismatch:len=329:fnv64=d66a025eb86de176,7z:error	delharc,lsar,7z,bsdtar	copies reaching before the start of the output, one running from before the start into real output; expected bytes assume a window initially filled with spaces
+nonstandard/initial-lh5.lha	0	2	55	-lh5-	0	-	INITIAL.BIN	-	INITIAL.BIN	ascii	exact	0	45	45	37	329	412a	tool-dependent			delharc,bsdtar	unar:crc-mismatch:len=329:fnv64=d66a025eb86de176,7z:error	delharc,lsar,7z,bsdtar	copies reaching before the start of the output, one running from before the start into real output; expected bytes assume a window initially filled with spaces
+nonstandard/initial-lh6.lha	0	2	55	-lh6-	0	-	INITIAL.BIN	-	INITIAL.BIN	ascii	exact	0	45	45	38	329	412a	tool-dependent			delharc,bsdtar	unar:crc-mismatch:len=329:fnv64=d66a025eb86de176,7z:error	delharc,lsar,7z,bsdtar	copies reaching before the start of the output, one running from before the start into real output; expected bytes assume a window initially filled with spaces
+nonstandard/initial-lh7.lha	0	2	55	-lh7-	0	-	INITIAL.BIN	-	INITIAL.BIN	ascii	exact	0	45	45	39	329	412a	tool-dependent			delharc,bsdtar	unar:crc-mismatch:len=329:fnv64=d66a025eb86de176,7z:error	delharc,lsar,7z,bsdtar	copies reaching before the start of the output, one running from before the start into real output; expected bytes assume a window initially filled with spaces
+nonstandard/lh5-trailing-bytes.lha	0	0		-lh5-	0	EXTRA.TXT	-	-	EXTRA.TXT	ascii	exact	0	33	33	430	900	dc47	ok	900	7d1c1ebf7aea7c23	delharc,unar	7z:right-bytes-reported-as-error,bsdtar:error	delharc,lsar,7z,bsdtar	seven unused bytes after the last command inside the packed data
+nonstandard/lh5-trailing-bytes.lha	1	0		-lh0-	0	NEXT.TXT	-	-	NEXT.TXT	ascii	exact	463	32	495	30	30	788b	ok	30	7958d1a2a4487cac	delharc,unar,7z,bsdtar		delharc,lsar,7z,bsdtar	
+nonstandard/lhd-with-data.lha	0	1	4d	-lhd-	1		-	DIR%FF	DIR	ascii	exact	0	34	34	13	0	0000	ok					delharc,lsar,7z,bsdtar	directory entry with 13 packed bytes that must be skipped
+nonstandard/lhd-with-data.lha	1	1	4d	-lh0-	0	F.TXT	-	DIR%FF	DIR/F.TXT	ascii	exact	47	39	86	30	30	788b	ok	30	7958d1a2a4487cac	delharc,unar,7z,bsdtar		delharc,lsar,7z,bsdtar	
+single-dir.lha	0	2	55	-lhd-	1	-	-	only%FFdir%FF	only/dir	ascii	exact	0	43	43	0	0	0000	ok					delharc,lsar,7z,bsdtar	
+unsupported-first.lha	0	1	4d	-pm2-	0	FIRST.BIN	-	-	FIRST.BIN	ascii	exact	0	36	36	333	999	0000	unsupported					delharc,lsar	first entry of the archive has an unsupported method whose id does not start with -lh or -lz
+unsupported-first.lha	1	1	4d	-lh5-	0	SECOND.TXT	-	-	SECOND.TXT	ascii	exact	369	37	406	423	900	dc47	ok	900	7d1c1ebf7aea7c23	delharc,unar,7z,bsdtar		delharc,lsar	
+unsupported-l0.lha	0	0		-lh5-	0	FIRST.TXT	-	-	FIRST.TXT	ascii	exact	0	33	33	423	900	dc47	ok	900	7d1c1ebf7aea7c23	delharc,unar,7z,bsdtar		delharc,lsar,7z,bsdtar	
+unsupported-l0.lha	1	0		-lh2-	0	M00-LH2.BIN	-	-	M00-LH2.BIN	ascii	exact	456	35	491	100	1000	1234	unsupported					delharc,lsar,7z,bsdtar	packed bytes are pseudo-random filler, not a valid stream
+unsupported-l0.lha	2	0		-lh3-	0	M01-LH3.BIN	-	-	M01-LH3.BIN	ascii	exact	591	35	626	137	1001	1234	unsupported					delharc,lsar,7z,bsdtar	packed bytes are pseudo-random filler, not a valid stream
+unsupported-l0.lha	3	0		-lhx-	0	M02-LHX.BIN	-	-	M02-LHX.BIN	ascii	exact	763	35	798	174	1002	1234	unsupported					delharc,lsar,7z	packed bytes are pseudo-random filler, not a valid stream
+unsupported-l0.lha	4	0		-lh0-	0	OK2.TXT	-	-	OK2.TXT	ascii	exact	972	31	1003	202	202	58b6	ok	202	c35e2ce8d07ec4e8	delharc,unar,7z,bsdtar		delharc,lsar,7z	
+unsupported-l0.lha	5	0		-pm1-	0	M03-PM1.BIN	-	-	M03-PM1.BIN	ascii	exact	1205	35	1240	211	1003	1234	unsupported					delharc,lsar	packed bytes are pseudo-random filler, not a valid stream
+unsupported-l0.lha	6	0		-pm2-	0	M04-PM2.BIN	-	-	M04-PM2.BIN	ascii	exact	1451	35	1486	248	1004	1234	unsupported					delharc,lsar	packed bytes are pseudo-random filler, not a valid stream
+unsupported-l0.lha	7	0		-lh8-	0	M05-LH8.BIN	-	-	M05-LH8.BIN	ascii	exact	1734	35	1769	285	1005	1234	unsupported					delharc,lsar	packed bytes are pseudo-random filler, not a valid stream
+unsupported-l0.lha	8	0		-lh1-	0	OK5.TXT	-	-	OK5.TXT	ascii	exact	2054	31	2085	140	205	a3b4	ok	205	e187e8fbb0c0ab11	delharc,unar		delharc,lsar	
+unsupported-l0.lha	9	0		-lh9-	0	M06-LH9.BIN	-	-	M06-LH9.BIN	ascii	exact	2225	35	2260	322	1006	1234	unsupported					delharc,lsar	packed bytes are pseudo-random filler, not a valid stream
+unsupported-l0.lha	10	0		-lha-	0	M07-LHA.BIN	-	-	M07-LHA.BIN	ascii	exact	2582	35	2617	359	1007	1234	unsupported					delharc,lsar	packed bytes are pseudo-random filler, not a valid stream
+unsupported-l0.lha	11	0		-lhe-	0	M08-LHE.BIN	-	-	M08-LHE.BIN	ascii	exact	2976	35	3011	396	1008	1234	unsupported					delharc,lsar	packed bytes are pseudo-random filler, not a valid stream
+unsupported-l0.lha	12	0		-lzs-	0	OK8.TXT	-	-	OK8.TXT	ascii	exact	3407	31	3438	177	208	4261	ok	208	23b6b9785f6023b3	delharc,generator		delharc,lsar	
+unsupported-l0.lha	13	0		-zz9-	0	M09-ZZ9.BIN	-	-	M09-ZZ9.BIN	ascii	exact	3615	35	3650	433	1009	1234	unsupported					delharc,lsar	packed bytes are pseudo-random filler, not a valid stream
+unsupported-l0.lha	14	0		-LH5-	0	M10-LH5.BIN	-	-	M10-LH5.BIN	ascii	exact	4083	35	4118	470	1010	1234	unsupported					delharc,lsar	packed bytes are pseudo-random filler, not a valid stream
+unsupported-l0.lha	15	0		-pm0-	0	PM0.TXT	-	-	PM0.TXT	ascii	exact	4588	31	4619	45	45	cdbb	unsupported					delharc,lsar	-pm0- is plain storage; outside the supported set, though the bytes are the file itself
+unsupported-l0.lha	16	0		-lhd-	1	DIR\	-	-	DIR	ascii	exact	4664	28	4692	0	0	0000	ok					delharc,lsar	
+unsupported-l0.lha	17	0		-lh5-	0	LAST.TXT	-	-	LAST.TXT	ascii	exact	4692	32	4724	219	400	dcdf	ok	400	fc6fa5ae294e7a4d	delharc,unar,7z,bsdtar		delharc,lsar	
+unsupported-l1.lha	0	1	4d	-lh5-	0	FIRST.TXT	-	-	FIRST.TXT	ascii	exact	0	36	36	423	900	dc47	ok	900	7d1c1ebf7aea7c23	delharc,unar,7z,bsdtar		delharc,lsar,7z,bsdtar	
+unsupported-l1.lha	1	1	4d	-lh2-	0	M00-LH2.BIN	-	-	M00-LH2.BIN	ascii	exact	459	38	497	100	1000	1234	unsupported					delharc,lsar,7z,bsdtar	packed bytes are pseudo-random filler, not a valid stream
+unsupported-l1.lha	2	1	4d	-lh3-	0	M01-LH3.BIN	-	-	M01-LH3.BIN	ascii	exact	597	38	635	137	1001	1234	unsupported					delharc,lsar,7z,bsdtar	packed bytes are pseudo-random filler, not a valid stream
+unsupported-l1.lha	3	1	4d	-lhx-	0	M02-LHX.BIN	-	-	M02-LHX.BIN	ascii	exact	772	38	810	174	1002	1234	unsupported					delharc,lsar,7z	packed bytes are pseudo-random filler, not a valid stream
+unsupported-l1.lha	4	1	4d	-lh0-	0	OK2.TXT	-	-	OK2.TXT	ascii	exact	984	34	1018	202	202	58b6	ok	202	c35e2ce8d07ec4e8	delharc,unar,7z,bsdtar		delharc,lsar,7z	
+unsupported-l1.lha	5	1	4d	-pm1-	0	M03-PM1.BIN	-	-	M03-PM1.BIN	ascii	exact	1220	38	1258	211	1003	1234	unsupported					delharc,lsar	packed bytes are pseudo-random filler, not a valid stream
+unsupported-l1.lha	6	1	4d	-pm2-	0	M04-PM2.BIN	-	-	M04-PM2.BIN	ascii	exact	1469	38	1507	248	1004	1234	unsupported					delharc,lsar	packed bytes are pseudo-random filler, not a valid stream
+unsupported-l1.lha	7	1	4d	-lh8-	0	M05-LH8.BIN	-	-	M05-LH8.BIN	ascii	exact	1755	38	1793	285	1005	1234	unsupported					delharc,lsar	packed bytes are pseudo-random filler, not a valid stream
+unsupported-l1.lha	8	1	4d	-lh1-	0	OK5.TXT	-	-	OK5.TXT	ascii	exact	2078	34	2112	140	205	a3b4	ok	205	e187e8fbb0c0ab11	delharc,unar		delharc,lsar	
+unsupported-l1.lha	9	1	4d	-lh9-	0	M06-LH9.BIN	-	-	M06-LH9.BIN	ascii	exact	2252	38	2290	322	1006	1234	unsupported					delharc,lsar	packed bytes are pseudo-random filler, not a valid stream
+unsupported-l1.lha	10	1	4d	-lha-	0	M07-LHA.BIN	-	-	M07-LHA.BIN	ascii	exact	2612	38	2650	359	1007	1234	unsupported					delharc,lsar	packed bytes are pseudo-random filler, not a valid stream
+unsupported-l1.lha	11	1	4d	-lhe-	0	M08-LHE.BIN	-	-	M08-LHE.BIN	ascii	exact	3009	38	3047	396	1008	1234	unsupported					delharc,lsar	packed bytes are pseudo-random filler, not a valid stream
+unsupported-l1.lha	12	1	4d	-lzs-	0	OK8.TXT	-	-	OK8.TXT	ascii	exact	3443	34	3477	177	208	4261	ok	208	23b6b9785f6023b3	delharc,generator		delharc,lsar	
+unsupported-l1.lha	13	1	4d	-zz9-	0	M09-ZZ9.BIN	-	-	M09-ZZ9.BIN	ascii	exact	3654	38	3692	433	1009	1234	unsupported					delharc,lsar	packed bytes are pseudo-random filler, not a valid stream
+unsupported-l1.lha	14	1	4d	-LH5-	0	M10-LH5.BIN	-	-	M10-LH5.BIN	ascii	exact	4125	38	4163	470	1010	1234	unsupported					delharc,lsar	packed bytes are pseudo-random filler, not a valid stream
+unsupported-l1.lha	15	1	4d	-pm0-	0	PM0.TXT	-	-	PM0.TXT	ascii	exact	4633	34	4667	45	45	cdbb	unsupported					delharc,lsar	-pm0- is plain storage; outside the supported set, though the bytes are the file itself
+unsupported-l1.lha	16	1	4d	-lhd-	1		-	DIR%FF	DIR	ascii	exact	4712	34	4746	0	0	0000	ok					delharc,lsar	
+unsupported-l1.lha	17	1	4d	-lh5-	0	LAST.TXT	-	-	LAST.TXT	ascii	exact	4746	35	4781	219	400	dcdf	ok	400	fc6fa5ae294e7a4d	delharc,unar,7z,bsdtar		delharc,lsar	
+unsupported-l2.lha	0	2	4d	-lh5-	0	-	FIRST.TXT	-	FIRST.TXT	ascii	exact	0	43	43	423	900	dc47	ok	900	7d1c1ebf7aea7c23	delharc,unar,7z,bsdtar		delharc,lsar,7z,bsdtar	
+unsupported-l2.lha	1	2	4d	-lh2-	0	-	M00-LH2.BIN	-	M00-LH2.BIN	ascii	exact	466	45	511	100	1000	1234	unsupported					delharc,lsar,7z,bsdtar	packed bytes are pseudo-random filler, not a valid stream
+unsupported-l2.lha	2	2	4d	-lh3-	0	-	M01-LH3.BIN	-	M01-LH3.BIN	ascii	exact	611	45	656	137	1001	1234	unsupported					delharc,lsar,7z,bsdtar	packed bytes are pseudo-random filler, not a valid stream
+unsupported-l2.lha	3	2	4d	-lhx-	0	-	M02-LHX.BIN	-	M02-LHX.BIN	ascii	exact	793	45	838	174	1002	1234	unsupported					delharc,lsar,7z	packed bytes are pseudo-random filler, not a valid stream
+unsupported-l2.lha	4	2	4d	-lh0-	0	-	OK2.TXT	-	OK2.TXT	ascii	exact	1012	41	1053	202	202	58b6	ok	202	c35e2ce8d07ec4e8	delharc,unar,7z,bsdtar		delharc,lsar,7z	
+unsupported-l2.lha	5	2	4d	-pm1-	0	-	M03-PM1.BIN	-	M03-PM1.BIN	ascii	exact	1255	45	1300	211	1003	1234	unsupported					delharc,lsar	packed bytes are pseudo-random filler, not a valid stream
+unsupported-l2.lha	6	2	4d	-pm2-	0	-	M04-PM2.BIN	-	M04-PM2.BIN	ascii	exact	1511	45	1556	248	1004	1234	unsupported					delharc,lsar	packed bytes are pseudo-random filler, not a valid stream
+unsupported-l2.lha	7	2	4d	-lh8-	0	-	M05-LH8.BIN	-	M05-LH8.BIN	ascii	exact	1804	45	1849	285	1005	1234	unsupported					delharc,lsar	packed bytes are pseudo-random filler, not a valid stream
+unsupported-l2.lha	8	2	4d	-lh1-	0	-	OK5.TXT	-	OK5.TXT	ascii	exact	2134	41	2175	140	205	a3b4	ok	205	e187e8fbb0c0ab11	delharc,unar		delharc,lsar	
+unsupported-l2.lha	9	2	4d	-lh9-	0	-	M06-LH9.BIN	-	M06-LH9.BIN	ascii	exact	2315	45	2360	322	1006	1234	unsupported					delharc,lsar	packed bytes are pseudo-random filler, not a valid stream
+unsupported-l2.lha	10	2	4d	-lha-	0	-	M07-LHA.BIN	-	M07-LHA.BIN	ascii	exact	2682	45	2727	359	1007	1234	unsupported					delharc,lsar	packed bytes are pseudo-random filler, not a valid stream
+unsupported-l2.lha	11	2	4d	-lhe-	0	-	M08-LHE.BIN	-	M08-LHE.BIN	ascii	exact	3086	45	3131	396	1008	1234	unsupported					delharc,lsar	packed bytes are pseudo-random filler, not a valid stream
+unsupported-l2.lha	12	2	4d	-lzs-	0	-	OK8.TXT	-	OK8.TXT	ascii	exact	3527	41	3568	177	208	4261	ok	208	23b6b9785f6023b3	delharc,generator		delharc,lsar	
+unsupported-l2.lha	13	2	4d	-zz9-	0	-	M09-ZZ9.BIN	-	M09-ZZ9.BIN	ascii	exact	3745	45	3790	433	1009	1234	unsupported					delharc,lsar	packed bytes are pseudo-random filler, not a valid stream
+unsupported-l2.lha	14	2	4d	-LH5-	0	-	M10-LH5.BIN	-	M10-LH5.BIN	ascii	exact	4223	45	4268	470	1010	1234	unsupported					delharc,lsar	packed bytes are pseudo-random filler, not a valid stream
+unsupported-l2.lha	15	2	4d	-pm0-	0	-	PM0.TXT	-	PM0.TXT	ascii	exact	4738	41	4779	45	45	cdbb	unsupported					delharc,lsar	-pm0- is plain storage; outside the supported set, though the bytes are the file itself
+unsupported-l2.lha	16	2	4d	-lhd-	1	-	-	DIR%FF	DIR	ascii	exact	4824	38	4862	0	0	0000	ok					delharc,lsar	
+unsupported-l2.lha	17	2	4d	-lh5-	0	-	LAST.TXT	-	LAST.TXT	ascii	exact	4862	42	4904	219	400	dcdf	ok	400	fc6fa5ae294e7a4d	delharc,unar,7z,bsdtar		delharc,lsar	
+unsupported-l3.lha	0	3	4d	-lh5-	0	-	FIRST.TXT	-	FIRST.TXT	ascii	exact	0	53	53	423	900	dc47	ok	900	7d1c1ebf7aea7c23	delharc,unar,7z,bsdtar		delharc,lsar,bsdtar	
+unsupported-l3.lha	1	3	4d	-lh2-	0	-	M00-LH2.BIN	-	M00-LH2.BIN	ascii	exact	476	55	531	100	1000	1234	unsupported					delharc,lsar,bsdtar	packed bytes are pseudo-random filler, not a valid stream
+unsupported-l3.lha	2	3	4d	-lh3-	0	-	M01-LH3.BIN	-	M01-LH3.BIN	ascii	exact	631	55	686	137	1001	1234	unsupported					delharc,lsar,bsdtar	packed bytes are pseudo-random filler, not a valid stream
+unsupported-l3.lha	3	3	4d	-lhx-	0	-	M02-LHX.BIN	-	M02-LHX.BIN	ascii	exact	823	55	878	174	1002	1234	unsupported					delharc,lsar	packed bytes are pseudo-random filler, not a valid stream
+unsupported-l3.lha	4	3	4d	-lh0-	0	-	OK2.TXT	-	OK2.TXT	ascii	exact	1052	51	1103	202	202	58b6	ok	202	c35e2ce8d07ec4e8	delharc,unar,7z,bsdtar		delharc,lsar	
+unsupported-l3.lha	5	3	4d	-pm1-	0	-	M03-PM1.BIN	-	M03-PM1.BIN	ascii	exact	1305	55	1360	211	1003	1234	unsupported					delharc,lsar	packed bytes are pseudo-random filler, not a valid stream
+unsupported-l3.lha	6	3	4d	-pm2-	0	-	M04-PM2.BIN	-	M04-PM2.BIN	ascii	exact	1571	55	1626	248	1004	1234	unsupported					delharc,lsar	packed bytes are pseudo-random filler, not a valid stream
+unsupported-l3.lha	7	3	4d	-lh8-	0	-	M05-LH8.BIN	-	M05-LH8.BIN	ascii	exact	1874	55	1929	285	1005	1234	unsupported					delharc,lsar	packed bytes are pseudo-random filler, not a valid stream
+unsupported-l3.lha	8	3	4d	-lh1-	0	-	OK5.TXT	-	OK5.TXT	ascii	exact	2214	51	2265	140	205	a3b4	ok	205	e187e8fbb0c0ab11	delharc,unar		delharc,lsar	
+unsupported-l3.lha	9	3	4d	-lh9-	0	-	M06-LH9.BIN	-	M06-LH9.BIN	ascii	exact	2405	55	2460	322	1006	1234	unsupported					delharc,lsar	packed bytes are pseudo-random filler, not a valid stream
+unsupported-l3.lha	10	3	4d	-lha-	0	-	M07-LHA.BIN	-	M07-LHA.BIN	ascii	exact	2782	55	2837	359	1007	1234	unsupported					delharc,lsar	packed bytes are pseudo-random filler, not a valid stream
+unsupported-l3.lha	11	3	4d	-lhe-	0	-	M08-LHE.BIN	-	M08-LHE.BIN	ascii	exact	3196	55	3251	396	1008	1234	unsupported					delharc,lsar	packed bytes are pseudo-random filler, not a valid stream
+unsupported-l3.lha	12	3	4d	-lzs-	0	-	OK8.TXT	-	OK8.TXT	ascii	exact	3647	51	3698	177	208	4261	ok	208	23b6b9785f6023b3	delharc,generator		delharc,lsar	
+unsupported-l3.lha	13	3	4d	-zz9-	0	-	M09-ZZ9.BIN	-	M09-ZZ9.BIN	ascii	exact	3875	55	3930	433	1009	1234	unsupported					delharc,lsar	packed bytes are pseudo-random filler, not a valid stream
+unsupported-l3.lha	14	3	4d	-LH5-	0	-	M10-LH5.BIN	-	M10-LH5.BIN	ascii	exact	4363	55	4418	470	1010	1234	unsupported					delharc,lsar	packed bytes are pseudo-random filler, not a valid stream
+unsupported-l3.lha	15	3	4d	-pm0-	0	-	PM0.TXT	-	PM0.TXT	ascii	exact	4888	51	4939	45	45	cdbb	unsupported					delharc,lsar	-pm0- is plain storage; outside the supported set, though the bytes are the file itself
+unsupported-l3.lha	16	3	4d	-lhd-	1	-	-	DIR%FF	DIR	ascii	exact	4984	48	5032	0	0	0000	ok					delharc,lsar	
+unsupported-l3.lha	17	3	4d	-lh5-	0	-	LAST.TXT	-	LAST.TXT	ascii	exact	5032	52	5084	219	400	dcdf	ok	400	fc6fa5ae294e7a4d	delharc,unar,7z,bsdtar		delharc,lsar	
+unsupported-only.lha	0	0		-lh2-	0	ONLY.BIN	-	-	ONLY.BIN	ascii	exact	0	32	32	333	999	0000	unsupported					delharc,lsar,7z,bsdtar	
+w-lh1.lha	0	0		-lh1-	0	TEXT4095.TXT	-	-	TEXT4095.TXT	ascii	exact	0	36	36	1444	4095	2130	ok	4095	b353b9e2aa796e73	delharc,unar		delharc,lsar,7z,bsdtar	
+w-lh1.lha	1	0		-lh1-	0	TEXT4096.TXT	-	-	TEXT4096.TXT	ascii	exact	1480	36	1516	1436	4096	6f14	ok	4096	bfbdad41bf47c81e	delharc,unar		delharc,lsar,7z,bsdtar	
+w-lh1.lha	2	0		-lh1-	0	TEXT4097.TXT	-	-	TEXT4097.TXT	ascii	exact	2952	36	2988	1452	4097	2edd	ok	4097	3a723dcd12197e5f	delharc,unar		delharc,lsar,7z,bsdtar	
+w-lh1.lha	3	0		-lh1-	0	WRAP.TXT	-	-	WRAP.TXT	ascii	exact	4440	32	4472	3846	12411	0e3e	ok	12411	38a05304cc4eb508	delharc,unar		delharc,lsar,7z,bsdtar	longer than the window: the window wraps
+w-lh1.lha	4	0		-lh1-	0	FAR.BIN	-	-	FAR.BIN	ascii	exact	8318	31	8349	1309	4336	8cc3	ok	4336	b44d2e8c448f8b46	delharc,unar		delharc,lsar,7z,bsdtar	300 bytes repeated at distance 4036
+w-lh1.lha	5	0		-lh1-	0	OVERLAP.BIN	-	-	OVERLAP.BIN	ascii	exact	9658	35	9693	22	311	ce82	ok	311	4cd752b6d767d526	delharc,unar		delharc,lsar,7z,bsdtar	overlapping copies at distances 1, 2, 3 with lengths 3, 59 and 60
+w-lh1.lha	6	0		-lh1-	0	DISTWIN.BIN	-	-	DISTWIN.BIN	ascii	exact	9715	35	9750	1088	4217	93bd	ok	4217	b1cff30fa03e243e	delharc,unar		delharc,lsar,7z,bsdtar	copies at distance 4096, equal to the window size
+w-lh4.lha	0	2	55	-lh4-	0	-	TEXT4095.TXT	-	TEXT4095.TXT	ascii	exact	0	46	46	1371	4095	2130	ok	4095	b353b9e2aa796e73	delharc,unar,7z		delharc,lsar,7z,bsdtar	
+w-lh4.lha	1	2	55	-lh4-	0	-	TEXT4096.TXT	-	TEXT4096.TXT	ascii	exact	1417	46	1463	1364	4096	6f14	ok	4096	bfbdad41bf47c81e	delharc,unar,7z		delharc,lsar,7z,bsdtar	
+w-lh4.lha	2	2	55	-lh4-	0	-	TEXT4097.TXT	-	TEXT4097.TXT	ascii	exact	2827	46	2873	1381	4097	2edd	ok	4097	3a723dcd12197e5f	delharc,unar,7z		delharc,lsar,7z,bsdtar	
+w-lh4.lha	3	2	55	-lh4-	0	-	WRAP.TXT	-	WRAP.TXT	ascii	exact	4254	42	4296	3742	12411	0e3e	ok	12411	38a05304cc4eb508	delharc,unar,7z		delharc,lsar,7z,bsdtar	longer than the window: the window wraps
+w-lh4.lha	4	2	55	-lh4-	0	-	FAR.BIN	-	FAR.BIN	ascii	exact	8038	41	8079	1336	4395	2860	ok	4395	a4b1fc87bba62295	delharc,unar,7z		delharc,lsar,7z,bsdtar	300 bytes repeated at distance 4095
+w-lh4.lha	5	2	55	-lh4-	0	-	OVERLAP.BIN	-	OVERLAP.BIN	ascii	exact	9415	45	9460	23	1291	40ef	ok	1291	2ce1d188ce0f4883	delharc,unar,7z		delharc,lsar,7z,bsdtar	overlapping copies at distances 1, 2, 3 with lengths 3, 255 and 256
+w-lh4.lha	6	2	55	-lh4-	0	-	DISTWIN.BIN	-	DISTWIN.BIN	ascii	exact	9483	45	9528	1084	4417	5f7f	ok	4417	c671f5b737720103	delharc,unar,7z		delharc,lsar,7z,bsdtar	copies at distance 4096, equal to the window size
+w-lh5.lha	0	2	55	-lh5-	0	-	TEXT8191.TXT	-	TEXT8191.TXT	ascii	exact	0	46	46	2518	8191	4cdc	ok	8191	40474555d30c8fb5	delharc,unar,7z,bsdtar		delharc,lsar,7z,bsdtar	
+w-lh5.lha	1	2	55	-lh5-	0	-	TEXT8192.TXT	-	TEXT8192.TXT	ascii	exact	2564	46	2610	2517	8192	6736	ok	8192	306bbd358267fd12	delharc,unar,7z,bsdtar		delharc,lsar,7z,bsdtar	
+w-lh5.lha	2	2	55	-lh5-	0	-	TEXT8193.TXT	-	TEXT8193.TXT	ascii	exact	5127	46	5173	2543	8193	d2ac	ok	8193	33fc14cea79a94ee	delharc,unar,7z,bsdtar		delharc,lsar,7z,bsdtar	
+w-lh5.lha	3	2	55	-lh5-	0	-	WRAP.TXT	-	WRAP.TXT	ascii	exact	7716	42	7758	7007	24699	68c8	ok	24699	89d720a750ef3761	delharc,unar,7z,bsdtar		delharc,lsar,7z,bsdtar	longer than the window: the window wraps
+w-lh5.lha	4	2	55	-lh5-	0	-	FAR.BIN	-	FAR.BIN	ascii	exact	14765	41	14806	2196	8491	853d	ok	8491	07bb0827fa1c9472	delharc,unar,7z,bsdtar		delharc,lsar,7z,bsdtar	300 bytes repeated at distance 8191
+w-lh5.lha	5	2	55	-lh5-	0	-	OVERLAP.BIN	-	OVERLAP.BIN	ascii	exact	17002	45	17047	23	1291	40ef	ok	1291	2ce1d188ce0f4883	delharc,unar,7z,bsdtar		delharc,lsar,7z,bsdtar	overlapping copies at distances 1, 2, 3 with lengths 3, 255 and 256
+w-lh5.lha	6	2	55	-lh5-	0	-	DISTWIN.BIN	-	DISTWIN.BIN	ascii	exact	17070	45	17115	1917	8513	d41c	ok	8513	1cef8d65c3ead50b	delharc,unar,7z,bsdtar		delharc,lsar,7z,bsdtar	copies at distance 8192, equal to the window size
+w-lh6.lha	0	2	55	-lh6-	0	-	TEXT32767.TXT	-	TEXT32767.TXT	ascii	exact	0	47	47	4411	32767	b64e	ok	32767	1de6ecc9068afabe	delharc,unar,7z,bsdtar		delharc,lsar,7z,bsdtar	
+w-lh6.lha	1	2	55	-lh6-	0	-	TEXT32768.TXT	-	TEXT32768.TXT	ascii	exact	4458	47	4505	4439	32768	b466	ok	32768	a888a4d0b26c06a8	delharc,unar,7z,bsdtar		delharc,lsar,7z,bsdtar	
+w-lh6.lha	2	2	55	-lh6-	0	-	TEXT32769.TXT	-	TEXT32769.TXT	ascii	exact	8944	47	8991	4447	32769	0dce	ok	32769	c245e26f0d425a00	delharc,unar,7z,bsdtar		delharc,lsar,7z,bsdtar	
+w-lh6.lha	3	2	55	-lh6-	0	-	WRAP.TXT	-	WRAP.TXT	ascii	exact	13438	42	13480	8813	65659	512e	ok	65659	895e3eb87e4d3734	delharc,unar,7z,bsdtar		delharc,lsar,7z,bsdtar	longer than the window: the window wraps
+w-lh6.lha	4	2	55	-lh6-	0	-	FAR.BIN	-	FAR.BIN	ascii	exact	22293	41	22334	4929	33067	43e6	ok	33067	87c60fec186d0fd2	delharc,unar,7z,bsdtar		delharc,lsar,7z,bsdtar	300 bytes repeated at distance 32767
+w-lh6.lha	5	2	55	-lh6-	0	-	OVERLAP.BIN	-	OVERLAP.BIN	ascii	exact	27263	45	27308	24	1291	40ef	ok	1291	2ce1d188ce0f4883	delharc,unar,7z,bsdtar		delharc,lsar,7z,bsdtar	overlapping copies at distances 1, 2, 3 with lengths 3, 255 and 256
+w-lh6.lha	6	2	55	-lh6-	0	-	DISTWIN.BIN	-	DISTWIN.BIN	ascii	exact	27332	45	27377	4575	33089	2103	ok	33089	2c6e11ded9a9c6c1	delharc,unar,7z,bsdtar		delharc,lsar,7z,bsdtar	copies at distance 32768, equal to the window size
+w-lh7.lha	0	2	55	-lh7-	0	-	TEXT65535.TXT	-	TEXT65535.TXT	ascii	exact	0	47	47	8716	65535	228f	ok	65535	be4c97b9b3b7cc41	delharc,unar,7z,bsdtar		delharc,lsar,7z,bsdtar	
+w-lh7.lha	1	2	55	-lh7-	0	-	TEXT65536.TXT	-	TEXT65536.TXT	ascii	exact	8763	47	8810	8768	65536	981f	ok	65536	52d541e24f7ae008	delharc,unar,7z,bsdtar		delharc,lsar,7z,bsdtar	
+w-lh7.lha	2	2	55	-lh7-	0	-	TEXT65537.TXT	-	TEXT65537.TXT	ascii	exact	17578	47	17625	8746	65537	4e21	ok	65537	f17bc5ec56d0dd3a	delharc,unar,7z,bsdtar		delharc,lsar,7z,bsdtar	
+w-lh7.lha	3	2	55	-lh7-	0	-	WRAP.TXT	-	WRAP.TXT	ascii	exact	26371	42	26413	17473	131195	fec0	ok	131195	6a2e99f7f3b8d7e8	delharc,unar,7z,bsdtar		delharc,lsar,7z,bsdtar	longer than the window: the window wraps
+w-lh7.lha	4	2	55	-lh7-	0	-	FAR.BIN	-	FAR.BIN	ascii	exact	43886	41	43927	9271	65835	8f54	ok	65835	e9607040ed327a14	delharc,unar,7z,bsdtar		delharc,lsar,7z,bsdtar	300 bytes repeated at distance 65535
+w-lh7.lha	5	2	55	-lh7-	0	-	OVERLAP.BIN	-	OVERLAP.BIN	ascii	exact	53198	45	53243	24	1291	40ef	ok	1291	2ce1d188ce0f4883	delharc,unar,7z,bsdtar		delharc,lsar,7z,bsdtar	overlapping copies at distances 1, 2, 3 with lengths 3, 255 and 256
+w-lh7.lha	6	2	55	-lh7-	0	-	DISTWIN.BIN	-	DISTWIN.BIN	ascii	exact	53267	45	53312	8908	65857	c59a	ok	65857	216de50cfd9ddf5c	delharc,unar,7z,bsdtar		delharc,lsar,7z,bsdtar	copies at distance 65536, equal to the window size
+w-lz5.lha	0	0		-lz5-	0	TEXT4095.TXT	-	-	TEXT4095.TXT	ascii	exact	0	36	36	1621	4095	2130	ok	4095	b353b9e2aa796e73	delharc,unar		delharc,lsar,7z,bsdtar	
+w-lz5.lha	1	0		-lz5-	0	TEXT4096.TXT	-	-	TEXT4096.TXT	ascii	exact	1657	36	1693	1621	4096	6f14	ok	4096	bfbdad41bf47c81e	delharc,unar		delharc,lsar,7z,bsdtar	
+w-lz5.lha	2	0		-lz5-	0	TEXT4097.TXT	-	-	TEXT4097.TXT	ascii	exact	3314	36	3350	1646	4097	2edd	ok	4097	3a723dcd12197e5f	delharc,unar		delharc,lsar,7z,bsdtar	
+w-lz5.lha	3	0		-lz5-	0	WRAP.TXT	-	-	WRAP.TXT	ascii	exact	4996	32	5028	4280	12411	0e3e	ok	12411	38a05304cc4eb508	delharc,unar		delharc,lsar,7z,bsdtar	longer than the window: the window wraps
+w-lz5.lha	4	0		-lz5-	0	FAR.BIN	-	-	FAR.BIN	ascii	exact	9308	31	9339	1385	4378	35cd	ok	4378	e00a059176ed0f66	delharc,unar		delharc,lsar,7z,bsdtar	300 bytes repeated at distance 4078
+w-lz5.lha	5	0		-lz5-	0	OVERLAP.BIN	-	-	OVERLAP.BIN	ascii	exact	10724	35	10759	22	101	2321	ok	101	1da8eba2ccbfff69	delharc,unar		delharc,lsar,7z,bsdtar	overlapping copies at distances 1, 2, 3 with lengths 3, 17 and 18
+w-lz5.lha	6	0		-lz5-	0	DISTMAX.BIN	-	-	DISTMAX.BIN	ascii	exact	10781	35	10816	1087	4053	75cf	ok	4053	c8db76631630b90c	delharc,unar		delharc,lsar,7z,bsdtar	copies at distance 4078 (ring size minus maximum length)
+w-lz5.lha	7	0		-lz5-	0	INITIAL.BIN	-	-	INITIAL.BIN	ascii	exact	11903	35	11938	38	277	5e9a	ok	277	4dbcb9e5f53cd462	delharc,unar		delharc,lsar,7z,bsdtar	copies from every region of the initial ring contents except positions 4078..4095
+w-lz5.lha	8	0		-lz5-	0	INITTAIL.BIN	-	-	INITTAIL.BIN	ascii	exact	11976	36	12012	9	41	2ced	ok	41	816ea56941c8e21d	delharc,unar		delharc,lsar,7z,bsdtar	copies from ring positions 4078..4095 before and after output was written there (initially zero bytes)
+w-lzs.lha	0	0		-lzs-	0	TEXT2047.TXT	-	-	TEXT2047.TXT	ascii	exact	0	36	36	908	2047	e969	ok	2047	d42b9b610321d807	delharc,generator		delharc,7z,bsdtar	
+w-lzs.lha	1	0		-lzs-	0	TEXT2048.TXT	-	-	TEXT2048.TXT	ascii	exact	944	36	980	909	2048	ffc1	ok	2048	0f1c256fad905171	delharc,generator		delharc,7z,bsdtar	
+w-lzs.lha	2	0		-lzs-	0	TEXT2049.TXT	-	-	TEXT2049.TXT	ascii	exact	1889	36	1925	914	2049	c6f0	ok	2049	aca1d78be24139e3	delharc,generator		delharc,7z,bsdtar	
+w-lzs.lha	3	0		-lzs-	0	WRAP.TXT	-	-	WRAP.TXT	ascii	exact	2839	32	2871	2301	6267	4d52	ok	6267	9556996e2642f179	delharc,generator		delharc,7z,bsdtar	longer than the window: the window wraps
+w-lzs.lha	4	0		-lzs-	0	FAR.BIN	-	-	FAR.BIN	ascii	exact	5172	31	5203	899	2331	904a	ok	2331	7b2e3d7f138e0377	delharc,generator		delharc,7z,bsdtar	300 bytes repeated at distance 2031
+w-lzs.lha	5	0		-lzs-	0	OVERLAP.BIN	-	-	OVERLAP.BIN	ascii	exact	6102	35	6137	21	94	efe5	ok	94	34fda1ce94118231	delharc,generator		delharc,7z,bsdtar	overlapping copies at distances 1, 2, 3 with lengths 2, 16 and 17
+w-lzs.lha	6	0		-lzs-	0	DISTMAX.BIN	-	-	DISTMAX.BIN	ascii	exact	6158	35	6193	595	2003	b419	ok	2003	4945970d9d57093d	delharc,generator		delharc,7z,bsdtar	copies at distance 2031 (ring size minus maximum length)
+w-lzs.lha	7	0		-lzs-	0	INITIAL.BIN	-	-	INITIAL.BIN	ascii	exact	6788	35	6823	13	52	e5c4	ok	52	e1bf068434e111ef	delharc,generator		delharc,7z,bsdtar	copies from ring positions not yet written (initial contents are spaces), one running from unwritten into written positions

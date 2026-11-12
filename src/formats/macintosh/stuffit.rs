@@ -741,7 +741,6 @@ mod tests {
     }
 
     // Method 14 as the specification frames it stays a readable archive.
-    #[cfg(feature = "common")]
     #[test]
     fn raw_deflate_method_14_archive_is_descended() {
         let mut packed = vec![0x01, 0x04, 0x00, 0xFB, 0xFF];

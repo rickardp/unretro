@@ -8,6 +8,8 @@ use crate::{Container, ContainerInfo, Entry, Metadata};
 use super::bzip2::bunzip2;
 use super::crc32::crc32;
 use super::inflate::inflate;
+use super::lzma::{EndMarker, lzma_decode, lzma_parse_props};
+use super::xz_decode::xz_decode;
 
 const LOCAL_HEADER: u32 = 0x0403_4b50;
 const CENTRAL_HEADER: u32 = 0x0201_4b50;
@@ -22,7 +24,6 @@ const ZIP64_END_RECORD_LEN: usize = 56;
 const ZIP64_LOCATOR_LEN: usize = 20;
 
 const FLAG_ENCRYPTED: u16 = 1 << 0;
-#[cfg(all(feature = "xz", feature = "__backend_xz"))]
 const FLAG_LZMA_EOS: u16 = 1 << 1;
 const FLAG_STRONG_ENCRYPTION: u16 = 1 << 6;
 const FLAG_UTF8: u16 = 1 << 11;
@@ -453,60 +454,45 @@ fn compressed_data<'a>(
     data.get(start..end).ok_or_else(out_of_bounds)
 }
 
-#[cfg(all(feature = "xz", feature = "__backend_xz"))]
-fn read_declared(reader: impl std::io::Read, declared: u64, name: &str) -> Result<Vec<u8>> {
-    use std::io::Read;
-
-    let mut out = Vec::new();
-    out.try_reserve(crate::limits::prealloc_hint(declared))
-        .map_err(|_| entry_error(name, "out of memory"))?;
-    // One byte past the declared size so an overlong stream is detected.
-    reader
-        .take(declared.saturating_add(1))
-        .read_to_end(&mut out)
-        .map_err(|e| entry_error(name, e))?;
-    Ok(out)
-}
-
-#[cfg(all(feature = "xz", feature = "__backend_xz"))]
 fn decode_lzma(compressed: &[u8], entry: &CentralEntry<'_>, name: &str) -> Result<Vec<u8>> {
-    use std::io::Read;
-
     // APPNOTE 5.8.8: SDK version (2 bytes), properties size (2 bytes), then
     // the properties: one packed lc/lp/pb byte and a 4-byte dictionary size.
-    let properties: [u8; 5] = match le16(compressed, 2) {
-        Some(5) => array(compressed, 4),
+    let (properties, stream) = match le16(compressed, 2) {
+        Some(5) => compressed
+            .get(4..)
+            .and_then(|rest| rest.split_at_checked(5)),
         _ => None,
     }
     .ok_or_else(|| entry_error(name, "invalid LZMA properties header"))?;
-    let stream = compressed.get(9..).unwrap_or(&[]);
+    let (props, dict_size) = lzma_parse_props(properties)
+        .map_err(|e| entry_error(name, format_args!("invalid LZMA properties header: {e}")))?;
 
-    // liblzma decodes the legacy .lzma layout: the same properties followed
-    // by a 64-bit uncompressed size, all ones meaning "ends with an
-    // end-of-stream marker" (general purpose bit 1, APPNOTE 5.8.9).
-    let size = if entry.flags & FLAG_LZMA_EOS != 0 {
-        u64::MAX
+    // General purpose bit 1 (APPNOTE 5.8.9): the stream ends with an
+    // end-of-stream marker. Without it the declared size ends the stream.
+    let marker = if entry.flags & FLAG_LZMA_EOS != 0 {
+        EndMarker::Required
     } else {
-        entry.uncompressed
+        EndMarker::Optional
     };
-    let mut header = [0u8; 13];
-    for (dst, src) in header
-        .iter_mut()
-        .zip(properties.into_iter().chain(size.to_le_bytes()))
-    {
-        *dst = src;
-    }
-    let decoder = xz2::stream::Stream::new_lzma_decoder(u64::MAX)
-        .map_err(|e| entry_error(name, format_args!("LZMA decoder: {e}")))?;
-    let reader = xz2::read::XzDecoder::new_stream(header.as_slice().chain(stream), decoder);
-    read_declared(reader, entry.uncompressed, name)
+    let declared = entry.uncompressed;
+    let decoded = lzma_decode(
+        stream,
+        props,
+        dict_size,
+        Some(declared),
+        marker,
+        declared,
+        declared,
+    )
+    .map_err(|e| entry_error(name, format_args!("declared size {declared}: {e}")))?;
+    Ok(decoded.data)
 }
 
 fn is_supported(method: u16) -> bool {
-    let native = matches!(method, METHOD_STORED | METHOD_DEFLATE | METHOD_BZIP2);
-    let via_liblzma = cfg!(all(feature = "xz", feature = "__backend_xz"))
-        && matches!(method, METHOD_LZMA | METHOD_XZ);
-    native || via_liblzma
+    matches!(
+        method,
+        METHOD_STORED | METHOD_DEFLATE | METHOD_BZIP2 | METHOD_LZMA | METHOD_XZ
+    )
 }
 
 fn extract(
@@ -575,10 +561,12 @@ fn extract(
                 .map_err(|e| entry_error(name, format_args!("declared size {declared}: {e}")))?
                 .data
         }
-        #[cfg(all(feature = "xz", feature = "__backend_xz"))]
         METHOD_LZMA => decode_lzma(compressed, entry, name)?,
-        #[cfg(all(feature = "xz", feature = "__backend_xz"))]
-        METHOD_XZ => read_declared(xz2::read::XzDecoder::new(compressed), declared, name)?,
+        METHOD_XZ => {
+            xz_decode(compressed, declared, declared)
+                .map_err(|e| entry_error(name, format_args!("declared size {declared}: {e}")))?
+                .data
+        }
         _ => {
             return Err(entry_error(
                 name,
@@ -619,6 +607,8 @@ fn compression_name(method: u16) -> Option<&'static str> {
         METHOD_STORED => None,
         METHOD_DEFLATE => Some("deflate"),
         METHOD_BZIP2 => Some("bzip2"),
+        METHOD_LZMA => Some("lzma"),
+        METHOD_XZ => Some("xz"),
         _ => Some("compressed"),
     }
 }
@@ -1701,8 +1691,7 @@ mod tests {
         assert_eq!(paths(&open(&data)), ["a.zip/one.bin"]);
     }
 
-    #[cfg(all(feature = "xz", feature = "__backend_xz"))]
-    mod xz_backed {
+    mod lzma_and_xz {
         use super::*;
 
         // TEXT as written by python3 zipfile with ZIP_LZMA: version 9.4,
@@ -1719,6 +1708,58 @@ mod tests {
             \xb3\x00\x00\x00\x00\x5d\x7c\xfd\xdb\x08\xc4\x85\xdd\x00\x01\x4f\x8e\x02\x00\x00\x00\
             \x1c\xaa\x84\x99\xb1\xc4\x67\xfb\x02\x00\x00\x00\x00\x04\x59\x5a";
 
+        // Archives holding "l.txt" with TEXT: python3 zipfile (ZIP_LZMA),
+        // `7zz a -tzip -mm=LZMA` (end marker, flag bit 1 set), the same with
+        // `-meos=off` (no marker, flag clear) and `7zz a -tzip -mm=xz`.
+        const ZIP_PYTHON_LZMA: &[u8] =
+            b"\x50\x4b\x03\x04\x3f\x00\x02\x00\x0e\x00\x00\x00\x21\x50\xb5\x95\xb8\xf8\x42\x00\
+            \x00\x00\x0e\x01\x00\x00\x05\x00\x00\x00\x6c\x2e\x74\x78\x74\x09\x04\x05\x00\x5d\
+            \x00\x00\x80\x00\x00\x2a\x1a\x08\xa2\x03\x25\x66\xf1\x4b\x78\xc5\xa2\x05\xff\x2e\
+            \xe6\xd9\xd2\x20\x1a\xad\x34\xf8\xe2\x1d\xe8\x41\x36\xfa\xdc\x06\x69\xbb\x3c\xe4\
+            \x10\x34\x27\x09\xeb\xb3\x66\xe3\xed\x37\x88\xa8\xf6\xe2\x2d\xff\xff\xfa\x95\x20\
+            \x00\x50\x4b\x01\x02\x3f\x03\x3f\x00\x02\x00\x0e\x00\x00\x00\x21\x50\xb5\x95\xb8\
+            \xf8\x42\x00\x00\x00\x0e\x01\x00\x00\x05\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\
+            \x00\x80\x01\x00\x00\x00\x00\x6c\x2e\x74\x78\x74\x50\x4b\x05\x06\x00\x00\x00\x00\
+            \x01\x00\x01\x00\x33\x00\x00\x00\x65\x00\x00\x00\x00\x00";
+        const ZIP_7Z_LZMA_EOS: &[u8] =
+            b"\x50\x4b\x03\x04\x3f\x00\x02\x00\x0e\x00\x00\x00\x21\x50\xb5\x95\xb8\xf8\x42\x00\
+            \x00\x00\x0e\x01\x00\x00\x05\x00\x00\x00\x6c\x2e\x74\x78\x74\x1a\x01\x05\x00\x5d\
+            \x00\x10\x00\x00\x00\x2a\x1a\x08\xa2\x03\x25\x66\xf1\x4b\x78\xc5\xa2\x05\xff\x2e\
+            \xe6\xd9\xd2\x20\x1a\xad\x34\xf8\xe2\x1d\xe8\x41\x36\xfa\xdc\x06\x69\xbb\x3c\xe4\
+            \x10\x34\x27\x09\xeb\xb3\x66\xe3\xed\x37\x88\xa8\xf6\xe2\x2d\xff\xff\xfa\x95\x20\
+            \x00\x50\x4b\x01\x02\x3f\x03\x3f\x00\x02\x00\x0e\x00\x00\x00\x21\x50\xb5\x95\xb8\
+            \xf8\x42\x00\x00\x00\x0e\x01\x00\x00\x05\x00\x24\x00\x00\x00\x00\x00\x00\x00\x20\
+            \x80\xa4\x81\x00\x00\x00\x00\x6c\x2e\x74\x78\x74\x0a\x00\x20\x00\x00\x00\x00\x00\
+            \x01\x00\x18\x00\x00\x98\x40\x07\x2e\xc0\xd5\x01\x00\x00\x00\x00\x00\x00\x00\x00\
+            \x00\x00\x00\x00\x00\x00\x00\x00\x50\x4b\x05\x06\x00\x00\x00\x00\x01\x00\x01\x00\
+            \x57\x00\x00\x00\x65\x00\x00\x00\x00\x00";
+        const ZIP_7Z_LZMA: &[u8] =
+            b"\x50\x4b\x03\x04\x3f\x00\x00\x00\x0e\x00\x00\x00\x21\x50\xb5\x95\xb8\xf8\x3d\x00\
+            \x00\x00\x0e\x01\x00\x00\x05\x00\x00\x00\x6c\x2e\x74\x78\x74\x1a\x01\x05\x00\x5d\
+            \x00\x10\x00\x00\x00\x2a\x1a\x08\xa2\x03\x25\x66\xf1\x4b\x78\xc5\xa2\x05\xff\x2e\
+            \xe6\xd9\xd2\x20\x1a\xad\x34\xf8\xe2\x1d\xe8\x41\x36\xfa\xdc\x06\x69\xbb\x3c\xe4\
+            \x10\x34\x27\x09\xeb\xb3\x66\xe3\xed\x37\x88\xa8\xeb\xb3\x00\x00\x50\x4b\x01\x02\
+            \x3f\x03\x3f\x00\x00\x00\x0e\x00\x00\x00\x21\x50\xb5\x95\xb8\xf8\x3d\x00\x00\x00\
+            \x0e\x01\x00\x00\x05\x00\x24\x00\x00\x00\x00\x00\x00\x00\x20\x80\xa4\x81\x00\x00\
+            \x00\x00\x6c\x2e\x74\x78\x74\x0a\x00\x20\x00\x00\x00\x00\x00\x01\x00\x18\x00\x00\
+            \x98\x40\x07\x2e\xc0\xd5\x01\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\
+            \x00\x00\x00\x50\x4b\x05\x06\x00\x00\x00\x00\x01\x00\x01\x00\x57\x00\x00\x00\x60\
+            \x00\x00\x00\x00\x00";
+        const ZIP_7Z_XZ: &[u8] =
+            b"\x50\x4b\x03\x04\x14\x00\x00\x00\x5f\x00\x00\x00\x21\x50\xb5\x95\xb8\xf8\x70\x00\
+            \x00\x00\x0e\x01\x00\x00\x05\x00\x00\x00\x6c\x2e\x74\x78\x74\xfd\x37\x7a\x58\x5a\
+            \x00\x00\x01\x69\x22\xde\x36\x02\x00\x21\x01\x00\x00\x00\x00\x37\x27\x97\xd6\xe0\
+            \x01\x0d\x00\x33\x5d\x00\x2a\x1a\x08\xa2\x03\x25\x66\xf1\x4b\x78\xc5\xa2\x05\xff\
+            \x2e\xe6\xd9\xd2\x20\x1a\xad\x34\xf8\xe2\x1d\xe8\x41\x36\xfa\xdc\x06\x69\xbb\x3c\
+            \xe4\x10\x34\x27\x09\xeb\xb3\x66\xe3\xed\x37\x88\xa8\xeb\xb3\x00\x00\x00\x00\xb5\
+            \x95\xb8\xf8\x00\x01\x4b\x8e\x02\x00\x00\x00\x0a\xe8\x15\x02\x3e\x30\x0d\x8b\x02\
+            \x00\x00\x00\x00\x01\x59\x5a\x50\x4b\x01\x02\x3f\x03\x14\x00\x00\x00\x5f\x00\x00\
+            \x00\x21\x50\xb5\x95\xb8\xf8\x70\x00\x00\x00\x0e\x01\x00\x00\x05\x00\x24\x00\x00\
+            \x00\x00\x00\x00\x00\x20\x80\xa4\x81\x00\x00\x00\x00\x6c\x2e\x74\x78\x74\x0a\x00\
+            \x20\x00\x00\x00\x00\x00\x01\x00\x18\x00\x00\x98\x40\x07\x2e\xc0\xd5\x01\x00\x00\
+            \x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x50\x4b\x05\x06\x00\x00\
+            \x00\x00\x01\x00\x01\x00\x57\x00\x00\x00\x93\x00\x00\x00\x00\x00";
+
         #[test]
         fn extracts_lzma_entry() {
             let mut entry = TestEntry::compressed("l.txt", METHOD_LZMA, TEXT_LZMA, TEXT);
@@ -1729,16 +1770,64 @@ mod tests {
                 [(
                     "a.zip/l.txt".to_string(),
                     TEXT.to_vec(),
-                    Some("compressed".to_string())
+                    Some("lzma".to_string())
                 )]
             );
         }
 
         #[test]
+        fn reads_archives_from_python_and_7zip() {
+            for (file, method, flags) in [
+                (ZIP_PYTHON_LZMA, METHOD_LZMA, FLAG_LZMA_EOS),
+                (ZIP_7Z_LZMA_EOS, METHOD_LZMA, FLAG_LZMA_EOS),
+                (ZIP_7Z_LZMA, METHOD_LZMA, 0),
+                (ZIP_7Z_XZ, METHOD_XZ, 0),
+            ] {
+                let header = central_headers(file)[0];
+                assert_eq!(le16(file, header + 10), Some(method));
+                assert_eq!(le16(file, header + 8).unwrap() & FLAG_LZMA_EOS, flags);
+                let container = open(file);
+                assert_eq!(paths(&container), ["a.zip/l.txt"]);
+                assert_eq!(container.get_file("l.txt"), Some(TEXT));
+                assert_eq!(container.skipped_entries(), None);
+            }
+        }
+
+        #[test]
         fn lzma_without_eos_flag_relies_on_declared_size() {
+            // A marker is tolerated when the flag does not announce one.
             let entry = TestEntry::compressed("l.txt", METHOD_LZMA, TEXT_LZMA, TEXT);
             let container = open(&archive(&[entry]));
             assert_eq!(container.get_file("l.txt"), Some(TEXT));
+        }
+
+        #[test]
+        fn lzma_with_eos_flag_needs_the_marker() {
+            let header = central_headers(ZIP_7Z_LZMA)[0];
+            let mut data = ZIP_7Z_LZMA.to_vec();
+            data[header + 8] |= FLAG_LZMA_EOS as u8;
+            assert!(open_err(&data).contains("no end marker"));
+        }
+
+        #[test]
+        fn lzma_entry_must_match_its_declared_size() {
+            for flags in [0, FLAG_LZMA_EOS] {
+                for delta in [-1i32, 1] {
+                    let mut entry = TestEntry::compressed("l.txt", METHOD_LZMA, TEXT_LZMA, TEXT);
+                    entry.flags = flags;
+                    entry.size = entry.size.wrapping_add_signed(delta.into());
+                    let message = open_err(&archive(&[entry]));
+                    assert!(message.contains("declared size"), "{message}");
+                }
+            }
+            // The size also ends a stream that has no marker.
+            let header = central_headers(ZIP_7Z_LZMA)[0];
+            for delta in [-1i32, 1] {
+                let mut data = ZIP_7Z_LZMA.to_vec();
+                let size = le32(&data, header + 24).unwrap().wrapping_add_signed(delta);
+                data[header + 24..header + 28].copy_from_slice(&size.to_le_bytes());
+                assert!(open_err(&data).contains("declared size"), "{delta}");
+            }
         }
 
         #[test]
@@ -1748,6 +1837,56 @@ mod tests {
             let mut entry = TestEntry::compressed("l.txt", METHOD_LZMA, &payload, TEXT);
             entry.flags = FLAG_LZMA_EOS;
             assert!(open_err(&archive(&[entry])).contains("LZMA properties"));
+
+            // lc/lp/pb byte out of range.
+            let mut payload = TEXT_LZMA.to_vec();
+            payload[4] = 225;
+            let entry = TestEntry::compressed("l.txt", METHOD_LZMA, &payload, TEXT);
+            assert!(open_err(&archive(&[entry])).contains("LZMA properties"));
+
+            for cut in 0..9 {
+                let entry = TestEntry::compressed("l.txt", METHOD_LZMA, &TEXT_LZMA[..cut], TEXT);
+                assert!(open_err(&archive(&[entry])).contains("l.txt"), "cut {cut}");
+            }
+        }
+
+        #[test]
+        fn rejects_corrupt_and_truncated_entries() {
+            for (file, method) in [
+                (ZIP_PYTHON_LZMA, "lzma"),
+                (ZIP_7Z_LZMA_EOS, "lzma"),
+                (ZIP_7Z_LZMA, "lzma"),
+                (ZIP_7Z_XZ, "xz"),
+            ] {
+                let header = central_headers(file)[0];
+
+                let mut bad_crc = file.to_vec();
+                bad_crc[header + 16] ^= 1;
+                assert!(open_err(&bad_crc).contains("CRC-32 mismatch"), "{method}");
+
+                // Damage in the middle of the compressed data.
+                let start = LOCAL_HEADER_LEN + "l.txt".len();
+                let len = le32(file, header + 20).unwrap() as usize;
+                let mut damaged = file.to_vec();
+                damaged[start + len / 2] ^= 0x40;
+                let message = open_err(&damaged);
+                assert!(
+                    message.contains(method) || message.contains("CRC-32"),
+                    "{message}"
+                );
+            }
+
+            for payload in [TEXT_LZMA, TEXT_XZ] {
+                let method = if payload == TEXT_XZ {
+                    METHOD_XZ
+                } else {
+                    METHOD_LZMA
+                };
+                for cut in [payload.len() / 2, payload.len() - 9] {
+                    let entry = TestEntry::compressed("t.bin", method, &payload[..cut], TEXT);
+                    assert!(open_err(&archive(&[entry])).contains("t.bin"), "cut {cut}");
+                }
+            }
         }
 
         #[test]
@@ -1755,13 +1894,28 @@ mod tests {
             let entry = TestEntry::compressed("x.txt", METHOD_XZ, TEXT_XZ, TEXT);
             let container = open(&archive(&[entry]));
             assert_eq!(container.get_file("x.txt"), Some(TEXT));
+            assert_eq!(listing(&container)[0].2.as_deref(), Some("xz"));
         }
 
         #[test]
-        fn rejects_overlong_xz_entry() {
-            let mut entry = TestEntry::compressed("x.txt", METHOD_XZ, TEXT_XZ, TEXT);
-            entry.size -= 10;
-            assert!(open_err(&archive(&[entry])).contains("size mismatch"));
+        fn xz_entry_must_match_its_declared_size() {
+            // The declared size is the output limit, and must be reached.
+            let mut short = TestEntry::compressed("x.txt", METHOD_XZ, TEXT_XZ, TEXT);
+            short.size -= 10;
+            assert!(open_err(&archive(&[short])).contains("declared size"));
+            let mut long = TestEntry::compressed("x.txt", METHOD_XZ, TEXT_XZ, TEXT);
+            long.size += 1;
+            assert!(open_err(&archive(&[long])).contains("size mismatch"));
+        }
+
+        #[test]
+        fn a_bad_lzma_entry_does_not_hide_the_others() {
+            let good = TestEntry::stored("good.txt", b"hello");
+            let mut bad = TestEntry::compressed("bad.txt", METHOD_LZMA, TEXT_LZMA, TEXT);
+            bad.crc ^= 1;
+            let container = open(&archive(&[good, bad]));
+            assert_eq!(paths(&container), ["a.zip/good.txt"]);
+            assert!(container.skipped_entries().unwrap().contains("CRC-32"));
         }
     }
 }

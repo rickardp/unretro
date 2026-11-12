@@ -5,9 +5,13 @@
 //! - **GPT** - GPT-partitioned disk images
 //! - **ISO 9660** - CD-ROM images (Joliet and Rock Ridge names, raw 2352-byte sectors)
 //! - **RAR** - Widely-used archive format (RAR 2.9/4.x and RAR 5.0+)
+//! - **ARJ** - ARJ archives (methods 0-4)
+//! - **CUE/BIN** - CD images described by a cue sheet
 
 use crate::compat::{String, ToString};
 
+pub mod arj;
+pub mod cue;
 pub mod fat;
 pub mod gpt;
 pub mod iso9660;

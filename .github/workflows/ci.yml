@@ -30,6 +30,8 @@ jobs:
         run: cargo test --no-default-features
       - name: Run tests (common only)
         run: cargo test --no-default-features --features std,common
+      - name: Run tests (xz only)
+        run: cargo test --no-default-features --features std,xz
       - name: Run tests (macintosh only)
         run: cargo test --no-default-features --features std,macintosh
       - name: Run tests (amiga only)
@@ -47,6 +49,19 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: Clippy (all features)
         run: cargo clippy --all-targets --all-features
+
+  wasm:
+    name: wasm32 no_std build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: "1.85"
+          targets: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@v2
+      - name: Check (no_std, wasm)
+        run: cargo check --lib --target wasm32-unknown-unknown --no-default-features --features no_std,wasm
 
   fmt:
     name: Format

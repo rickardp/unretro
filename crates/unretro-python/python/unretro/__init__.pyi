@@ -33,6 +33,13 @@ class ContainerFormat:
     Iso9660: ContainerFormat
     Adf: ContainerFormat
     Bzip2: ContainerFormat
+    Arj: ContainerFormat
+    Compress: ContainerFormat
+    NextDisklabel: ContainerFormat
+    Ufs: ContainerFormat
+    Bfs: ContainerFormat
+    CueBin: ContainerFormat
+    LisaFs: ContainerFormat
     Unknown: ContainerFormat
 
     @property

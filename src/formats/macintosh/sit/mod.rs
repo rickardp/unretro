@@ -222,7 +222,6 @@ pub(crate) fn read_fork(
 
 // Method 14: one raw RFC 1951 stream that must reach the end of its final
 // block and produce exactly `unpacked_len` bytes; trailing input is ignored.
-#[cfg(feature = "common")]
 fn inflate_raw(packed: &[u8], unpacked_len: usize) -> Result<Vec<u8>> {
     use crate::formats::common::inflate::inflate;
 
@@ -234,13 +233,6 @@ fn inflate_raw(packed: &[u8], unpacked_len: usize) -> Result<Vec<u8>> {
         return Err(bad());
     }
     Ok(output)
-}
-
-#[cfg(not(feature = "common"))]
-fn inflate_raw(_packed: &[u8], _unpacked_len: usize) -> Result<Vec<u8>> {
-    Err(Error::unsupported(
-        "StuffIt: unsupported method 14 (built without the `common` feature)",
-    ))
 }
 
 #[cfg(test)]
@@ -331,7 +323,6 @@ mod tests {
         assert!(message(decode_fork(data, &fork(0, data, 12, 0x48FF))).contains("checksum"));
     }
 
-    #[cfg(feature = "common")]
     #[test]
     fn method_14_is_raw_deflate() {
         // One stored final block holding "Hello World\n", then junk.

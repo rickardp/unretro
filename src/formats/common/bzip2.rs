@@ -27,12 +27,17 @@ const RUN_B: u32 = 1;
 // The fifth byte of a run of equal bytes is a repeat count.
 const RUN_THRESHOLD: u32 = 4;
 
-// Randomised blocks, written by early bzip2 releases: 1 is XORed into single
-// bytes of the block-sorted data once it is back in its original order. The
-// first such byte is at index `RANDOM_STEPS[0] - 2`; each next one lies the
-// following step further on, the steps repeating after the last. Every block
-// starts over. Neither format description covers this: the steps and the
-// rules were recovered by observing what the bzip2 tool outputs.
+// Randomised blocks, written by bzip2 0.9.0 and earlier: 1 is XORed into
+// single bytes of the block-sorted data once it is back in its original
+// order. The first such byte is at index `RANDOM_STEPS[0] - 2`; each next one
+// lies the following step further on, the steps repeating after the last.
+// Every block starts over.
+//
+// Provenance: the format specification (Tsai, "BZip2 Format Specification",
+// 2.2.3.1) names the flag but does not cover the transform. The rule and the
+// step values below were extracted from the output of the bzip2 1.0.8 tool
+// on constructed inputs, treating it as a black box; they were not copied
+// from any source code.
 #[rustfmt::skip]
 static RANDOM_STEPS: [u16; 512] = [
     619, 720, 127, 481, 931, 816, 813, 233, 566, 247, 985, 724, 205, 454, 863, 491,

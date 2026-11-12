@@ -2026,6 +2026,204 @@ fn test_adf_bad_header_checksum_is_reported_and_other_files_survive() {
     );
 }
 
+#[cfg(feature = "dos")]
+#[test]
+fn test_arj_volume_set_inside_an_archive_is_joined() {
+    let volume = |name: &str| {
+        let path = format!("{}/testdata/arj/{name}", env!("CARGO_MANIFEST_DIR"));
+        std::fs::read(path).unwrap()
+    };
+    let names = [
+        "SET/VOL.ARJ",
+        "SET/VOL.A01",
+        "SET/VOL.A02",
+        "SET/VOL.A03",
+        "SET/VOL.A04",
+    ];
+    let volumes: Vec<Vec<u8>> = ["vol.arj", "vol.a01", "vol.a02", "vol.a03", "vol.a04"]
+        .iter()
+        .map(|name| volume(name))
+        .collect();
+    let files: Vec<(&str, &[u8])> = names
+        .iter()
+        .zip(&volumes)
+        .map(|(name, data)| (*name, data.as_slice()))
+        .collect();
+
+    let (leaves, report) = leaves_with_report(build_zip(&files), "outer.zip");
+    assert!(report.diagnostics.is_empty(), "{:?}", report.diagnostics);
+    let found: Vec<(&str, usize)> = leaves
+        .iter()
+        .map(|(path, data)| (path.as_str(), data.len()))
+        .collect();
+    // Later volumes are read through the first one, not listed again.
+    assert_eq!(
+        found,
+        vec![
+            ("outer.zip/SET/VOL.ARJ/plain.txt", 13),
+            ("outer.zip/SET/VOL.ARJ/big.bin", 90000),
+            ("outer.zip/SET/VOL.ARJ/runs.bin", 3394),
+            ("outer.zip/SET/VOL.ARJ/split.bin", 30000),
+            ("outer.zip/SET/VOL.ARJ/text.txt", 3903),
+        ]
+    );
+
+    // Without recursion the volumes stay plain files.
+    let mut shallow = Vec::new();
+    Loader::from_bytes(build_zip(&files), "outer.zip")
+        .with_max_depth(2)
+        .visit(EntryType::Leaves, |entry| {
+            shallow.push(entry.path.to_string());
+            Ok(VisitAction::Continue)
+        })
+        .unwrap();
+    assert_eq!(shallow.len(), 5, "{shallow:?}");
+}
+
+// One stored RAR4 volume: (name, bytes of this piece, size of the whole
+// file, continues from the previous volume, continues in the next).
+#[cfg(feature = "dos")]
+fn build_rar4_volume(pieces: &[(&str, &[u8], usize, bool, bool)], more: bool) -> Vec<u8> {
+    let mut out = b"Rar!\x1a\x07\x00".to_vec();
+    out.extend_from_slice(&[0, 0, 0x73, 0x11, 0x00, 13, 0, 0, 0, 0, 0, 0, 0]);
+    for &(name, data, whole, before, after) in pieces {
+        let flags = 0x8000 | u16::from(before) | (u16::from(after) << 1);
+        out.extend_from_slice(&[0, 0, 0x74]);
+        out.extend_from_slice(&flags.to_le_bytes());
+        out.extend_from_slice(&(32 + name.len() as u16).to_le_bytes());
+        out.extend_from_slice(&(data.len() as u32).to_le_bytes());
+        out.extend_from_slice(&(whole as u32).to_le_bytes());
+        out.extend_from_slice(&[0; 9]);
+        out.extend_from_slice(&[29, 0x30]);
+        out.extend_from_slice(&(name.len() as u16).to_le_bytes());
+        out.extend_from_slice(&0x20u32.to_le_bytes());
+        out.extend_from_slice(name.as_bytes());
+        out.extend_from_slice(data);
+    }
+    out.extend_from_slice(&[0, 0, 0x7b, u8::from(more), 0, 7, 0]);
+    out
+}
+
+#[cfg(feature = "dos")]
+fn rar_set() -> [Vec<u8>; 3] {
+    [
+        build_rar4_volume(
+            &[
+                ("a.txt", b"a", 1, false, false),
+                ("big.bin", b"one-", 13, false, true),
+            ],
+            true,
+        ),
+        build_rar4_volume(&[("big.bin", b"two-", 13, true, true)], true),
+        build_rar4_volume(
+            &[
+                ("big.bin", b"three", 13, true, false),
+                ("z.txt", b"z", 1, false, false),
+            ],
+            false,
+        ),
+    ]
+}
+
+#[cfg(feature = "dos")]
+fn joined_rar_set(root: &str) -> Vec<(String, Vec<u8>)> {
+    vec![
+        (format!("{root}/a.txt"), b"a".to_vec()),
+        (format!("{root}/big.bin"), b"one-two-three".to_vec()),
+        (format!("{root}/z.txt"), b"z".to_vec()),
+    ]
+}
+
+#[cfg(feature = "dos")]
+#[test]
+fn test_rar_volume_set_inside_an_archive_is_joined() {
+    let [first, second, third] = rar_set();
+
+    // Both naming schemes.
+    for names in [
+        ["set.part1.rar", "set.part2.rar", "set.part3.rar"],
+        ["SET.RAR", "SET.R00", "SET.R01"],
+    ] {
+        let zip = build_zip(&[
+            (names[0], first.as_slice()),
+            (names[1], second.as_slice()),
+            (names[2], third.as_slice()),
+        ]);
+        let (leaves, report) = leaves_with_report(zip, "outer.zip");
+        assert!(report.diagnostics.is_empty(), "{:?}", report.diagnostics);
+        assert_eq!(leaves, joined_rar_set(&format!("outer.zip/{}", names[0])));
+    }
+
+    // Without its first volume the set starts at the second one.
+    let zip = build_zip(&[
+        ("set.part2.rar", second.as_slice()),
+        ("set.part3.rar", third.as_slice()),
+    ]);
+    let (leaves, report) = leaves_with_report(zip, "outer.zip");
+    assert_eq!(
+        leaves,
+        vec![("outer.zip/set.part2.rar/z.txt".to_string(), b"z".to_vec())]
+    );
+    assert!(!report.has_root_failures());
+    assert_eq!(report.diagnostics.len(), 1, "{:?}", report.diagnostics);
+    assert_eq!(
+        report.diagnostics[0].code,
+        TraversalDiagnosticCode::ContainerEntriesSkipped
+    );
+    assert!(
+        report.diagnostics[0]
+            .message
+            .contains("'big.bin' continues a file from an earlier volume"),
+        "{}",
+        report.diagnostics[0].message
+    );
+}
+
+#[cfg(all(feature = "dos", feature = "std"))]
+#[test]
+fn test_rar_volume_set_on_disk_is_joined() {
+    let [first, second, third] = rar_set();
+    let dir = TempDir::new("rar-volumes");
+    dir.write("set.part1.rar", &first);
+    dir.write("set.part2.rar", &second);
+    dir.write("set.part3.rar", &third);
+
+    let leaves_at = |path: &std::path::Path| {
+        let mut leaves = Vec::new();
+        let report = Loader::from_path(path)
+            .visit_with_report(EntryType::Leaves, |entry| {
+                leaves.push((entry.path.to_string(), entry.data.to_vec()));
+                Ok(VisitAction::Continue)
+            })
+            .unwrap();
+        (leaves, report)
+    };
+
+    // The directory lists the set once, through its first volume.
+    let (leaves, report) = leaves_at(&dir.0);
+    assert!(report.diagnostics.is_empty(), "{:?}", report.diagnostics);
+    let first_path = dir.0.join("set.part1.rar");
+    assert_eq!(leaves, joined_rar_set(&first_path.display().to_string()));
+
+    // So does opening the first volume directly.
+    let (leaves, report) = leaves_at(&first_path);
+    assert!(report.diagnostics.is_empty(), "{:?}", report.diagnostics);
+    assert_eq!(leaves, joined_rar_set(&first_path.display().to_string()));
+
+    // A lone first volume leaves the split file out instead of truncating it.
+    std::fs::remove_file(dir.0.join("set.part2.rar")).unwrap();
+    let (leaves, report) = leaves_at(&first_path);
+    assert_eq!(leaves.len(), 1, "{leaves:?}");
+    assert!(!report.has_root_failures());
+    assert!(
+        report.diagnostics[0]
+            .message
+            .contains("'big.bin' continues in the next volume"),
+        "{}",
+        report.diagnostics[0].message
+    );
+}
+
 #[cfg(feature = "std")]
 mod cli {
     use super::{TempDir, build_apple_double, build_fork, build_zip};

@@ -72,6 +72,15 @@ Loader::from_path("nested.sit.hqx")
 # }
 ```
 
+Depth is not the only bound on nesting. All entries that the containers of one input
+yield, at every level together, are counted against a budget of 64 times the input size
+(at least 8 GiB), and every nested container opened costs another 4 KiB. Once the budget
+is spent no further nested container is opened: such entries are still visited as
+container entries, their contents are not, and the report carries one
+`NestedContainerOpenFailed` diagnostic naming the first one refused. This stops inputs
+whose entries all point at the same bytes from multiplying at every level. Each file
+below a directory source has a budget of its own.
+
 #### Memory mapping strategy
 
 ```rust,no_run
@@ -196,8 +205,7 @@ Read-only, `macintosh` feature (`ContainerFormat::StuffIt`). Decoded natively, a
   structural checks rather than the signature alone. StuffIt X (`.sitx`), encrypted
   forks and segmented archives are not supported.
 - Compression methods 0 (stored), 1 (run-length), 2 (LZW), 3 (Huffman), 13 (LZ77 with
-  Huffman codes) and 15 (Arsenic); method 14 as a raw deflate stream needs the `common`
-  feature.
+  Huffman codes), 14 (raw deflate stream) and 15 (Arsenic).
 - StuffIt installer applications (signatures such as `ST46`) store every fork with
   method 14 in a block framing that is not decoded. A file in which every fork with
   contents is such a fork is not detected as an archive: it stays an ordinary file
@@ -216,6 +224,56 @@ Read-only, `macintosh` feature (`ContainerFormat::StuffIt`). Decoded natively, a
   truncated archive) keeps the entries found so far. In all these cases every readable
   file is still yielded and the traversal reports one recoverable
   `ContainerEntriesSkipped` diagnostic.
+
+## HFS Plus and HFSX Volumes
+
+Read-only, `macintosh` feature. HFS Plus and HFSX open as `ContainerFormat::Hfs`, like
+HFS and MFS; there is no separate format value.
+
+- Detected by the volume header signature and version at byte 1024 of the volume: `H+`
+  version 4 (HFS Plus) or `HX` version 5 (HFSX). The volume is found wherever an HFS
+  volume is: a bare image, behind a DiskCopy 4.2 header, in an Apple Partition Map
+  (partition types `Apple_HFS` and `Apple_HFSX`), in a UDIF or NDIF disk image, in a raw
+  2352-byte CD sector dump, and embedded in an HFS wrapper volume. For a wrapper the
+  embedded volume is presented, not the wrapper's own stub files.
+- UDIF images (`.dmg`) may be unpartitioned or carry an Apple Partition Map or a GUID
+  partition table; the first HFS/HFS Plus partition is presented. Stored, zero-fill, ADC,
+  zlib, bzip2 and LZMA chunks are decoded. A GUID-partitioned image without the UDIF trailer
+  opens as `ContainerFormat::Gpt` (`dos` feature) with the volume as a partition entry.
+- Hybrid ISO 9660 / HFS Plus discs open as HFS, as hybrid HFS discs do.
+- Names are converted from the stored UTF-16 to UTF-8 as stored: decomposed, without
+  normalisation. An unpaired surrogate becomes U+FFFD. `/` (a `:` typed in the Finder
+  shows as `/` in POSIX and is stored that way), `:` and control characters in a name
+  are replaced by `_`, as for HFS. On HFSX, names that differ only in case are separate
+  entries; they collide when extracted onto a case-insensitive filesystem.
+- Forks: the data fork is the file entry and a non-empty resource fork is
+  `<file>/..namedfork/rsrc`, as for HFS. Finder type and creator are in the entry
+  metadata. Forks with more than eight extents are read through the extents overflow
+  file.
+- Hard links: every link is an entry with the content and the Finder type and creator of
+  its target (the indirect node file). The content is held once however many links name
+  it. All links together may yield up to 1024 times the volume size (at least 16 MiB,
+  at most 4 GiB); links beyond that are left out and reported.
+- Not listed: the private metadata directories that hold link targets, `.journal` and
+  `.journal_info_block` of a journaled volume, symbolic links, device nodes, FIFOs and
+  sockets, and files whose forks are both empty. Folders are not entries.
+- Not supported:
+  - Journal replay. The volume is read as it is on disk, so an image of a volume that
+    was not unmounted cleanly can show the state before its last changes.
+  - Transparent compression (decmpfs, as written by `ditto --hfsCompression` and by
+    macOS for system files). Such a file has an empty data fork on disk and keeps its
+    content elsewhere. With the content in its resource fork it appears as an empty
+    file with a resource fork that is not a resource map (reported as one
+    `NestedContainerOpenFailed` diagnostic). With an empty resource fork as well it is
+    not listed, like any file whose forks are both empty.
+  - Extended attributes (the attributes file) and directory hard links.
+  - LZFSE compressed UDIF images (`ULFO`) and encrypted images.
+- Damage: a fork whose extents leave the image is cut short. Left out are files with a
+  fork inside the volume header, the catalog file or the extents overflow file, hard
+  links without a target, and files whose path exceeds 1024 UTF-8 bytes. Every other
+  file is still yielded and the traversal reports one recoverable
+  `ContainerEntriesSkipped` diagnostic. A volume whose forks add up to more than twice
+  its size, or whose catalog file is unreadable, fails to open.
 
 ## ISO 9660 CD-ROM Images
 
@@ -237,6 +295,91 @@ Read-only, `dos` feature (`ContainerFormat::Iso9660`).
   loops, nesting deeper than 32 levels, output above twice the image size) are left
   out; every readable file is still yielded and the traversal reports one recoverable
   `ContainerEntriesSkipped` diagnostic.
+
+## ARJ Archives
+
+Read-only, `dos` feature (`ContainerFormat::Arj`), decoded natively (also in `no_std`
+and `wasm32` builds).
+
+- Detected by the `60 EA` header id at offset 0 followed by a main header of plausible
+  size whose CRC-32 matches. Self-extracting archives (an `.EXE` stub before the main
+  header) are not recognised.
+- Methods 0 (stored), 1-3 (LZ77 with Huffman coding) and 4 (fastest). Every file is
+  checked against its CRC-32. `Metadata::compression_method` is `stored` or
+  `arj1`-`arj4`; archives written on Unix also carry the permission bits as `mode`.
+- Names keep their stored case and order. Names from DOS and OS/2 hosts are converted
+  from code page 437; names from other hosts are taken as UTF-8 when they are valid
+  UTF-8 and as code page 437 otherwise. `\` separators become `/` unless the header
+  says the writer already translated them.
+- Binary and text-mode files are listed; text-mode files are yielded as stored, without
+  line-ending conversion. Directory entries, volume labels and chapter labels are not
+  listed. Archive and file comments, timestamps and extended headers are ignored.
+- Multi-volume sets (`name.arj`, `name.a01`, `name.a02`, ... up to `.a99`) are read
+  through their first volume: it lists the files of every volume and joins files split
+  across them. Later volumes are looked up next to it — in the same directory for a
+  file on disk, in the same parent container when nested — and are not listed again
+  when the volume before them is present. A missing volume leaves out the files that
+  need it and is reported; a volume without its predecessor opens on its own and
+  carries the rest of the set. Data passed as bytes has no siblings, so only whole
+  files are listed.
+- Not supported: garbled (password-protected) files, ARJ-PROTECT recovery data.
+- A file that is garbled, incomplete, corrupt (CRC mismatch, truncated or invalid compressed
+  data), of an unknown method or over the output limit is left out. All unpacked files
+  of one archive together may not exceed 1024 times the archive size (at least 16 MiB).
+  A damaged header ends the listing there and keeps the files found so far. In all
+  these cases every readable file is still yielded and the traversal reports one
+  recoverable `ContainerEntriesSkipped` diagnostic.
+
+## RAR Archives
+
+Read-only, `dos` feature with `std` (`ContainerFormat::Rar`); RAR 2.9/3.x/4.x and RAR 5
+archives. Encrypted files and directories are not listed.
+
+- Multi-volume sets are read through their first volume, which lists the files of every
+  volume and joins files split across them. Both naming schemes are followed:
+  `name.part1.rar`, `name.part2.rar`, ... and `name.rar`, `name.r00`, `name.r01`, ....
+  Later volumes are looked up next to the first one — in the same directory for a file
+  on disk, in the same parent container when nested — and are not listed again when
+  the volume before them is present.
+- A missing volume leaves out the files that need it and is reported as one recoverable
+  `ContainerEntriesSkipped` diagnostic; a volume without its predecessor opens on its
+  own and carries the rest of the set. Data passed as bytes has no siblings, so a file
+  that continues in another volume is left out and reported rather than truncated.
+
+## LHA / LZH Archives
+
+Read-only, `amiga` feature (`ContainerFormat::Lha`). Decoded natively, also in `no_std`
+and `wasm32` builds; the reader was written from the format specification in
+[docs/lha/](lha/README.md).
+
+- Header levels 0, 1, 2 and 3, including extended headers and 64-bit sizes. Detected by
+  a valid entry header at offset 0 (signature, header level and header checksum or
+  CRC), not by the `-lh` / `-lz` signature alone. Self-extracting archives and files
+  with other data before the first header are not detected, nor are archives whose
+  first entry uses a `-pm` method.
+- Compression methods `-lh0-` and `-lz4-` (stored), `-lh1-`, `-lh4-`, `-lh5-`, `-lh6-`,
+  `-lh7-`, `-lzs-` and `-lz5-`. The method is reported as `compression_method`
+  (`lh5`, `lzs`, ...); stored entries report none.
+- Files are yielded as `<archive>/<dir>/.../<name>`, sorted by path. Directory entries
+  (`-lhd-`) and symbolic links are not yielded. Paths are made relative: empty, `.` and
+  `..` components are removed (a level 1 to 3 name header that is only `.` or `..`
+  becomes `_`, so the file does not take the path of its directory), `\`, `:` and
+  control characters in a component become `_`, and a file without a name is called
+  `unnamed`. Names are read as UTF-8 when they are well-formed UTF-8 and as
+  ISO 8859-1 otherwise; other code pages (CP437, Shift-JIS) are not converted. Their
+  bytes `80` to `9F`, which ISO 8859-1 maps to control characters, are written as
+  `%80` to `%9F` so that different stored names stay different.
+- Every entry must decode to exactly its declared length and match its CRC-16. An
+  entry that is corrupt, truncated, over the output limit or of an unsupported method
+  (`-lh2-`, `-lh3-`, `-lhx-`, `-pm0-` to `-pm2-`, ...) is left out. Everything
+  decoded from one archive together may not exceed 1024 times the bytes its entries
+  occupy (headers and packed data; bytes after the end marker do not count). There is
+  no minimum, entries that fail after decoding count like delivered ones, and an
+  entry whose declared length is above what is left is not decoded and does not use
+  any of it. An entry list that ends early (an invalid header, a truncated
+  archive) keeps the entries found so far. In all these cases every readable file is
+  still yielded and the traversal reports one recoverable `ContainerEntriesSkipped`
+  diagnostic.
 
 ## Amiga Disk Images (ADF)
 
@@ -260,8 +403,11 @@ Read-only, `amiga` feature (`ContainerFormat::Adf`).
 - Detected by a leading `PK` signature. Archives behind prepended data (self-extractor
   stubs) are found from the end-of-central-directory record, when the name ends in
   `.zip` or no other format matches.
-- Stored, deflate and bzip2 (method 12) entries always; LZMA and XZ entries with `std` +
-  `xz`. An entry that is encrypted, uses another method, fails its size or CRC-32 check,
+- Stored, deflate, bzip2 (method 12), LZMA (method 14) and XZ (method 95) entries are
+  decoded natively, also in `no_std` and `wasm32` builds. An LZMA entry ends at its
+  end-of-stream marker when general-purpose flag bit 1 announces one and at its declared
+  size otherwise. `Metadata::compression_method` is `deflate`, `bzip2`, `lzma` or `xz`.
+  An entry that is encrypted, uses another method, fails its size or CRC-32 check,
   or shares its data with other entries beyond the archive's own length is left out;
   every readable entry is still yielded and the traversal reports one recoverable
   `ContainerEntriesSkipped` diagnostic.
@@ -282,8 +428,34 @@ Read-only, `amiga` feature (`ContainerFormat::Adf`).
 - Concatenated streams are decoded as one file and bytes after the last stream are
   ignored. A file with a failing block or stream CRC, or one that is truncated, is
   rejected as a whole.
+- Randomised blocks, written by bzip2 0.9.0 and earlier, are decoded.
 - bzip2-compressed blocks in UDIF disk images (`hdiutil` format `UDBZ`) are decoded with
   the `macintosh` feature alone.
+
+## XZ and LZMA Files
+
+`xz` feature (`ContainerFormat::Xz`). Decoded natively, also in `no_std` and `wasm32`
+builds.
+
+- Detected by the six-byte stream header magic, with or without a `.xz` extension.
+- Yields one entry named after the file without its last extension; `.txz` yields
+  `<name>.tar`, which then opens as TAR (`common` feature) like the payload of `.tar.xz`.
+- Concatenated streams are decoded as one file and stream padding between or after them
+  is skipped. Any other bytes after a stream make the file invalid, as they do for the
+  `xz` tool.
+- The LZMA2 and Delta filters are decoded. The CRC32, CRC64 and SHA-256 integrity checks,
+  the header and index CRCs and the index contents are verified; a file failing any of
+  them, or one that is truncated, is rejected as a whole.
+- Not supported: the BCJ (branch/call/jump) filters for executables (`xz --x86`,
+  `--arm64`, ...) and reserved integrity check types.
+- Legacy `.lzma` files (`xz --format=lzma`, LZMA Utils) have no magic and are opened
+  only under a `.lzma` or `.tlz` extension; `.tlz` yields `<name>.tar` like `.txz`. The
+  stream ends at its end marker or at the size in its header, and any byte after it
+  makes the file invalid, as it does for the `xz` tool. The format carries no checksum,
+  so damage that still decodes is not detected. `Metadata::compression_method` is
+  `lzma` for these files and `lzma2` for `.xz`.
+- LZMA-compressed blocks in UDIF disk images (`hdiutil` format `ULMO`), which are `.xz`
+  streams, are decoded with the `macintosh` feature alone.
 
 ## Virtual Path Behavior
 

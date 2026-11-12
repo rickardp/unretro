@@ -1,0 +1,9 @@
+container	sheet	defect
+-	bad-index-beyond-eof.cue	track 2 INDEX 01 at sector 40 of a 30-sector file
+-	bad-backwards-track.cue	track 2 INDEX 01 (sector 10) lies before track 1 INDEX 01 (sector 20) in the same file
+-	bad-backwards-index.cue	track 2 INDEX 01 (sector 10) lies before its own INDEX 00 (sector 20)
+-	bad-dotdot.cue	FILE "../cue/mode1-2048.iso": parent-directory component; the target exists when the directory is named cue
+-	bad-dotdot-backslash.cue	FILE "sub\..\..\cue\mode1-2048.iso": the same with backslash separators
+-	bad-absolute.cue	FILE "/etc/hosts": absolute path
+-	bad-missing-file.cue	FILE "no-such-file.bin": no such sibling
+discs.tar.gz	sub/bad-escape.cue	FILE "../deep.bin": parent-directory component; deep.bin exists at the top of the archive

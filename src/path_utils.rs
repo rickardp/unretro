@@ -51,7 +51,10 @@ use alloc::string::String;
         feature = "amiga",
         feature = "game",
         feature = "dos",
-        feature = "macintosh"
+        feature = "macintosh",
+        feature = "next",
+        feature = "beos",
+        feature = "lisa"
     )
 ))]
 use alloc::vec::Vec;
@@ -112,8 +115,12 @@ pub(crate) fn sanitize_path_component_cow(component: &str) -> Cow<'_, str> {
     feature = "common",
     feature = "amiga",
     feature = "game",
-    feature = "dos"
+    feature = "dos",
+    feature = "next",
+    feature = "beos",
+    feature = "lisa"
 ))]
+#[allow(dead_code)]
 pub fn sanitize_archive_path(path: &str) -> Cow<'_, str> {
     // Fast path: if no component needs changes, borrow the original
     let needs_work = path.split('/').any(|c| {
