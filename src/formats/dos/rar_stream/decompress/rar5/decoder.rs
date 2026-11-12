@@ -88,13 +88,16 @@ impl Rar5Decoder {
     /// * `input` - Compressed data
     /// * `unpacked_size` - Expected decompressed size
     /// * `method` - Compression method (0 = stored, 1-5 = compression levels)
-    /// * `is_solid` - Whether this is part of a solid archive
+    /// * `is_solid` - Whether this file continues the previous file's window
+    /// * `keep_window` - Whether a later file may continue this one's window
+    ///   (any file of a solid archive, including the first)
     pub fn decompress(
         &mut self,
         input: &[u8],
         unpacked_size: u64,
         method: u8,
         is_solid: bool,
+        keep_window: bool,
     ) -> Result<Vec<u8>, DecompressError> {
         if method == 0 {
             return self.decompress_stored(input, unpacked_size);
@@ -111,11 +114,12 @@ impl Rar5Decoder {
         let mut bits = BitDecoder::new(input);
 
         // Decode blocks until we have enough output
-        let new_filters = if is_solid {
+        let new_filters = if is_solid || keep_window {
             self.block_decoder
                 .decode_block(&mut bits, unpacked_size as usize)?
         } else {
-            // Direct output path: no separate window buffer overhead
+            // Direct output path: no separate window buffer overhead. It
+            // leaves no window behind, so nothing can continue from it.
             self.block_decoder
                 .decode_block_direct(&mut bits, unpacked_size as usize)?
         };

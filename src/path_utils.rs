@@ -47,7 +47,7 @@ use alloc::string::String;
     feature = "no_std",
     not(feature = "std"),
     any(
-        all(feature = "common", feature = "__backend_common"),
+        feature = "common",
         feature = "amiga",
         feature = "game",
         feature = "dos",
@@ -109,7 +109,7 @@ pub(crate) fn sanitize_path_component_cow(component: &str) -> Cow<'_, str> {
 /// traversal attacks. Leading empty components (from absolute paths like `/foo`)
 /// are also stripped.
 #[cfg(any(
-    all(feature = "common", feature = "__backend_common"),
+    feature = "common",
     feature = "amiga",
     feature = "game",
     feature = "dos"

@@ -357,10 +357,19 @@ fn extract_files(
     let parsed = parse_virtual_path(path);
 
     // Build the full virtual path that was requested
-    let full_virtual_path = match &parsed.internal_path {
+    let mut full_virtual_path = match &parsed.internal_path {
         Some(internal) => format!("{}/{}", parsed.archive_path, internal),
-        None => parsed.archive_path.clone(),
+        // A directory may be named with a trailing slash; entry paths have none.
+        None => match parsed.archive_path.trim_end_matches('/') {
+            "" => parsed.archive_path.clone(),
+            trimmed => trimmed.to_string(),
+        },
     };
+    let target_is_root = parsed.internal_path.is_none();
+    // A file with no data fork is fork-only when it has a native resource fork.
+    let root_has_empty_data_fork =
+        fs::metadata(&parsed.archive_path).is_ok_and(|meta| meta.is_file() && meta.len() == 0);
+    let mut root_fork_is_target = false;
 
     // Output directory: -C path or current directory.
     let output_root = options
@@ -374,47 +383,201 @@ fn extract_files(
     let mut nonfatal_warnings: Vec<String> = Vec::new();
 
     // Use from_virtual_path which handles prefix filtering automatically.
-    let report = Loader::from_virtual_path(path).visit_with_report(EntryType::Leaves, |entry| {
-        // Compute the relative path
-        //
-        // The stripping logic depends on whether we're extracting:
-        // 1. An entire archive (internal_path=None): strip archive_path
-        // 2. A container inside an archive: strip full path to container
-        // 3. A single file: strip path to parent directory, keep filename
-        //
-        // We determine case 3 when entry.path exactly equals full_virtual_path
-        // (meaning the virtual path pointed to this exact file, not a container)
-        let rel_path = if entry.path == full_virtual_path {
-            // Case 3: exact file match - use just the filename
-            Path::new(entry.path)
-                .file_name()
-                .and_then(|f| f.to_str())
-                .unwrap_or(entry.path)
-        } else {
-            // Case 1 or 2: strip the full virtual path prefix
-            entry
+    // `All` rather than `Leaves`: raw resource forks and fork-only files are
+    // containers, and must be written or skipped whole instead of descended.
+    let mut report =
+        Loader::from_virtual_path(path).visit_with_report(EntryType::All, |entry| {
+            // A fork-only file named as the archive has no owner to attach its
+            // fork to, so the fork becomes the target and its resources are
+            // extracted.
+            if target_is_root
+                && (entry.container_format == Some(unretro::ContainerFormat::ResourceFork)
+                    || root_has_empty_data_fork)
+                && entry.path.strip_suffix("/..namedfork/rsrc") == Some(full_virtual_path.as_str())
+            {
+                full_virtual_path = entry.path.to_string();
+                root_fork_is_target = true;
+                return Ok(VisitAction::Continue);
+            }
+
+            let is_container = entry.container_format.is_some();
+            let is_target = entry.path == full_virtual_path;
+            let below_target = entry
                 .path
                 .strip_prefix(&full_virtual_path)
-                .unwrap_or(entry.path)
-                .trim_start_matches('/')
-        };
+                .is_some_and(|rest| rest.starts_with('/'));
+            // --exec gets the individual resources instead.
+            let is_fork_file = options.exec_command.is_none()
+                && (is_target || below_target)
+                && is_fork_only_file(entry);
+            // Ancestors of the target (and the target, if a container) are only
+            // descended into.
+            if !below_target && !(is_target && (!is_container || is_fork_file)) {
+                return Ok(VisitAction::Continue);
+            }
 
-        // Skip if this is exactly the prefix (the container itself, not its contents)
-        if rel_path.is_empty() {
-            return Ok(VisitAction::Continue);
-        }
+            // Compute the relative path
+            //
+            // The stripping logic depends on whether we're extracting:
+            // 1. An entire archive (internal_path=None): strip archive_path
+            // 2. A container inside an archive: strip full path to container
+            // 3. A single file: strip path to parent directory, keep filename
+            //
+            // We determine case 3 when entry.path exactly equals full_virtual_path
+            // (meaning the virtual path pointed to this exact file, not a container)
+            let rel_path = if entry.path == full_virtual_path {
+                // Case 3: exact file match - use just the filename
+                Path::new(entry.path)
+                    .file_name()
+                    .and_then(|f| f.to_str())
+                    .unwrap_or(entry.path)
+            } else {
+                // Case 1 or 2: strip the full virtual path prefix
+                entry
+                    .path
+                    .strip_prefix(&full_virtual_path)
+                    .unwrap_or(entry.path)
+                    .trim_start_matches('/')
+            };
 
-        // Apply --strip-components
-        let stripped_path = strip_path_components(rel_path, options.strip_components);
+            // Skip if this is exactly the prefix (the container itself, not its contents)
+            if rel_path.is_empty() {
+                return Ok(VisitAction::Continue);
+            }
 
-        // Skip if everything was stripped
-        if stripped_path.is_empty() {
-            return Ok(VisitAction::Continue);
-        }
+            // Apply --strip-components
+            let stripped_path = strip_path_components(rel_path, options.strip_components);
 
-        // If --exec is set, pipe entry data to command instead of writing files.
-        if let Some(ref cmd) = options.exec_command {
-            let sanitized_exec_path = match normalize_output_relative_path(&stripped_path) {
+            // Skip if everything was stripped
+            if stripped_path.is_empty() {
+                return Ok(VisitAction::Continue);
+            }
+
+            // If --exec is set, pipe entry data to command instead of writing files.
+            if let Some(ref cmd) = options.exec_command {
+                if is_container {
+                    return Ok(VisitAction::Continue);
+                }
+                let sanitized_exec_path = match normalize_output_relative_path(&stripped_path) {
+                    Ok(path) => path,
+                    Err(reason) => {
+                        nonfatal_warnings.push(format!(
+                            "skipped unsafe entry path '{}': {}",
+                            stripped_path, reason
+                        ));
+                        return Ok(VisitAction::Continue);
+                    }
+                };
+                let escaped_rel_path = shell_escape_single_quoted(&sanitized_exec_path);
+                let expanded_cmd = cmd.replace("{}", &escaped_rel_path);
+
+                if options.verbose {
+                    println!("exec: {} < {}", expanded_cmd, sanitized_exec_path);
+                }
+
+                match run_exec_command(&expanded_cmd, entry.data) {
+                    Ok(()) => {}
+                    Err(err) => {
+                        nonfatal_warnings.push(format!(
+                            "exec failed for '{}': {}",
+                            sanitized_exec_path, err
+                        ));
+                    }
+                }
+                return Ok(VisitAction::Continue);
+            }
+
+            // Check if this is a resource fork entry
+            // Resource forks have paths like "file/..namedfork/rsrc" or "file/..namedfork/rsrc/TYPE/id"
+            // Note: stripped_path might be just "..namedfork/rsrc" (without leading /)
+            let is_resource_fork = stripped_path.contains("..namedfork/rsrc");
+
+            // If this is a resource fork entry, we may handle it specially
+            if is_resource_fork {
+                // The raw resource fork is at "file/..namedfork/rsrc" or just "..namedfork/rsrc"
+                // (not /TYPE/id subpaths which have content after rsrc)
+                let is_raw_resource_fork = stripped_path.ends_with("/..namedfork/rsrc")
+                    || stripped_path == "..namedfork/rsrc";
+
+                if is_raw_resource_fork && options.preserve_resource_fork {
+                    // Extract the base file path (remove /..namedfork/rsrc suffix)
+                    let base_path = if stripped_path == "..namedfork/rsrc" {
+                        // The data fork file is at the same level - we need to look at rel_path
+                        // to get the actual filename. The parent container gave us this rsrc entry.
+                        // Use entry.path to find the data fork file path.
+                        let data_file = &entry.path[..entry
+                            .path
+                            .rfind("/..namedfork/rsrc")
+                            .unwrap_or(entry.path.len())];
+                        Path::new(data_file)
+                            .file_name()
+                            .and_then(|f| f.to_str())
+                            .unwrap_or("")
+                    } else {
+                        stripped_path
+                            .strip_suffix("/..namedfork/rsrc")
+                            .unwrap_or(&stripped_path)
+                    };
+
+                    // Skip if base_path is empty
+                    if base_path.is_empty() {
+                        return Ok(VisitAction::Continue);
+                    }
+
+                    let sanitized_base = match normalize_output_relative_path(base_path) {
+                        Ok(path) => path,
+                        Err(reason) => {
+                            nonfatal_warnings.push(format!(
+                                "skipped unsafe resource fork path '{}': {}",
+                                base_path, reason
+                            ));
+                            return Ok(VisitAction::Handled);
+                        }
+                    };
+                    let out_base_path = output_root_path.join(&sanitized_base);
+                    if !out_base_path.starts_with(&output_root_path) {
+                        nonfatal_warnings.push(format!(
+                            "skipped unsafe resource fork path '{}': resolved outside output root",
+                            base_path
+                        ));
+                        return Ok(VisitAction::Handled);
+                    }
+
+                    // Try to write resource fork
+                    match attributes::write_resource_fork(&out_base_path, entry.data) {
+                        Ok(()) => {
+                            if options.verbose {
+                                println!("{}/..namedfork/rsrc", out_base_path.display());
+                            }
+                        }
+                        Err(e) => {
+                            // --preserve-resource-fork fails on unsupported filesystems
+                            return Err(unretro::Error::invalid_format(format!(
+                                "{}: {}",
+                                out_base_path.display(),
+                                e
+                            )));
+                        }
+                    }
+
+                    // Return Handled to prevent recursion into the resource fork
+                    // (we wrote the raw data, don't also extract individual resources)
+                    return Ok(VisitAction::Handled);
+                }
+
+                // Without --preserve-resource-fork the fork is skipped: its
+                // resources would need the owning file's path as a directory.
+                if is_raw_resource_fork {
+                    return Ok(VisitAction::Handled);
+                }
+            }
+
+            // Other containers are not written; their contents are.
+            if is_container && !is_fork_file {
+                return Ok(VisitAction::Continue);
+            }
+
+            let sanitized = match normalize_output_relative_path(&stripped_path) {
                 Ok(path) => path,
                 Err(reason) => {
                     nonfatal_warnings.push(format!(
@@ -424,183 +587,80 @@ fn extract_files(
                     return Ok(VisitAction::Continue);
                 }
             };
-            let escaped_rel_path = shell_escape_single_quoted(&sanitized_exec_path);
-            let expanded_cmd = cmd.replace("{}", &escaped_rel_path);
 
-            if options.verbose {
-                println!("exec: {} < {}", expanded_cmd, sanitized_exec_path);
-            }
+            // Make path unique (check against what we've written, not filesystem)
+            let unique_path = make_unique_path(&sanitized, &mut written_paths);
 
-            match run_exec_command(&expanded_cmd, entry.data) {
-                Ok(()) => {}
-                Err(err) => {
-                    nonfatal_warnings.push(format!(
-                        "exec failed for '{}': {}",
-                        sanitized_exec_path, err
-                    ));
-                }
-            }
-            return Ok(VisitAction::Continue);
-        }
-
-        // Check if this is a resource fork entry
-        // Resource forks have paths like "file/..namedfork/rsrc" or "file/..namedfork/rsrc/TYPE/id"
-        // Note: stripped_path might be just "..namedfork/rsrc" (without leading /)
-        let is_resource_fork = stripped_path.contains("..namedfork/rsrc");
-
-        // If this is a resource fork entry, we may handle it specially
-        if is_resource_fork {
-            // The raw resource fork is at "file/..namedfork/rsrc" or just "..namedfork/rsrc"
-            // (not /TYPE/id subpaths which have content after rsrc)
-            let is_raw_resource_fork =
-                stripped_path.ends_with("/..namedfork/rsrc") || stripped_path == "..namedfork/rsrc";
-
-            if is_raw_resource_fork && options.preserve_resource_fork {
-                // Extract the base file path (remove /..namedfork/rsrc suffix)
-                let base_path = if stripped_path == "..namedfork/rsrc" {
-                    // The data fork file is at the same level - we need to look at rel_path
-                    // to get the actual filename. The parent container gave us this rsrc entry.
-                    // Use entry.path to find the data fork file path.
-                    let data_file = &entry.path[..entry
-                        .path
-                        .rfind("/..namedfork/rsrc")
-                        .unwrap_or(entry.path.len())];
-                    Path::new(data_file)
-                        .file_name()
-                        .and_then(|f| f.to_str())
-                        .unwrap_or("")
-                } else {
-                    stripped_path
-                        .strip_suffix("/..namedfork/rsrc")
-                        .unwrap_or(&stripped_path)
-                };
-
-                // Skip if base_path is empty
-                if base_path.is_empty() {
-                    return Ok(VisitAction::Continue);
-                }
-
-                let sanitized_base = match normalize_output_relative_path(base_path) {
-                    Ok(path) => path,
-                    Err(reason) => {
-                        nonfatal_warnings.push(format!(
-                            "skipped unsafe resource fork path '{}': {}",
-                            base_path, reason
-                        ));
-                        return Ok(VisitAction::Handled);
-                    }
-                };
-                let out_base_path = output_root_path.join(&sanitized_base);
-                if !out_base_path.starts_with(&output_root_path) {
-                    nonfatal_warnings.push(format!(
-                        "skipped unsafe resource fork path '{}': resolved outside output root",
-                        base_path
-                    ));
-                    return Ok(VisitAction::Handled);
-                }
-
-                // Try to write resource fork
-                match attributes::write_resource_fork(&out_base_path, entry.data) {
-                    Ok(()) => {
-                        if options.verbose {
-                            println!("{}/..namedfork/rsrc", out_base_path.display());
-                        }
-                    }
-                    Err(e) => {
-                        // --preserve-resource-fork fails on unsupported filesystems
-                        return Err(unretro::Error::invalid_format(format!(
-                            "{}: {}",
-                            out_base_path.display(),
-                            e
-                        )));
-                    }
-                }
-
-                // Return Handled to prevent recursion into the resource fork
-                // (we wrote the raw data, don't also extract individual resources)
-                return Ok(VisitAction::Handled);
-            }
-
-            // If not preserving resource forks, the raw fork entry continues (recurses)
-            // to extract individual resources as regular files
-            if is_raw_resource_fork && !options.preserve_resource_fork {
-                return Ok(VisitAction::Continue);
-            }
-        }
-
-        let sanitized = match normalize_output_relative_path(&stripped_path) {
-            Ok(path) => path,
-            Err(reason) => {
+            // Build full output path
+            let out_path = output_root_path.join(&unique_path);
+            if !out_path.starts_with(&output_root_path) {
                 nonfatal_warnings.push(format!(
-                    "skipped unsafe entry path '{}': {}",
-                    stripped_path, reason
+                    "skipped unsafe entry path '{}': resolved outside output root",
+                    stripped_path
                 ));
                 return Ok(VisitAction::Continue);
             }
-        };
 
-        // Make path unique (check against what we've written, not filesystem)
-        let unique_path = make_unique_path(&sanitized, &mut written_paths);
-
-        // Build full output path
-        let out_path = output_root_path.join(&unique_path);
-        if !out_path.starts_with(&output_root_path) {
-            nonfatal_warnings.push(format!(
-                "skipped unsafe entry path '{}': resolved outside output root",
-                stripped_path
-            ));
-            return Ok(VisitAction::Continue);
-        }
-
-        // Create parent directories
-        if let Some(parent) = out_path.parent() {
-            if !parent.as_os_str().is_empty() {
-                fs::create_dir_all(parent)?;
+            // Create parent directories
+            if let Some(parent) = out_path.parent() {
+                if !parent.as_os_str().is_empty() {
+                    fs::create_dir_all(parent)?;
+                }
             }
-        }
 
-        // Write file data
-        fs::write(&out_path, entry.data)?;
+            // Write file data
+            fs::write(&out_path, entry.data)?;
 
-        // Apply attribute preservation options
-        let out_path_ref = out_path.as_path();
+            // Apply attribute preservation options
+            let out_path_ref = out_path.as_path();
 
-        // Preserve Unix permissions
-        if options.preserve_permissions {
-            if let Some(metadata) = &entry.metadata {
-                if let Some(mode) = &metadata.mode {
-                    if let Err(e) = attributes::set_unix_permissions(out_path_ref, mode) {
-                        eprintln!("Warning: {}: {}", out_path.display(), e);
+            // Preserve Unix permissions
+            if options.preserve_permissions {
+                if let Some(metadata) = &entry.metadata {
+                    if let Some(mode) = &metadata.mode {
+                        if let Err(e) = attributes::set_unix_permissions(out_path_ref, mode) {
+                            eprintln!("Warning: {}: {}", out_path.display(), e);
+                        }
                     }
                 }
             }
-        }
 
-        // Preserve Finder attributes (type/creator codes)
-        #[cfg(feature = "macintosh")]
-        if options.preserve_attributes {
-            if let Some(metadata) = &entry.metadata {
-                if let (Some(type_code), Some(creator_code)) =
-                    (metadata.type_code, metadata.creator_code)
-                {
-                    if let Err(e) =
-                        attributes::set_finder_info(out_path_ref, &type_code, &creator_code)
+            // Preserve Finder attributes (type/creator codes)
+            #[cfg(feature = "macintosh")]
+            if options.preserve_attributes {
+                if let Some(metadata) = &entry.metadata {
+                    if let (Some(type_code), Some(creator_code)) =
+                        (metadata.type_code, metadata.creator_code)
                     {
-                        eprintln!("Warning: {}: {}", out_path.display(), e);
+                        if let Err(e) =
+                            attributes::set_finder_info(out_path_ref, &type_code, &creator_code)
+                        {
+                            eprintln!("Warning: {}: {}", out_path.display(), e);
+                        }
                     }
                 }
             }
-        }
 
-        // Record this path as written
-        written_paths.insert(unique_path);
+            // Record this path as written
+            written_paths.insert(unique_path);
 
-        if options.verbose {
-            println!("{}", out_path.display());
-        }
+            if options.verbose {
+                println!("{}", out_path.display());
+            }
 
-        Ok(VisitAction::Continue)
-    })?;
+            Ok(if is_fork_file {
+                VisitAction::Handled
+            } else {
+                VisitAction::Continue
+            })
+        })?;
+
+    // The empty data fork is not a container, but the fork was the archive.
+    if root_fork_is_target && root_has_empty_data_fork {
+        report
+            .diagnostics
+            .retain(|diag| diag.code != unretro::TraversalDiagnosticCode::RootUnsupportedFormat);
+    }
 
     if !nonfatal_warnings.is_empty() {
         eprintln!(
@@ -616,6 +676,17 @@ fn extract_files(
     }
 
     Ok(report)
+}
+
+// A file that is nothing but a resource fork (bare fork or standalone
+// AppleDouble) is extracted as the plain file it is.
+fn is_fork_only_file(entry: &unretro::Entry<'_>) -> bool {
+    use unretro::ContainerFormat;
+    match entry.container_format {
+        Some(ContainerFormat::AppleDouble) => true,
+        Some(ContainerFormat::ResourceFork) => !entry.path.ends_with("/..namedfork/rsrc"),
+        _ => false,
+    }
 }
 
 fn strip_path_components(path: &str, n: usize) -> String {
@@ -756,6 +827,16 @@ fn run_exec_command(cmd: &str, data: &[u8]) -> Result<(), Box<dyn std::error::Er
     Ok(())
 }
 
+// A file whose data fork is not a container can still list its native
+// resource fork; that is not a failure.
+fn forgive_unsupported_root_with_entries(report: &mut VisitReport) {
+    if report.visited_entries > 0 {
+        report
+            .diagnostics
+            .retain(|diag| diag.code != unretro::TraversalDiagnosticCode::RootUnsupportedFormat);
+    }
+}
+
 fn handle_cli_report(report: &VisitReport) -> Result<(), String> {
     if let Some(root_failure) = report
         .diagnostics
@@ -803,7 +884,7 @@ fn print_list_tsv(path: &str, numeric: bool) -> Result<VisitReport, Box<dyn std:
     let mut rows: Vec<String> = Vec::new();
 
     // EntryType::Leaves means we only see non-container entries
-    let report = Loader::from_virtual_path(path)
+    let mut report = Loader::from_virtual_path(path)
         .with_numeric_identifiers(numeric)
         .visit_with_report(EntryType::Leaves, |entry| {
             // Get relative path
@@ -842,6 +923,7 @@ fn print_list_tsv(path: &str, numeric: bool) -> Result<VisitReport, Box<dyn std:
             Ok(VisitAction::Continue)
         })?;
 
+    forgive_unsupported_root_with_entries(&mut report);
     if report.has_root_failures() {
         return Ok(report);
     }
@@ -938,7 +1020,7 @@ fn print_list_json(path: &str, numeric: bool) -> Result<VisitReport, Box<dyn std
     let mut path_to_indices: HashMap<String, Vec<usize>> = HashMap::new();
 
     // Use EntryType::All to see containers before their children
-    let report = Loader::from_virtual_path(path)
+    let mut report = Loader::from_virtual_path(path)
         .with_numeric_identifiers(numeric)
         .visit_with_report(EntryType::All, |entry| {
             let rel_path = entry
@@ -958,15 +1040,15 @@ fn print_list_json(path: &str, numeric: bool) -> Result<VisitReport, Box<dyn std
                 .unwrap_or(entry.container_path)
                 .trim_start_matches('/');
 
-            // Find parent node (with EntryType::All, parent containers are visited first)
-            let parent_indices = if rel_container_path.is_empty() {
-                vec![]
-            } else {
-                path_to_indices
-                    .get(rel_container_path)
-                    .cloned()
-                    .unwrap_or_default()
-            };
+            // Find parent node (with EntryType::All, parent containers are visited first).
+            // A fork nests under the file it belongs to; depending on the source,
+            // its container is that file or the archive holding both.
+            let parent_indices = rel_path
+                .strip_suffix("/..namedfork/rsrc")
+                .and_then(|owner| path_to_indices.get(owner))
+                .or_else(|| path_to_indices.get(rel_container_path))
+                .cloned()
+                .unwrap_or_default();
 
             // Extract entry name from path
             let entry_name = rel_path.rsplit('/').next().unwrap_or(rel_path);
@@ -1003,6 +1085,7 @@ fn print_list_json(path: &str, numeric: bool) -> Result<VisitReport, Box<dyn std
 
     root.format = report.root_format;
 
+    forgive_unsupported_root_with_entries(&mut report);
     if report.has_root_failures() {
         return Ok(report);
     }
@@ -1080,7 +1163,7 @@ fn print_usage(program: &str) {
     eprintln!("    archive.zip/inner.sit/a  extracts just file 'a'");
     eprintln!();
     eprintln!(" Supported formats:");
-    eprintln!("  ZIP, LHA, TAR, GZIP, BinHex (.hqx), StuffIt (.sit), MacBinary,");
+    eprintln!("  ZIP, LHA, TAR, GZIP, BZIP2, BinHex (.hqx), StuffIt (.sit), MacBinary,");
     eprintln!("  AppleSingle, AppleDouble, HFS disk images, Mac Resource Forks, SCUMM");
 }
 

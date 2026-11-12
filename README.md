@@ -64,15 +64,23 @@ Default features are `std` + `full`.
 
 | Feature | Formats |
 |---|---|
-| `common` | ZIP, GZIP, TAR |
+| `common` | ZIP, GZIP, BZIP2, TAR |
 | `xz` | XZ |
 | `macintosh` | HFS, StuffIt, CompactPro, BinHex, MacBinary, AppleSingle, AppleDouble, Resource Fork |
-| `amiga` | LHA/LZH |
-| `game` | SCUMM, WAD, PAK, Wolf3D |
-| `dos` | FAT, MBR, GPT, RAR |
+| `amiga` | LHA/LZH, ADF (OFS/FFS disk images) |
+| `game` | SCUMM (incl. `MONSTER.SOU` speech bundles), iMUSE bundles, WAD, PAK, Wolf3D |
+| `dos` | FAT, MBR, GPT, ISO 9660 (Joliet, Rock Ridge, raw 2352-byte sectors), RAR |
 | `full` / `all` | `common` + `xz` + `macintosh` + `amiga` + `game` + `dos` |
 
-Feature flags are described in [Cargo.toml](Cargo.toml).
+Feature flags are described in [Cargo.toml](Cargo.toml). ZIP (stored, deflate and bzip2), GZIP,
+BZIP2 and TAR are decoded natively and are available wherever `common` is enabled, including
+`no_std` and `wasm32` builds. LZMA and XZ entries inside ZIP need `std` + `xz`. zlib- and
+bzip2-compressed UDIF disk image blocks are decoded natively wherever `macintosh` is enabled.
+StuffIt (classic `SIT!` and StuffIt 5; methods 0, 1, 2, 3, 13 and 15, and 14 with `common`)
+is likewise decoded natively wherever `macintosh` is enabled, including `no_std` and
+`wasm32`. The reader was written from the format specification in
+[docs/stuffit/](docs/stuffit/README.md). The `stuffit` feature is a no-op kept for
+existing feature lists.
 
 Classic Mac resources always appear as `<owner>/..namedfork/rsrc/<TYPE>/<name or #id>`,
 whether the fork comes from MacBinary/AppleSingle/archives/HFS, an AppleDouble sidecar

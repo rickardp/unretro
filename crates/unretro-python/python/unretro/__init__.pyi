@@ -28,6 +28,11 @@ class ContainerFormat:
     Fat: ContainerFormat
     Mbr: ContainerFormat
     Gpt: ContainerFormat
+    ScummSpeech: ContainerFormat
+    ImuseBundle: ContainerFormat
+    Iso9660: ContainerFormat
+    Adf: ContainerFormat
+    Bzip2: ContainerFormat
     Unknown: ContainerFormat
 
     @property
@@ -265,7 +270,13 @@ class Loader:
         ...
 
     def __iter__(self) -> ArchiveIterator:
-        """Iterate over entries in the archive."""
+        """
+        Iterate over entries in the archive.
+
+        Raises:
+            RuntimeError: While iterating, if the root cannot be opened, is not
+                a supported container, or fails during traversal.
+        """
         ...
 
 def detect_format(path: str) -> Optional[ContainerFormat]:
@@ -327,6 +338,8 @@ def open(path: str, *, max_depth: int = 32) -> Entry:
 
     Raises:
         FileNotFoundError: If the path doesn't exist or contains no files.
+        OSError: If the root file exists but cannot be read.
+        RuntimeError: If the root file is not a supported container or is corrupt.
 
     Example:
         >>> with unretro.open("archive.zip/readme.txt") as f:

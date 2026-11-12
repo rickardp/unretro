@@ -244,6 +244,15 @@ fn test_detect_format_gzip() {
 }
 
 #[test]
+fn test_detect_format_bzip2() {
+    let header = b"BZh9\x31\x41\x59\x26\x53\x59";
+    for name in ["test.bz2", "test"] {
+        let format = unretro::detect_format(name, Some(header));
+        assert_eq!(format, Some(unretro::ContainerFormat::Bzip2));
+    }
+}
+
+#[test]
 fn test_detect_format_xz() {
     // XZ magic: FD 37 7A 58 5A 00
     let format = unretro::detect_format("test.xz", Some(&[0xFD, 0x37, 0x7A, 0x58, 0x5A, 0x00]));
@@ -335,6 +344,22 @@ fn test_visit_with_report_root_open_failure_is_reported() {
             .iter()
             .any(|diag| diag.code == TraversalDiagnosticCode::RootOpenFailed)
     );
+}
+
+#[test]
+fn test_empty_zip_is_detected_and_traverses_cleanly() {
+    let mut zip_data = Vec::new();
+    zip::ZipWriter::new(std::io::Cursor::new(&mut zip_data))
+        .finish()
+        .unwrap();
+    assert!(zip_data.starts_with(b"PK\x05\x06"));
+
+    let report = Loader::from_bytes(zip_data, "empty.zip")
+        .visit_with_report(EntryType::Leaves, |_| Ok(VisitAction::Continue))
+        .unwrap();
+    assert_eq!(report.root_format, Some(unretro::ContainerFormat::Zip));
+    assert_eq!(report.visited_entries, 0);
+    assert!(report.diagnostics.is_empty(), "{:?}", report.diagnostics);
 }
 
 #[test]
@@ -1066,7 +1091,8 @@ fn build_fork(resources: &[(&[u8; 4], i16, &[u8])]) -> Vec<u8> {
             None => types.push((rtype, vec![(*id, off)])),
         }
     }
-    let mut list = ((types.len() as u16) - 1).to_be_bytes().to_vec();
+    // No resources gives the empty-map placeholder macOS writes into sidecars.
+    let mut list = (types.len() as u16).wrapping_sub(1).to_be_bytes().to_vec();
     let mut refs = Vec::new();
     let base = 2 + 8 * types.len();
     for (rtype, items) in &types {
@@ -1139,14 +1165,19 @@ impl Drop for TempDir {
     }
 }
 
-/// Leaf paths relative to `root`, plus type/creator where present.
+// Leaf paths relative to `root`, plus type/creator where present.
 fn leaves_with_type(root: &std::path::Path) -> Vec<(String, Option<String>)> {
-    let prefix = format!("{}/", root.display());
+    let root_str = root.display().to_string();
     let mut out = Vec::new();
     Loader::from_path(root)
         .with_numeric_identifiers(true)
         .visit(EntryType::Leaves, |e| {
-            let rel = e.path.strip_prefix(&prefix).unwrap_or(e.path).to_string();
+            // Windows joins directory entries with `\`.
+            let rel = e
+                .path
+                .strip_prefix(&root_str)
+                .map_or(e.path, |r| r.trim_start_matches(['/', '\\']))
+                .replace('\\', "/");
             let tc = e
                 .metadata
                 .and_then(|m| m.type_code.zip(m.creator_code))
@@ -1200,6 +1231,83 @@ fn test_directory_lone_sidecar_is_standalone_apple_double() {
         vec![
             ("._orphan/..namedfork/rsrc/MENU/#128".to_string(), None),
             ("app.rsrc/..namedfork/rsrc/MENU/#128".to_string(), None),
+        ]
+    );
+}
+
+#[test]
+fn test_apple_double_without_valid_fork_stays_leaf() {
+    let dir = TempDir::new("ad-nofork");
+    // Finder-info-only sidecar for a directory, as in `__MACOSX/._Folder`.
+    dir.write("._Folder", &build_apple_double(b"fldrMACS", &[]));
+    dir.write("broken.rsrc", &build_apple_double(b"APPLtest", &[0xFF; 64]));
+    assert_eq!(
+        leaves_with_type(&dir.0),
+        vec![
+            ("._Folder".to_string(), None),
+            ("broken.rsrc".to_string(), None)
+        ]
+    );
+}
+
+#[test]
+fn test_directory_finder_info_sidecars_are_hidden() {
+    let finder_only = build_apple_double(b"fldrMACS", &[]);
+    let dir = TempDir::new("ad-dirinfo");
+    dir.write("Sub/file", b"x");
+    dir.write("._Sub", &finder_only);
+    assert_eq!(
+        leaves_with_type(&dir.0),
+        vec![("Sub/file".to_string(), None)]
+    );
+
+    // Finder zips carry the same sidecar for every folder under `__MACOSX/`.
+    let mut zip_data = Vec::new();
+    {
+        use std::io::Write;
+        let mut writer = zip::ZipWriter::new(std::io::Cursor::new(&mut zip_data));
+        let options = zip::write::SimpleFileOptions::default()
+            .compression_method(zip::CompressionMethod::Stored);
+        writer.start_file("src/Sub/file", options).unwrap();
+        writer.write_all(b"x").unwrap();
+        writer.start_file("__MACOSX/src/._Sub", options).unwrap();
+        writer.write_all(&finder_only).unwrap();
+        writer.finish().unwrap();
+    }
+    let mut paths = Vec::new();
+    Loader::from_bytes(zip_data, "src.zip")
+        .visit(EntryType::Leaves, |e| {
+            paths.push(e.path.to_string());
+            Ok(VisitAction::Continue)
+        })
+        .unwrap();
+    assert_eq!(paths, ["src.zip/src/Sub/file"]);
+}
+
+// On non-HFS volumes macOS synthesizes `app/..namedfork/rsrc` from `._app`;
+// APFS stores both separately. Either way the fork must appear once.
+#[cfg(target_os = "macos")]
+#[test]
+fn test_directory_native_fork_not_duplicated_by_sidecar() {
+    let fork = build_fork(&[(b"CODE", 1, &[0x4E, 0x75])]);
+    let dir = TempDir::new("ad-native");
+    dir.write("app", b"data fork");
+    if std::fs::write(dir.0.join("app/..namedfork/rsrc"), &fork).is_err() {
+        return; // filesystem without native forks
+    }
+    assert_eq!(
+        leaves_with_type(&dir.0),
+        vec![
+            ("app".to_string(), None),
+            ("app/..namedfork/rsrc/CODE/#1".to_string(), None),
+        ]
+    );
+    dir.write("._app", &build_apple_double(b"APPLtest", &fork));
+    assert_eq!(
+        leaves_with_type(&dir.0),
+        vec![
+            ("app".to_string(), Some("APPLtest".to_string())),
+            ("app/..namedfork/rsrc/CODE/#1".to_string(), None),
         ]
     );
 }
@@ -1286,4 +1394,903 @@ fn test_bare_resource_fork_file() {
             ("noise.bin".to_string(), None),
         ]
     );
+}
+
+// ============================================================================
+// ISO 9660 CD-ROM images
+// ============================================================================
+
+fn iso_both32(value: u32) -> [u8; 8] {
+    let mut out = [0u8; 8];
+    out[..4].copy_from_slice(&value.to_le_bytes());
+    out[4..].copy_from_slice(&value.to_be_bytes());
+    out
+}
+
+fn iso_record(name: &[u8], lba: u32, size: u32, flags: u8) -> Vec<u8> {
+    let mut record = vec![0u8; 33];
+    record[2..10].copy_from_slice(&iso_both32(lba));
+    record[10..18].copy_from_slice(&iso_both32(size));
+    record[25] = flags;
+    record[32] = name.len() as u8;
+    record.extend_from_slice(name);
+    if record.len() % 2 == 1 {
+        record.push(0);
+    }
+    record[0] = record.len() as u8;
+    record
+}
+
+/// Cooked ISO 9660 image without extensions: primary descriptor at sector 16,
+/// root directory at 18, one directory sector per `dir/name` prefix, then one
+/// sector per file. Names are written as given, plus `;1` for files.
+fn build_iso(files: &[(&str, &[u8])]) -> Vec<u8> {
+    const SECTOR: usize = 2048;
+    const DIRECTORY: u8 = 0x02;
+    const ROOT: u32 = 18;
+
+    let mut dir_names: Vec<&str> = files
+        .iter()
+        .filter_map(|(path, _)| path.split_once('/').map(|(dir, _)| dir))
+        .collect();
+    dir_names.dedup();
+    let dir_lba = |dir: &str| ROOT + 1 + dir_names.iter().position(|d| *d == dir).unwrap() as u32;
+    let first_file = ROOT + 1 + dir_names.len() as u32;
+
+    let mut image = vec![0u8; (first_file as usize + files.len()) * SECTOR];
+    let mut dirs: Vec<Vec<u8>> = (0..=dir_names.len() as u32)
+        .map(|i| {
+            let mut dir = iso_record(&[0], ROOT + i, SECTOR as u32, DIRECTORY);
+            dir.extend(iso_record(&[1], ROOT, SECTOR as u32, DIRECTORY));
+            dir
+        })
+        .collect();
+    for dir in &dir_names {
+        let record = iso_record(dir.as_bytes(), dir_lba(dir), SECTOR as u32, DIRECTORY);
+        dirs[0].extend(record);
+    }
+    for (i, (path, data)) in files.iter().enumerate() {
+        assert!(data.len() <= SECTOR, "file too large for build_iso");
+        let lba = first_file + i as u32;
+        let (dir, name) = match path.split_once('/') {
+            Some((dir, name)) => ((dir_lba(dir) - ROOT) as usize, name),
+            None => (0, *path),
+        };
+        dirs[dir].extend(iso_record(
+            format!("{name};1").as_bytes(),
+            lba,
+            data.len() as u32,
+            0,
+        ));
+        image[lba as usize * SECTOR..][..data.len()].copy_from_slice(data);
+    }
+    for (i, dir) in dirs.iter().enumerate() {
+        assert!(dir.len() <= SECTOR, "directory too large for build_iso");
+        image[(ROOT as usize + i) * SECTOR..][..dir.len()].copy_from_slice(dir);
+    }
+
+    let primary = &mut image[16 * SECTOR..17 * SECTOR];
+    primary[0] = 1;
+    primary[1..6].copy_from_slice(b"CD001");
+    primary[6] = 1;
+    primary[40..72].fill(b' ');
+    primary[40..48].copy_from_slice(b"UNRETRO1");
+    primary[128..130].copy_from_slice(&(SECTOR as u16).to_le_bytes());
+    primary[130..132].copy_from_slice(&(SECTOR as u16).to_be_bytes());
+    primary[156..190].copy_from_slice(&iso_record(&[0], ROOT, SECTOR as u32, DIRECTORY));
+    let terminator = &mut image[17 * SECTOR..18 * SECTOR];
+    terminator[0] = 255;
+    terminator[1..6].copy_from_slice(b"CD001");
+    terminator[6] = 1;
+    image
+}
+
+/// Wraps cooked sectors in raw 2352-byte MODE1 sectors.
+fn iso_raw_sectors(cooked: &[u8]) -> Vec<u8> {
+    let mut raw = Vec::new();
+    for sector in cooked.chunks(2048) {
+        let start = raw.len();
+        raw.resize(start + 2352, 0);
+        raw[start + 1..start + 11].fill(0xFF);
+        raw[start + 15] = 1;
+        raw[start + 16..start + 16 + sector.len()].copy_from_slice(sector);
+    }
+    raw
+}
+
+fn iso_leaves(data: Vec<u8>, name: &str) -> (Vec<(String, Vec<u8>)>, unretro::VisitReport) {
+    let mut leaves = Vec::new();
+    let report = Loader::from_bytes(data, name)
+        .visit_with_report(EntryType::Leaves, |entry| {
+            leaves.push((entry.path.to_string(), entry.data.to_vec()));
+            Ok(VisitAction::Continue)
+        })
+        .unwrap();
+    (leaves, report)
+}
+
+#[test]
+fn test_iso9660_detection_and_traversal() {
+    let image = build_iso(&[
+        ("README.TXT", b"hello cd-rom"),
+        ("DATA/LEVEL1.DAT", b"level one"),
+        ("DATA/NOEXT.", b"no extension"),
+    ]);
+
+    assert_eq!(
+        unretro::detect_format("disc.iso", Some(&image)),
+        Some(unretro::ContainerFormat::Iso9660)
+    );
+    // Content sniffing, without the extension hint.
+    assert_eq!(
+        unretro::detect_format("disc.dat", Some(&image)),
+        Some(unretro::ContainerFormat::Iso9660)
+    );
+
+    let expected = |root: &str| {
+        vec![
+            (format!("{root}/data/level1.dat"), b"level one".to_vec()),
+            (format!("{root}/data/noext"), b"no extension".to_vec()),
+            (format!("{root}/readme.txt"), b"hello cd-rom".to_vec()),
+        ]
+    };
+    let (leaves, report) = iso_leaves(image.clone(), "disc.iso");
+    assert!(report.diagnostics.is_empty(), "{:?}", report.diagnostics);
+    assert_eq!(leaves, expected("disc.iso"));
+
+    // Raw 2352-byte sector dump of the same disc.
+    let raw = iso_raw_sectors(&image);
+    assert_eq!(
+        unretro::detect_format("disc.bin", Some(&raw)),
+        Some(unretro::ContainerFormat::Iso9660)
+    );
+    let (leaves, report) = iso_leaves(raw, "disc.bin");
+    assert!(report.diagnostics.is_empty(), "{:?}", report.diagnostics);
+    assert_eq!(leaves, expected("disc.bin"));
+}
+
+#[test]
+fn test_iso9660_detection_precedence() {
+    let image = build_iso(&[("FILE.TXT", b"data")]);
+
+    // isohybrid: the partition table in the system area wins.
+    let mut hybrid = image.clone();
+    hybrid[446 + 4] = 0x17;
+    hybrid[446 + 8..446 + 12].copy_from_slice(&1u32.to_le_bytes());
+    hybrid[446 + 12..446 + 16].copy_from_slice(&8u32.to_le_bytes());
+    hybrid[510] = 0x55;
+    hybrid[511] = 0xAA;
+    assert_eq!(
+        unretro::detect_format("hybrid.iso", Some(&hybrid)),
+        Some(unretro::ContainerFormat::Mbr)
+    );
+
+    // A FAT boot sector still wins over a "CD001" further in.
+    let mut fat = image.clone();
+    fat[..3].copy_from_slice(&[0xEB, 0x3C, 0x90]);
+    fat[11..13].copy_from_slice(&512u16.to_le_bytes());
+    fat[13] = 1;
+    fat[14..16].copy_from_slice(&1u16.to_le_bytes());
+    fat[16] = 2;
+    fat[17..19].copy_from_slice(&112u16.to_le_bytes());
+    fat[19..21].copy_from_slice(&720u16.to_le_bytes());
+    fat[21] = 0xF0;
+    fat[22..24].copy_from_slice(&2u16.to_le_bytes());
+    fat[510] = 0x55;
+    fat[511] = 0xAA;
+    assert_eq!(
+        unretro::detect_format("floppy.iso", Some(&fat)),
+        Some(unretro::ContainerFormat::Fat)
+    );
+
+    // So does the HFS side of a hybrid Mac disc.
+    let mut hfs = image;
+    hfs[1024..1026].copy_from_slice(b"BD");
+    assert_eq!(
+        unretro::detect_format("mac.iso", Some(&hfs)),
+        Some(unretro::ContainerFormat::Hfs)
+    );
+}
+
+#[test]
+fn test_iso9660_unreadable_entries_are_reported_and_other_files_survive() {
+    // Sectors: 18 = root directory, 19 = "A.TXT", 20 = "B.TXT".
+    let mut image = build_iso(&[("A.TXT", b"good data"), ("B.TXT", b"interleaved")]);
+    let b_record = 18 * 2048 + 34 + 34 + 40;
+    assert_eq!(&image[b_record + 33..b_record + 38], b"B.TXT");
+    image[b_record + 26] = 1; // file unit size: interleaved mode
+
+    let (leaves, report) = iso_leaves(image.clone(), "disc.iso");
+    assert_eq!(
+        leaves,
+        vec![("disc.iso/a.txt".to_string(), b"good data".to_vec())]
+    );
+    assert!(!report.has_root_failures());
+    assert_eq!(report.diagnostics.len(), 1);
+    assert_eq!(
+        report.diagnostics[0].code,
+        TraversalDiagnosticCode::ContainerEntriesSkipped
+    );
+    assert!(
+        report.diagnostics[0].message.contains("interleaved"),
+        "{}",
+        report.diagnostics[0].message
+    );
+
+    // Nested in another container it is reported the same way.
+    let (leaves, report) = iso_leaves(build_zip(&[("disc.iso", &image)]), "outer.zip");
+    assert_eq!(
+        leaves,
+        vec![(
+            "outer.zip/disc.iso/a.txt".to_string(),
+            b"good data".to_vec()
+        )]
+    );
+    assert!(!report.has_root_failures());
+    assert!(
+        report
+            .diagnostics
+            .iter()
+            .any(|d| d.code == TraversalDiagnosticCode::ContainerEntriesSkipped)
+    );
+}
+
+// ============================================================================
+// Forks inside archives: traversal shape and CLI extraction
+// ============================================================================
+
+fn build_zip(files: &[(&str, &[u8])]) -> Vec<u8> {
+    use std::io::Write;
+    let mut out = Vec::new();
+    let mut writer = zip::ZipWriter::new(std::io::Cursor::new(&mut out));
+    let options =
+        zip::write::SimpleFileOptions::default().compression_method(zip::CompressionMethod::Stored);
+    for (name, data) in files {
+        writer.start_file(*name, options).unwrap();
+        writer.write_all(data).unwrap();
+    }
+    writer.finish().unwrap();
+    out
+}
+
+// `(path, container_path, format)` of every entry, in visit order.
+fn all_entries(
+    data: Vec<u8>,
+    name: &str,
+) -> Vec<(String, String, Option<unretro::ContainerFormat>)> {
+    let mut seen = Vec::new();
+    Loader::from_bytes(data, name)
+        .with_numeric_identifiers(true)
+        .visit(EntryType::All, |e| {
+            seen.push((
+                e.path.to_string(),
+                e.container_path.to_string(),
+                e.container_format,
+            ));
+            Ok(VisitAction::Continue)
+        })
+        .unwrap();
+    seen
+}
+
+// Every entry's container is the root or a container yielded before it.
+fn assert_containers_were_yielded(
+    root: &str,
+    entries: &[(String, String, Option<unretro::ContainerFormat>)],
+) {
+    for (i, (path, container, _)) in entries.iter().enumerate() {
+        assert!(
+            container == root
+                || entries[..i]
+                    .iter()
+                    .any(|(p, _, f)| p == container && f.is_some()),
+            "{path}: container {container} was never yielded"
+        );
+    }
+}
+
+#[test]
+fn test_bare_resource_fork_in_archive_yields_its_fork_entry() {
+    use unretro::ContainerFormat::ResourceFork;
+    let fork = build_fork(&[(b"CODE", 1, &[0x4E, 0x75])]);
+    let zip = build_zip(&[("dir/app.rsrc", &fork), ("other.txt", b"hello")]);
+
+    let seen = all_entries(zip, "n.zip");
+    let entry =
+        |path: &str, container: &str, format| (path.to_string(), container.to_string(), format);
+    assert_eq!(
+        seen,
+        vec![
+            entry("n.zip/dir/app.rsrc", "n.zip", Some(ResourceFork)),
+            entry(
+                "n.zip/dir/app.rsrc/..namedfork/rsrc",
+                "n.zip/dir/app.rsrc",
+                Some(ResourceFork)
+            ),
+            entry(
+                "n.zip/dir/app.rsrc/..namedfork/rsrc/CODE/#1",
+                "n.zip/dir/app.rsrc/..namedfork/rsrc",
+                None
+            ),
+            entry("n.zip/other.txt", "n.zip", None),
+        ]
+    );
+    assert_containers_were_yielded("n.zip", &seen);
+
+    // The same holds when the fork file is the traversal root.
+    let seen = all_entries(fork, "app.rsrc");
+    assert_eq!(
+        seen,
+        vec![
+            entry("app.rsrc/..namedfork/rsrc", "app.rsrc", Some(ResourceFork)),
+            entry(
+                "app.rsrc/..namedfork/rsrc/CODE/#1",
+                "app.rsrc/..namedfork/rsrc",
+                None
+            ),
+        ]
+    );
+}
+
+#[test]
+fn test_sidecar_fork_in_archive_traversal_shape() {
+    use unretro::ContainerFormat::ResourceFork;
+    let fork = build_fork(&[(b"CODE", 1, &[0x4E, 0x75])]);
+    let ad = build_apple_double(b"APPLtest", &fork);
+    let zip = build_zip(&[("app", b"data fork"), ("__MACOSX/._app", &ad)]);
+
+    let seen = all_entries(zip.clone(), "t.zip");
+    let entry =
+        |path: &str, container: &str, format| (path.to_string(), container.to_string(), format);
+    assert_eq!(
+        seen,
+        vec![
+            entry("t.zip/app", "t.zip", None),
+            entry("t.zip/app/..namedfork/rsrc", "t.zip", Some(ResourceFork)),
+            entry(
+                "t.zip/app/..namedfork/rsrc/CODE/#1",
+                "t.zip/app/..namedfork/rsrc",
+                None
+            ),
+        ]
+    );
+    assert_containers_were_yielded("t.zip", &seen);
+
+    // Leaves: the raw fork is a container, so only its resources show up.
+    let mut leaves = Vec::new();
+    Loader::from_bytes(zip, "t.zip")
+        .with_numeric_identifiers(true)
+        .visit(EntryType::Leaves, |e| {
+            leaves.push(e.path.to_string());
+            Ok(VisitAction::Continue)
+        })
+        .unwrap();
+    assert_eq!(leaves, ["t.zip/app", "t.zip/app/..namedfork/rsrc/CODE/#1"]);
+}
+
+// macOS writes a fork with an empty map into `._name` on non-HFS volumes.
+#[test]
+fn test_sidecar_with_empty_fork_yields_no_fork_entry() {
+    let blank = build_fork(&[]);
+    assert_eq!(blank.len(), 286);
+    let paired = build_apple_double(b"APPLtest", &blank);
+    let orphan = build_apple_double(b"TEXTttxt", &blank);
+    let zip = build_zip(&[
+        ("app", b"data fork"),
+        ("._app", &paired),
+        ("._orphan", &orphan),
+        ("__MACOSX/sub/._gone", &orphan),
+    ]);
+
+    // The companion has no fork, the paired sidecar stays hidden, and the
+    // orphan is an ordinary file rather than an empty container.
+    let entry =
+        |path: &str, container: &str, format| (path.to_string(), container.to_string(), format);
+    assert_eq!(
+        all_entries(zip.clone(), "e.zip"),
+        vec![
+            entry("e.zip/._orphan", "e.zip", None),
+            entry("e.zip/app", "e.zip", None),
+        ]
+    );
+
+    let mut leaves = Vec::new();
+    Loader::from_bytes(zip, "e.zip")
+        .visit(EntryType::Leaves, |e| {
+            let type_code = e.metadata.and_then(|m| m.type_code);
+            leaves.push((e.path.to_string(), e.data.to_vec(), type_code));
+            Ok(VisitAction::Continue)
+        })
+        .unwrap();
+    assert_eq!(
+        leaves,
+        vec![
+            ("e.zip/._orphan".to_string(), orphan.clone(), None),
+            (
+                "e.zip/app".to_string(),
+                b"data fork".to_vec(),
+                Some(*b"APPL")
+            ),
+        ]
+    );
+
+    let dir = TempDir::new("ad-blank");
+    dir.write("app", b"data fork");
+    dir.write("._app", &paired);
+    dir.write("._orphan", &orphan);
+    assert_eq!(
+        leaves_with_type(&dir.0),
+        vec![
+            ("._orphan".to_string(), None),
+            ("app".to_string(), Some("APPLtest".to_string())),
+        ]
+    );
+}
+
+// ============================================================================
+// Amiga ADF disk images
+// ============================================================================
+
+/// 880 KB FFS floppy image. A `dir/name` path puts the file in a directory
+/// created on first use. Names are written as Latin-1; files must fit the 72
+/// block pointers of a header block. Blocks are allocated in order from 2:
+/// header first, then data.
+fn build_adf(files: &[(&str, &[u8])]) -> Vec<u8> {
+    const BLOCK: usize = 512;
+    const ROOT: usize = 880;
+
+    fn put(image: &mut [u8], block: usize, offset: usize, value: u32) {
+        let at = block * BLOCK + offset;
+        image[at..at + 4].copy_from_slice(&value.to_be_bytes());
+    }
+    fn get(image: &[u8], block: usize, offset: usize) -> u32 {
+        let at = block * BLOCK + offset;
+        u32::from_be_bytes(image[at..at + 4].try_into().unwrap())
+    }
+    fn seal(image: &mut [u8], block: usize) {
+        put(image, block, 20, 0);
+        let sum = image[block * BLOCK..(block + 1) * BLOCK]
+            .chunks_exact(4)
+            .fold(0u32, |s, c| {
+                s.wrapping_add(u32::from_be_bytes(c.try_into().unwrap()))
+            });
+        put(image, block, 20, 0u32.wrapping_sub(sum));
+    }
+    fn header(image: &mut [u8], next: &mut usize, parent: usize, name: &str, kind: i32) -> usize {
+        let block = *next;
+        *next += 1;
+        let raw: Vec<u8> = name.chars().map(|c| c as u8).collect();
+        put(image, block, 0, 2);
+        put(image, block, 4, block as u32);
+        image[block * BLOCK + 432] = raw.len() as u8;
+        image[block * BLOCK + 433..block * BLOCK + 433 + raw.len()].copy_from_slice(&raw);
+        put(image, block, 500, parent as u32);
+        put(image, block, 508, kind as u32);
+        seal(image, block);
+
+        let hash = raw.iter().fold(raw.len() as u32, |h, c| {
+            (h * 13 + u32::from(c.to_ascii_uppercase())) & 0x7ff
+        });
+        // Append to the hash chain of the parent's slot.
+        let mut link = (parent, 24 + (hash as usize % 72) * 4);
+        while get(image, link.0, link.1) != 0 {
+            link = (get(image, link.0, link.1) as usize, 496);
+        }
+        put(image, link.0, link.1, block as u32);
+        seal(image, link.0);
+        block
+    }
+
+    let mut image = vec![0u8; 1760 * BLOCK];
+    image[..4].copy_from_slice(b"DOS\x01");
+    put(&mut image, ROOT, 0, 2);
+    put(&mut image, ROOT, 12, 72);
+    put(&mut image, ROOT, 508, 1);
+    image[ROOT * BLOCK + 432] = 4;
+    image[ROOT * BLOCK + 433..ROOT * BLOCK + 437].copy_from_slice(b"Test");
+    seal(&mut image, ROOT);
+
+    let mut next = 2;
+    let mut dirs: HashMap<&str, usize> = HashMap::new();
+    for (path, content) in files {
+        let (parent, name) = match path.split_once('/') {
+            Some((dir, name)) => {
+                let block = *dirs
+                    .entry(dir)
+                    .or_insert_with(|| header(&mut image, &mut next, ROOT, dir, 2));
+                (block, name)
+            }
+            None => (ROOT, *path),
+        };
+        let file = header(&mut image, &mut next, parent, name, -3);
+        put(&mut image, file, 324, content.len() as u32);
+        for (index, chunk) in content.chunks(BLOCK).enumerate() {
+            assert!(index < 72 && next < ROOT, "file too large for build_adf");
+            image[next * BLOCK..next * BLOCK + chunk.len()].copy_from_slice(chunk);
+            put(&mut image, file, 308 - index * 4, next as u32);
+            next += 1;
+        }
+        seal(&mut image, file);
+    }
+    image
+}
+
+fn leaves_with_report(data: Vec<u8>, name: &str) -> (Vec<(String, Vec<u8>)>, unretro::VisitReport) {
+    let mut leaves = Vec::new();
+    let report = Loader::from_bytes(data, name)
+        .visit_with_report(EntryType::Leaves, |entry| {
+            leaves.push((entry.path.to_string(), entry.data.to_vec()));
+            Ok(VisitAction::Continue)
+        })
+        .unwrap();
+    (leaves, report)
+}
+
+#[test]
+fn test_adf_detection_and_traversal() {
+    let big: Vec<u8> = (0..3000).map(|i| (i % 253) as u8).collect();
+    let image = build_adf(&[
+        ("readme", b"hello amiga"),
+        ("c/dir", &big),
+        ("c/caf\u{e9}", b"latin-1 name"),
+    ]);
+
+    assert_eq!(
+        unretro::detect_format("disk.adf", Some(&image)),
+        Some(unretro::ContainerFormat::Adf)
+    );
+    // Content sniffing, without the extension hint.
+    assert_eq!(
+        unretro::detect_format("disk.bin", Some(&image)),
+        Some(unretro::ContainerFormat::Adf)
+    );
+
+    let (leaves, report) = leaves_with_report(image, "disk.adf");
+    assert!(report.diagnostics.is_empty(), "{:?}", report.diagnostics);
+    assert_eq!(
+        leaves,
+        vec![
+            ("disk.adf/c/caf\u{e9}".to_string(), b"latin-1 name".to_vec()),
+            ("disk.adf/c/dir".to_string(), big),
+            ("disk.adf/readme".to_string(), b"hello amiga".to_vec()),
+        ]
+    );
+}
+
+#[test]
+fn test_adf_signature_without_root_block_is_not_detected() {
+    // Trackloader/NDOS disks keep the DOS boot signature but have no filesystem.
+    let mut image = vec![0x5Au8; 1760 * 512];
+    image[..4].copy_from_slice(b"DOS\0");
+    assert_eq!(unretro::detect_format("game.adf", Some(&image)), None);
+
+    let mut image = build_adf(&[("file", b"data")]);
+    image[880 * 512 + 20] ^= 1; // root block checksum
+    assert_eq!(unretro::detect_format("game.adf", Some(&image)), None);
+}
+
+#[test]
+fn test_adz_gzip_wrapped_adf() {
+    use std::io::Write;
+    let image = build_adf(&[("s/startup-sequence", b"echo hi\n")]);
+    let mut encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+    encoder.write_all(&image).unwrap();
+    let adz = encoder.finish().unwrap();
+
+    let (leaves, report) = leaves_with_report(adz, "disk.adz");
+    assert!(report.diagnostics.is_empty(), "{:?}", report.diagnostics);
+    assert_eq!(leaves.len(), 1);
+    assert!(
+        leaves[0].0.ends_with("/s/startup-sequence"),
+        "{}",
+        leaves[0].0
+    );
+    assert_eq!(leaves[0].1, b"echo hi\n");
+}
+
+#[test]
+fn test_adf_bad_header_checksum_is_reported_and_other_files_survive() {
+    // Blocks: 2 = "good" header, 3 = its data, 4 = "zbad" header.
+    let mut image = build_adf(&[("good", b"good data"), ("zbad", b"bad data")]);
+    image[4 * 512 + 20] ^= 1;
+
+    let (leaves, report) = leaves_with_report(image.clone(), "disk.adf");
+    assert_eq!(
+        leaves,
+        vec![("disk.adf/good".to_string(), b"good data".to_vec())]
+    );
+    assert!(!report.has_root_failures());
+    assert_eq!(report.diagnostics.len(), 1);
+    assert_eq!(
+        report.diagnostics[0].code,
+        TraversalDiagnosticCode::ContainerEntriesSkipped
+    );
+    assert!(
+        report.diagnostics[0].message.contains("bad checksum"),
+        "{}",
+        report.diagnostics[0].message
+    );
+
+    // Nested in another container it is reported the same way.
+    let (leaves, report) = leaves_with_report(build_zip(&[("disk.adf", &image)]), "outer.zip");
+    assert_eq!(
+        leaves,
+        vec![("outer.zip/disk.adf/good".to_string(), b"good data".to_vec())]
+    );
+    assert!(!report.has_root_failures());
+    assert!(
+        report
+            .diagnostics
+            .iter()
+            .any(|d| d.code == TraversalDiagnosticCode::ContainerEntriesSkipped)
+    );
+}
+
+#[cfg(feature = "std")]
+mod cli {
+    use super::{TempDir, build_apple_double, build_fork, build_zip};
+    use std::path::Path;
+    use std::process::{Command, Output};
+
+    fn unretro(args: &[&str]) -> Output {
+        Command::new(env!("CARGO_BIN_EXE_unretro"))
+            .args(args)
+            .output()
+            .unwrap()
+    }
+
+    fn assert_ok(out: &Output) -> String {
+        assert!(
+            out.status.success(),
+            "exit {:?}: {}",
+            out.status.code(),
+            String::from_utf8_lossy(&out.stderr)
+        );
+        String::from_utf8_lossy(&out.stdout).into_owned()
+    }
+
+    // Regular files under `root`, relative and sorted.
+    fn files(root: &Path) -> Vec<String> {
+        fn walk(dir: &Path, root: &Path, out: &mut Vec<String>) {
+            for e in std::fs::read_dir(dir).unwrap() {
+                let path = e.unwrap().path();
+                if path.is_dir() {
+                    walk(&path, root, out);
+                } else {
+                    let rel = path.strip_prefix(root).unwrap();
+                    out.push(rel.display().to_string().replace('\\', "/"));
+                }
+            }
+        }
+        let mut out = Vec::new();
+        walk(root, root, &mut out);
+        out.sort();
+        out
+    }
+
+    #[test]
+    fn test_cli_extracts_archive_with_bare_resource_fork() {
+        let fork = build_fork(&[(b"CODE", 1, &[0x4E, 0x75])]);
+        let dir = TempDir::new("cli-bare-fork");
+        dir.write(
+            "n.zip",
+            &build_zip(&[("dir/app.rsrc", &fork), ("other.txt", b"hello")]),
+        );
+        let zip = dir.0.join("n.zip").display().to_string();
+        let out = dir.0.join("out");
+        std::fs::create_dir_all(&out).unwrap();
+
+        assert_ok(&unretro(&["-x", "-f", &zip, "-C", out.to_str().unwrap()]));
+        assert_eq!(files(&out), ["dir/app.rsrc", "other.txt"]);
+        assert_eq!(std::fs::read(out.join("dir/app.rsrc")).unwrap(), fork);
+        assert_eq!(std::fs::read(out.join("other.txt")).unwrap(), b"hello");
+
+        // The fork can still be exploded by naming it.
+        let exploded = dir.0.join("exploded");
+        std::fs::create_dir_all(&exploded).unwrap();
+        let target = format!("{zip}/dir/app.rsrc/..namedfork/rsrc");
+        assert_ok(&unretro(&[
+            "--numeric",
+            "-x",
+            "-f",
+            &target,
+            "-C",
+            exploded.to_str().unwrap(),
+        ]));
+        assert_eq!(files(&exploded), ["CODE/#1"]);
+
+        // No bare `..namedfork/` or `rsrc/` nodes.
+        let tree = assert_ok(&unretro(&["--numeric", "-t", "-f", &zip]));
+        let names: Vec<&str> = tree
+            .lines()
+            .map(|l| l.trim_start_matches(['│', '├', '└', '─', ' ']))
+            .map(|l| l.split(" - ").next().unwrap())
+            .collect();
+        assert_eq!(
+            names,
+            [
+                "n.zip/",
+                "dir/",
+                "app.rsrc/",
+                "..namedfork/rsrc/",
+                "CODE/#1",
+                "other.txt"
+            ],
+            "{tree}"
+        );
+    }
+
+    #[test]
+    fn test_cli_extracts_archive_with_apple_double_sidecar() {
+        let fork = build_fork(&[(b"CODE", 1, &[0x4E, 0x75])]);
+        let ad = build_apple_double(b"APPLtest", &fork);
+        let dir = TempDir::new("cli-sidecar");
+        dir.write(
+            "t.zip",
+            &build_zip(&[("app", b"data fork"), ("__MACOSX/._app", &ad)]),
+        );
+        let zip = dir.0.join("t.zip").display().to_string();
+
+        for (name, preserve) in [("plain", false), ("preserve", true)] {
+            // Native forks need macOS; elsewhere the flag is a hard error.
+            if preserve && !cfg!(target_os = "macos") {
+                continue;
+            }
+            let out = dir.0.join(name);
+            std::fs::create_dir_all(&out).unwrap();
+            let mut args = vec!["-x", "-f", &zip, "-C", out.to_str().unwrap()];
+            if preserve {
+                args.push("--preserve-resource-fork");
+            }
+            assert_ok(&unretro(&args));
+            assert_eq!(files(&out), ["app"]);
+            assert_eq!(std::fs::read(out.join("app")).unwrap(), b"data fork");
+            if preserve {
+                assert_eq!(
+                    std::fs::read(out.join("app/..namedfork/rsrc")).unwrap(),
+                    fork
+                );
+            }
+        }
+    }
+
+    // Naming a fork-only file as the archive extracts its resources, like
+    // naming its `..namedfork/rsrc`.
+    #[test]
+    fn test_cli_extracts_fork_only_root_as_resources() {
+        let fork = build_fork(&[(b"CODE", 1, &[0x4E, 0x75]), (b"MENU", 128, b"hi")]);
+        let dir = TempDir::new("cli-fork-root");
+        dir.write("bare.rsrc", &fork);
+        dir.write("double.rsrc", &build_apple_double(b"APPLtest", &fork));
+
+        for name in ["bare.rsrc", "double.rsrc"] {
+            let root = dir.0.join(name).display().to_string();
+            for (i, extra) in [None, Some("--preserve-resource-fork")]
+                .into_iter()
+                .enumerate()
+            {
+                let out = dir.0.join(format!("out-{name}-{i}"));
+                std::fs::create_dir_all(&out).unwrap();
+                let mut args = vec!["--numeric", "-x", "-f", &root, "-C", out.to_str().unwrap()];
+                args.extend(extra);
+                assert_ok(&unretro(&args));
+                assert_eq!(files(&out), ["CODE/#1", "MENU/#128"], "{name} {extra:?}");
+                assert_eq!(
+                    std::fs::read(out.join("CODE").join("#1")).unwrap(),
+                    [0x4E, 0x75]
+                );
+            }
+        }
+    }
+
+    // An empty data fork with a native resource fork is fork-only too.
+    #[test]
+    fn test_cli_extracts_native_fork_only_root_as_resources() {
+        let fork = build_fork(&[(b"CODE", 1, &[0x4E, 0x75]), (b"MENU", 128, b"hi")]);
+        let dir = TempDir::new("cli-native-fork-root");
+        dir.write("suitcase", b"");
+        if std::fs::write(dir.0.join("suitcase/..namedfork/rsrc"), &fork).is_err() {
+            return; // filesystem without native forks
+        }
+        let root = dir.0.join("suitcase").display().to_string();
+
+        for (i, extra) in [None, Some("--preserve-resource-fork")]
+            .into_iter()
+            .enumerate()
+        {
+            let out = dir.0.join(format!("out-{i}"));
+            std::fs::create_dir_all(&out).unwrap();
+            let mut args = vec!["--numeric", "-x", "-f", &root, "-C", out.to_str().unwrap()];
+            args.extend(extra);
+            assert_ok(&unretro(&args));
+            assert_eq!(files(&out), ["CODE/#1", "MENU/#128"], "{extra:?}");
+        }
+
+        let tree = assert_ok(&unretro(&["--numeric", "-t", "-f", &root]));
+        assert!(tree.contains("MENU/#128"), "{tree}");
+        let json = assert_ok(&unretro(&["--numeric", "--list=json", "-f", &root]));
+        assert!(json.contains("#128"), "{json}");
+    }
+
+    #[test]
+    fn test_cli_extracts_directory_named_with_trailing_slash() {
+        let dir = TempDir::new("cli-trailing-slash");
+        dir.write("src/a.txt", b"a");
+        dir.write("src/sub/b.txt", b"b");
+
+        for (i, suffix) in ["", "/"].into_iter().enumerate() {
+            let root = format!("{}{suffix}", dir.0.join("src").display());
+            let out = dir.0.join(format!("out-{i}"));
+            std::fs::create_dir_all(&out).unwrap();
+            assert_ok(&unretro(&["-x", "-f", &root, "-C", out.to_str().unwrap()]));
+            assert_eq!(files(&out), ["a.txt", "sub/b.txt"], "{root}");
+        }
+    }
+
+    // `--list=json` output with all whitespace outside strings removed.
+    fn json_listing(target: &str) -> String {
+        let json = assert_ok(&unretro(&["--numeric", "--list=json", "-f", target]));
+        let mut out = String::new();
+        let mut in_string = false;
+        for c in json.chars() {
+            if c == '"' {
+                in_string = !in_string;
+            }
+            if in_string || !c.is_whitespace() {
+                out.push(c);
+            }
+        }
+        out
+    }
+
+    // A fork is a child of the file it belongs to, whichever container
+    // supplied it.
+    #[test]
+    fn test_cli_json_nests_fork_under_its_file() {
+        let fork = build_fork(&[(b"CODE", 1, &[0x4E, 0x75])]);
+        let fork_node = format!(
+            r##"{{"name":"rsrc","size":{},"format":"ResourceFork","children":[{{"name":"#1","size":2}}]}}"##,
+            fork.len()
+        );
+        let dir = TempDir::new("cli-json");
+
+        // AppleDouble sidecar: the zip is the fork entry's container.
+        let ad = build_apple_double(b"APPLtest", &fork);
+        dir.write(
+            "t.zip",
+            &build_zip(&[("app", b"data fork"), ("__MACOSX/._app", &ad)]),
+        );
+        let json = json_listing(dir.0.join("t.zip").to_str().unwrap());
+        let expected = format!(
+            r#""format":"Zip","children":[{{"name":"app","size":9,"metadata":"APPL/test","children":[{fork_node}]}}]}}"#
+        );
+        assert!(json.ends_with(&expected), "{json}");
+
+        // MacBinary: data fork and resource fork are sibling entries.
+        let mut bin = vec![0u8; 128];
+        bin[1] = 4;
+        bin[2..6].copy_from_slice(b"Test");
+        bin[65..73].copy_from_slice(b"APPLtest");
+        bin[83..87].copy_from_slice(&4u32.to_be_bytes());
+        bin[87..91].copy_from_slice(&(fork.len() as u32).to_be_bytes());
+        bin.extend_from_slice(b"data");
+        bin.resize(256, 0);
+        bin.extend_from_slice(&fork);
+        bin.resize(bin.len().next_multiple_of(128), 0);
+        dir.write("app.bin", &bin);
+        let json = json_listing(dir.0.join("app.bin").to_str().unwrap());
+        let expected = format!(
+            r#""format":"MacBinary","children":[{{"name":"Test","size":4,"metadata":"APPL/test","children":[{fork_node}]}}]}}"#
+        );
+        assert!(json.ends_with(&expected), "{json}");
+
+        // A bare fork file owns its fork entry.
+        dir.write("n.zip", &build_zip(&[("dir/app.rsrc", &fork)]));
+        let json = json_listing(dir.0.join("n.zip").to_str().unwrap());
+        let expected = format!(
+            r#""format":"Zip","children":[{{"name":"app.rsrc","size":{},"format":"ResourceFork","children":[{fork_node}]}}]}}"#,
+            fork.len()
+        );
+        assert!(json.ends_with(&expected), "{json}");
+    }
 }

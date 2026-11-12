@@ -2,7 +2,7 @@
 unretro: Python bindings for retro container formats.
 
 Open and iterate through files in classic archive formats:
-- ZIP, TAR, GZIP, XZ
+- ZIP, TAR, GZIP, BZIP2, XZ
 - LHA/LZH (Amiga)
 - HFS disk images, StuffIt, BinHex, MacBinary (Classic Mac)
 - SCUMM, WAD, PAK, Wolf3D (Game formats)

@@ -3,12 +3,14 @@
 //! - **FAT12/FAT16/FAT32** - MS-DOS/Windows FAT filesystem disk images
 //! - **MBR** - MBR-partitioned disk images
 //! - **GPT** - GPT-partitioned disk images
+//! - **ISO 9660** - CD-ROM images (Joliet and Rock Ridge names, raw 2352-byte sectors)
 //! - **RAR** - Widely-used archive format (RAR 2.9/4.x and RAR 5.0+)
 
 use crate::compat::{String, ToString};
 
 pub mod fat;
 pub mod gpt;
+pub mod iso9660;
 pub mod mbr;
 
 #[cfg(feature = "__backend_dos_rar")]
@@ -19,10 +21,11 @@ pub(crate) mod rar_stream;
 
 /// Try to extract a volume label from partition data by probing the filesystem.
 ///
-/// Currently supports FAT12/FAT16/FAT32 volume labels from the boot sector.
-/// Returns `None` if the data is not a recognized filesystem or has no label.
+/// Supports FAT12/FAT16/FAT32 labels from the boot sector and ISO 9660
+/// volume identifiers. Returns `None` if the data is not a recognized
+/// filesystem or has no label.
 pub fn partition_label(data: &[u8]) -> Option<String> {
-    fat_volume_label(data)
+    fat_volume_label(data).or_else(|| iso9660::volume_label(data))
 }
 
 /// Extract the volume label from a FAT boot sector.

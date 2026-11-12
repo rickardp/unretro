@@ -259,12 +259,10 @@ fn parse_apple_single(data: &[u8]) -> Result<AppleSingleParts> {
             ENTRY_REAL_NAME => {
                 filename = String::from_utf8_lossy(&data[offset..offset + length]).to_string();
             }
-            ENTRY_FINDER_INFO => {
-                // Finder Info: first 4 bytes = type, next 4 = creator
-                if length >= 8 {
-                    file_type = data[offset..offset + 4].try_into().unwrap_or([0; 4]);
-                    creator = data[offset + 4..offset + 8].try_into().unwrap_or([0; 4]);
-                }
+            // Finder Info: first 4 bytes = type, next 4 = creator
+            ENTRY_FINDER_INFO if length >= 8 => {
+                file_type = data[offset..offset + 4].try_into().unwrap_or([0; 4]);
+                creator = data[offset + 4..offset + 8].try_into().unwrap_or([0; 4]);
             }
             _ => {}
         }

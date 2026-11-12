@@ -15,6 +15,15 @@ use crate::formats::dos::rar_stream::decompress::DecompressError;
 #[cfg(feature = "parallel")]
 use std::sync::Arc;
 
+#[cold]
+#[inline(never)]
+fn alloc_error() -> DecompressError {
+    DecompressError::Io(std::io::Error::new(
+        std::io::ErrorKind::OutOfMemory,
+        "Cannot allocate decompression buffer",
+    ))
+}
+
 /// Cold error for invalid back-references — keeps hot path code small.
 #[cold]
 #[inline(never)]
@@ -445,10 +454,6 @@ pub struct Rar5BlockDecoder {
     dict_size: usize,
     /// Output buffer (accumulates all output)
     output: Vec<u8>,
-    /// Output start offset mapped into window (for direct output writes)
-    output_start: usize,
-    /// Whether output buffer is mapped to window (direct write mode)
-    output_mapped: bool,
     /// Tables have been initialized
     tables_valid: bool,
     /// Use alignment bits
@@ -471,13 +476,12 @@ impl Rar5BlockDecoder {
             level_table: HuffTable::new(LEVEL_TABLE_SIZE, QUICK_BITS_LEVEL),
             recent_offsets: [0; NUM_REPS],
             last_length: 0,
-            window: vec![0u8; dict_size],
+            // Allocated on first use: only the solid path reads the window.
+            window: Vec::new(),
             window_mask: dict_size - 1,
             window_pos: 0,
             dict_size,
             output: Vec::new(),
-            output_start: 0,
-            output_mapped: false,
             tables_valid: false,
             use_align_bits: false,
             is_last_block: false,
@@ -488,14 +492,35 @@ impl Rar5BlockDecoder {
         }
     }
 
+    fn ensure_window(&mut self) -> Result<(), DecompressError> {
+        if self.window.is_empty() {
+            // The direct path advances `window_pos` without filling the
+            // window, so earlier output is not available to back-references.
+            if self.window_pos != 0 {
+                return Err(backref_error());
+            }
+            self.window = crate::limits::zeroed_buffer(self.dict_size, "RAR5 dictionary")
+                .map_err(|_| alloc_error())?;
+        }
+        Ok(())
+    }
+
+    // Window copy for the solid path, where the stream may reference data
+    // that was never decoded into the window.
+    fn copy_bytes_checked(&mut self, offset: usize, length: usize) -> Result<(), DecompressError> {
+        if offset == 0 || offset > self.window_pos {
+            return Err(backref_error());
+        }
+        self.copy_bytes(offset, length);
+        Ok(())
+    }
+
     /// Reset decoder state.
     pub fn reset(&mut self) {
         self.recent_offsets = [0; NUM_REPS];
         self.last_length = 0;
         self.window_pos = 0;
         self.output.clear();
-        self.output_start = 0;
-        self.output_mapped = false;
         self.tables_valid = false;
         self.use_align_bits = false;
         self.is_last_block = false;
@@ -512,15 +537,7 @@ impl Rar5BlockDecoder {
                 .get_unchecked_mut(self.window_pos & self.window_mask) = byte;
         }
 
-        // Direct output write when output is mapped to window
-        if self.output_mapped {
-            let idx = self.window_pos - self.output_start;
-            unsafe {
-                *self.output.get_unchecked_mut(idx) = byte;
-            }
-        } else {
-            self.output.push(byte);
-        }
+        self.output.push(byte);
 
         self.window_pos = self.window_pos.wrapping_add(1);
     }
@@ -850,31 +867,20 @@ impl Rar5BlockDecoder {
         let start_pos = self.window_pos;
         let mut filters = Vec::new();
 
-        let target_end = start_pos.checked_add(output_size).ok_or_else(|| {
+        start_pos.checked_add(output_size).ok_or_else(|| {
             DecompressError::Io(std::io::Error::new(
                 std::io::ErrorKind::InvalidData,
                 "Output size overflow",
             ))
         })?;
 
-        // Pre-allocate output buffer if needed
-        if self.output.capacity() < target_end {
-            self.output.reserve(output_size);
-        }
+        self.ensure_window()?;
 
-        // Map output to window to avoid duplicate writes
-        self.output_start = start_pos;
-        if self.output.len() < target_end {
-            self.output.reserve(target_end - self.output.len());
-            // SAFETY: reserve() ensures capacity >= target_end.
-            // All positions in [start_pos..target_end) are written by the
-            // decode loop below (write_byte / copy_match). If the loop exits early,
-            // set_len(pos) at the end truncates to actual written bytes.
-            unsafe {
-                self.output.set_len(target_end);
-            }
-        }
-        self.output_mapped = true;
+        // Hint only: the output grows as symbols are decoded, so a short
+        // stream never exposes reserved-but-unwritten bytes.
+        self.output
+            .try_reserve(crate::limits::prealloc_hint(output_size as u64))
+            .map_err(|_| alloc_error())?;
 
         // Decode symbols until we have enough output
         while self.window_pos.wrapping_sub(start_pos) < output_size {
@@ -921,7 +927,7 @@ impl Rar5BlockDecoder {
                 if self.last_length != 0 && self.recent_offsets[0] != 0 {
                     let length = self.last_length;
                     let offset = self.recent_offsets[0] as usize;
-                    self.copy_bytes(offset, length);
+                    self.copy_bytes_checked(offset, length)?;
                 }
             } else if sym < 262 {
                 // Use recent offset (sym 258-261 = offsets 0-3)
@@ -945,7 +951,7 @@ impl Rar5BlockDecoder {
                     self.recent_offsets[0] = off;
                 }
                 self.last_length = length;
-                self.copy_bytes(offset, length);
+                self.copy_bytes_checked(offset, length)?;
             } else {
                 // New offset with length (sym >= 262)
                 let len_slot = sym - 262;
@@ -964,11 +970,10 @@ impl Rar5BlockDecoder {
                 self.recent_offsets[0] = offset as u32;
                 self.last_length = length;
 
-                self.copy_bytes(offset, length);
+                self.copy_bytes_checked(offset, length)?;
             }
         }
 
-        self.output_mapped = false;
         Ok(filters)
     }
 
@@ -988,7 +993,10 @@ impl Rar5BlockDecoder {
         // bounds overflow (the extra bytes are capacity, never read as output).
         // SAFETY: all positions [0..output_size) are written before being read
         // (either directly as literals or as destinations of copy_match).
-        let mut output: Vec<u8> = Vec::with_capacity(output_size + 16);
+        let mut output: Vec<u8> = Vec::new();
+        output
+            .try_reserve_exact(output_size.checked_add(16).ok_or_else(alloc_error)?)
+            .map_err(|_| alloc_error())?;
         unsafe {
             output.set_len(output_size);
         }
@@ -1174,6 +1182,8 @@ impl Rar5BlockDecoder {
         }
 
         self.window_pos = pos;
+        // Nothing above went through the window; drop any stale contents.
+        self.window = Vec::new();
         self.output = output;
         if pos < output_size {
             // SAFETY: pos tracks actual bytes written; truncate to real size
@@ -1348,6 +1358,7 @@ impl Rar5BlockDecoder {
     ) -> Result<Vec<super::filter::UnpackFilter>, DecompressError> {
         use super::filter::{FilterType, UnpackFilter};
         let mut filters = Vec::new();
+        self.ensure_window()?;
 
         // Estimate output size and reserve (rough estimate: average 4 bytes per item)
         self.output.reserve(items.len() * 4);
@@ -1383,16 +1394,7 @@ impl Rar5BlockDecoder {
                         }
                     }
 
-                    // Write to output buffer (mapped or append)
-                    if self.output_mapped {
-                        let output_idx = self.window_pos - self.output_start;
-                        unsafe {
-                            let dst = self.output.as_mut_ptr().add(output_idx);
-                            std::ptr::copy_nonoverlapping(bytes.as_ptr(), dst, len);
-                        }
-                    } else {
-                        self.output.extend_from_slice(bytes_slice);
-                    }
+                    self.output.extend_from_slice(bytes_slice);
                     self.window_pos += len;
                 }
                 DecodedItem::Match { length, offset } => {
@@ -2853,6 +2855,7 @@ impl Rar5BlockDecoder {
         tables: &BlockTables,
     ) -> Result<Vec<super::filter::UnpackFilter>, DecompressError> {
         let mut filters = Vec::new();
+        self.ensure_window()?;
 
         while !bits.is_eof() && !bits.is_block_over_read() {
             let sym = tables.main_table.decode(bits) as usize;
@@ -3157,5 +3160,36 @@ impl Rar5BlockDecoder {
         }
 
         Ok(output)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn dictionary_is_not_allocated_up_front() {
+        // The header nibble alone used to drive a 1 GiB allocation.
+        let decoder = Rar5BlockDecoder::new(30);
+        assert!(decoder.window.is_empty());
+    }
+
+    #[test]
+    fn solid_decode_of_empty_stream_yields_no_bytes() {
+        // The declared size used to be reserved and exposed without being written.
+        let mut decoder = Rar5BlockDecoder::new(17);
+        let mut bits = BitDecoder::new(&[]);
+        decoder.decode_block(&mut bits, 4096).unwrap();
+        assert!(decoder.take_output().is_empty());
+    }
+
+    #[test]
+    fn solid_decode_after_direct_decode_is_rejected() {
+        // The direct path leaves the window empty, so a solid continuation
+        // cannot resolve back-references into the previous entry.
+        let mut decoder = Rar5BlockDecoder::new(17);
+        decoder.window_pos = 100;
+        let mut bits = BitDecoder::new(&[]);
+        assert!(decoder.decode_block(&mut bits, 16).is_err());
     }
 }

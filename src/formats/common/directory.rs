@@ -115,9 +115,38 @@ impl Container for DirectoryContainer {
         fs::read(full).ok().map(Cow::Owned)
     }
 
+    // The fork itself is read when the file is visited; the header and the
+    // length are enough to tell whether it will be yielded.
+    #[cfg(feature = "macintosh")]
+    fn has_resource_fork(&self, path: &str) -> bool {
+        use std::io::Read;
+        let Some(full) = self.sibling_path(path) else {
+            return false;
+        };
+        let fork_path = format!("{}{}", full.display(), resource_fork::RESOURCE_FORK_SUFFIX);
+        let Ok(mut file) = fs::File::open(fork_path) else {
+            return false;
+        };
+        let Some(fork_len) = file
+            .metadata()
+            .ok()
+            .and_then(|meta| usize::try_from(meta.len()).ok())
+        else {
+            return false;
+        };
+        let mut header = [0u8; 16];
+        file.read_exact(&mut header).is_ok()
+            && resource_fork::ResourceFork::is_valid_header(&header, fork_len)
+    }
+
     #[cfg(feature = "macintosh")]
     fn has_file(&self, path: &str) -> bool {
         self.sibling_path(path).is_some_and(|p| p.is_file())
+    }
+
+    #[cfg(feature = "macintosh")]
+    fn has_dir(&self, path: &str) -> bool {
+        self.sibling_path(path).is_some_and(|p| p.is_dir())
     }
 
     fn visit(&self, visitor: &mut dyn FnMut(&Entry<'_>) -> Result<bool>) -> Result<()> {
@@ -143,9 +172,14 @@ impl Container for DirectoryContainer {
                 let entry = Entry::new(&path_str, &self.prefix, &data);
                 visitor(&entry)?;
 
-                // Handle resource fork (macOS) - use names, not numeric IDs
+                // Native fork (macOS). Only the fork entry is yielded; the
+                // loader descends into it like any other `..namedfork/rsrc`
+                // entry, honoring its options.
                 #[cfg(feature = "macintosh")]
-                resource_fork::visit_resource_fork(&dir_entry.path, visitor, false)?;
+                if let Some(rsrc) = resource_fork::read_native_resource_fork(&dir_entry.path) {
+                    let rsrc_path = format!("{path_str}{}", resource_fork::RESOURCE_FORK_SUFFIX);
+                    visitor(&Entry::new(&rsrc_path, &self.prefix, &rsrc))?;
+                }
             }
         }
         Ok(())

@@ -4,10 +4,10 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 
 use crossbeam_channel::{Receiver, bounded};
-use pyo3::exceptions::{PyFileNotFoundError, PyRuntimeError};
+use pyo3::exceptions::{PyFileNotFoundError, PyOSError, PyRuntimeError};
 use pyo3::prelude::*;
 use pyo3::types::PyList;
-use unretro::{EntryType, Loader, VisitAction, VisitReport};
+use unretro::{EntryType, Loader, TraversalDiagnosticCode, VisitAction, VisitReport};
 
 use crate::entry::PyEntry;
 use crate::iterator::SharedEntryData;
@@ -25,7 +25,7 @@ pub fn open(py: Python<'_>, path: &str, max_depth: u32) -> PyResult<PyEntry> {
         let result = std::panic::catch_unwind(AssertUnwindSafe(|| {
             let loader = Loader::from_virtual_path(&path_owned).with_max_depth(max_depth);
 
-            loader.visit(EntryType::Leaves, |entry| {
+            loader.visit_with_report(EntryType::Leaves, |entry| {
                 // Create a rendezvous channel for this entry
                 let (release_tx, release_rx) = bounded::<()>(0);
 
@@ -51,14 +51,20 @@ pub fn open(py: Python<'_>, path: &str, max_depth: u32) -> PyResult<PyEntry> {
             })
         }));
 
-        // Handle result: Ok(Ok) = success, Ok(Err) = visitor error, Err = panic
+        // Handle result: Ok(Ok) = traversal done, Ok(Err) = visitor error, Err = panic
         match result {
-            Ok(Ok(())) => {} // Success, channel closes naturally
+            Ok(Ok(report)) => {
+                if let Some(failure) = reportable_root_failure(&report) {
+                    let _ = sender.send(Err(OpenError::from_root_failure(failure)));
+                }
+            }
             Ok(Err(e)) => {
-                let _ = sender.send(Err(e.to_string()));
+                let _ = sender.send(Err(OpenError::Runtime(e.to_string())));
             }
             Err(_) => {
-                let _ = sender.send(Err("visitor thread panicked".to_string()));
+                let _ = sender.send(Err(OpenError::Runtime(
+                    "visitor thread panicked".to_string(),
+                )));
             }
         }
     });
@@ -83,10 +89,33 @@ pub fn open(py: Python<'_>, path: &str, max_depth: u32) -> PyResult<PyEntry> {
             );
             Ok(entry)
         }
-        Ok(Err(e)) => Err(PyRuntimeError::new_err(e)),
-        Err(_) => Err(PyFileNotFoundError::new_err(format!(
+        Ok(Err(OpenError::Runtime(message))) => Err(PyRuntimeError::new_err(message)),
+        Ok(Err(OpenError::Io(message))) => Err(PyOSError::new_err(message)),
+        Ok(Err(OpenError::NotFound)) | Err(_) => Err(PyFileNotFoundError::new_err(format!(
             "No such file: '{path}'"
         ))),
+    }
+}
+
+enum OpenError {
+    NotFound,
+    Io(String),
+    Runtime(String),
+}
+
+impl OpenError {
+    fn from_root_failure(failure: &unretro::TraversalDiagnostic) -> Self {
+        let message = format!("{} ({})", failure.message, failure.path);
+        match failure.code {
+            TraversalDiagnosticCode::RootOpenFailed => {
+                if std::path::Path::new(&failure.path).exists() {
+                    Self::Io(message)
+                } else {
+                    Self::NotFound
+                }
+            }
+            _ => Self::Runtime(message),
+        }
     }
 }
 
@@ -227,7 +256,7 @@ fn run_walk(
         let name = entry.name().to_string();
 
         // Detect container completion when container_path changes
-        if container_stack.last().map_or(true, |top| *top != cp) {
+        if container_stack.last().is_none_or(|top| *top != cp) {
             // Flush completed containers: any on the stack that are NOT
             // ancestors of the new container_path (they've finished).
             while let Some(top) = container_stack.last() {
@@ -250,7 +279,7 @@ fn run_walk(
             }
 
             // Push new container onto the stack
-            if !container_stack.last().map_or(false, |top| *top == cp) {
+            if !container_stack.last().is_some_and(|top| *top == cp) {
                 container_stack.push(cp.clone());
             }
         }
@@ -274,7 +303,7 @@ fn run_walk(
         }
     };
 
-    if let Some(root_failure) = first_root_failure(&report) {
+    if let Some(root_failure) = reportable_root_failure(&report) {
         let _ = sender.send(Err(format!(
             "{} ({})",
             root_failure.message, root_failure.path
@@ -337,7 +366,7 @@ pub fn listdir(py: Python<'_>, path: &str) -> PyResult<Py<PyList>> {
         })
         .map_err(|e: unretro::Error| PyRuntimeError::new_err(e.to_string()))?;
 
-    if let Some(root_failure) = first_root_failure(&report) {
+    if let Some(root_failure) = reportable_root_failure(&report) {
         return Err(PyRuntimeError::new_err(format!(
             "{} ({})",
             root_failure.message, root_failure.path
@@ -349,6 +378,19 @@ pub fn listdir(py: Python<'_>, path: &str) -> PyResult<Py<PyList>> {
     }
 
     Ok(PyList::new(py, entries)?.unbind())
+}
+
+/// Root failure that should surface as an exception from entry-yielding APIs.
+///
+/// A file whose data fork is not a container can still yield native resource
+/// fork entries; that is not a failure.
+pub(crate) fn reportable_root_failure(
+    report: &VisitReport,
+) -> Option<&unretro::TraversalDiagnostic> {
+    first_root_failure(report).filter(|failure| {
+        report.visited_entries == 0
+            || failure.code != TraversalDiagnosticCode::RootUnsupportedFormat
+    })
 }
 
 fn first_root_failure(report: &VisitReport) -> Option<&unretro::TraversalDiagnostic> {

@@ -89,10 +89,18 @@ fn build_tree(
 
     // Use EntryType::All to see containers before their children.
     // This guarantees parent nodes exist when children arrive.
-    let report = loader.visit_with_report(EntryType::All, |entry| {
+    let mut report = loader.visit_with_report(EntryType::All, |entry| {
         insert_entry_into_tree(entry, path, &mut root, &mut path_to_indices);
         Ok(crate::VisitAction::Continue)
     })?;
+
+    // A file whose data fork is not a container can still list its native
+    // resource fork; that is not a failure.
+    if report.visited_entries > 0 {
+        report
+            .diagnostics
+            .retain(|diag| diag.code != crate::TraversalDiagnosticCode::RootUnsupportedFormat);
+    }
 
     root.format = report.root_format;
 
@@ -126,40 +134,45 @@ fn insert_entry_into_tree(
     // Special case: paths containing /..namedfork/ have special nesting rules
     // - "file/..namedfork/rsrc" → parent is "file", name is "..namedfork/rsrc"
     // - "file/..namedfork/rsrc/TYPE/name" → parent is "file/..namedfork/rsrc", name is "TYPE/name"
-    let (effective_container_path, entry_name) =
-        if let Some(namedfork_pos) = rel_path.find("/..namedfork/") {
-            let base_file = &rel_path[..namedfork_pos];
-            let after_namedfork = &rel_path[namedfork_pos + 1..]; // "..namedfork/rsrc" or "..namedfork/rsrc/TYPE/name"
+    // A root file's own fork has no leading path: "..namedfork/rsrc[/TYPE/name]".
+    let namedfork_pos = if rel_path.starts_with("..namedfork/") {
+        Some(0)
+    } else {
+        rel_path.find("/..namedfork/").map(|pos| pos + 1)
+    };
+    let (effective_container_path, entry_name) = if let Some(namedfork_pos) = namedfork_pos {
+        let after_namedfork = &rel_path[namedfork_pos..]; // "..namedfork/rsrc" or "..namedfork/rsrc/TYPE/name"
 
-            // Check if this is "..namedfork/rsrc" alone or "..namedfork/rsrc/something"
-            if let Some(rsrc_slash_pos) = after_namedfork.find("/rsrc/") {
-                // It's "..namedfork/rsrc/TYPE/name" - parent is "file/..namedfork/rsrc"
-                let rsrc_container = format!("{}/..namedfork/rsrc", base_file);
-                let resource_name = &after_namedfork[rsrc_slash_pos + 6..]; // after "/rsrc/"
-                (rsrc_container, resource_name.to_string())
-            } else {
-                // It's "..namedfork/rsrc" alone - parent is base file
-                (base_file.to_string(), after_namedfork.to_string())
-            }
-        } else if rel_container_path.is_empty() {
-            // Entry belongs directly to root container
-            // If path contains '/', split to create intermediate folders
-            if let Some(last_slash) = rel_path.rfind('/') {
-                let parent_path = &rel_path[..last_slash];
-                let file_name = &rel_path[last_slash + 1..];
-                (parent_path.to_string(), file_name.to_string())
-            } else {
-                (String::new(), rel_path.to_string())
-            }
+        // Check if this is "..namedfork/rsrc" alone or "..namedfork/rsrc/something"
+        if let Some(rsrc_slash_pos) = after_namedfork.find("/rsrc/") {
+            // It's "..namedfork/rsrc/TYPE/name" - parent is "file/..namedfork/rsrc"
+            let rsrc_container = &rel_path[..namedfork_pos + rsrc_slash_pos + 5];
+            let resource_name = &after_namedfork[rsrc_slash_pos + 6..]; // after "/rsrc/"
+            (rsrc_container.to_string(), resource_name.to_string())
         } else {
-            let name = entry
-                .path
-                .strip_prefix(entry.container_path)
-                .unwrap_or(rel_path)
-                .trim_start_matches('/')
-                .to_string();
-            (rel_container_path.to_string(), name)
-        };
+            // It's "..namedfork/rsrc" alone - parent is base file
+            let base_file = rel_path[..namedfork_pos].trim_end_matches('/');
+            (base_file.to_string(), after_namedfork.to_string())
+        }
+    } else if rel_container_path.is_empty() {
+        // Entry belongs directly to root container
+        // If path contains '/', split to create intermediate folders
+        if let Some(last_slash) = rel_path.rfind('/') {
+            let parent_path = &rel_path[..last_slash];
+            let file_name = &rel_path[last_slash + 1..];
+            (parent_path.to_string(), file_name.to_string())
+        } else {
+            (String::new(), rel_path.to_string())
+        }
+    } else {
+        let name = entry
+            .path
+            .strip_prefix(entry.container_path)
+            .unwrap_or(rel_path)
+            .trim_start_matches('/')
+            .to_string();
+        (rel_container_path.to_string(), name)
+    };
 
     // Find or create the parent container node, recursively creating intermediate folders
     let indices = ensure_path_exists(&effective_container_path, root, path_to_indices);
@@ -330,11 +343,15 @@ fn format_name(format: &ContainerFormat) -> &'static str {
         #[cfg(feature = "common")]
         ContainerFormat::Gzip => "GZIP",
         #[cfg(feature = "common")]
+        ContainerFormat::Bzip2 => "BZIP2",
+        #[cfg(feature = "common")]
         ContainerFormat::Tar => "TAR",
         #[cfg(feature = "xz")]
         ContainerFormat::Xz => "XZ",
         #[cfg(feature = "amiga")]
         ContainerFormat::Lha => "LHA",
+        #[cfg(feature = "amiga")]
+        ContainerFormat::Adf => "ADF",
         #[cfg(feature = "macintosh")]
         ContainerFormat::BinHex => "BinHex 4.0",
         #[cfg(feature = "macintosh")]
@@ -369,6 +386,8 @@ fn format_name(format: &ContainerFormat) -> &'static str {
         ContainerFormat::Mbr => "MBR",
         #[cfg(feature = "dos")]
         ContainerFormat::Gpt => "GPT",
+        #[cfg(feature = "dos")]
+        ContainerFormat::Iso9660 => "ISO 9660",
         #[cfg(feature = "dos")]
         ContainerFormat::Rar => "RAR",
         ContainerFormat::Unknown => "Unknown",

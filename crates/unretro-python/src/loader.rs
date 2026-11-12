@@ -9,6 +9,7 @@ use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 use unretro::{EntryType, Loader, VisitAction};
 
+use crate::functions::reportable_root_failure;
 use crate::iterator::{BorrowedEntryInfo, PyArchiveIterator};
 
 /// Source of data to load.
@@ -228,7 +229,7 @@ impl PyLoader {
             match result {
                 Ok(Ok(())) => {} // Success, channel closes naturally
                 Ok(Err(e)) => {
-                    let _ = sender.send(Err(e.to_string()));
+                    let _ = sender.send(Err(e));
                 }
                 Err(_) => {
                     let _ = sender.send(Err("visitor thread panicked".to_string()));
@@ -257,39 +258,46 @@ fn run_visitor(
     loader: Loader,
     filter: &EntryFilter,
     sender: &crossbeam_channel::Sender<Result<BorrowedEntryInfo, String>>,
-) -> unretro::Result<()> {
-    loader.visit(EntryType::Leaves, |entry| {
-        // Apply filter
-        if !filter.matches(entry) {
-            return Ok(VisitAction::Continue);
-        }
+) -> Result<(), String> {
+    let report = loader
+        .visit_with_report(EntryType::Leaves, |entry| {
+            // Apply filter
+            if !filter.matches(entry) {
+                return Ok(VisitAction::Continue);
+            }
 
-        // Create a rendezvous channel for this entry
-        // Python will hold the sender; when it drops, we continue
-        let (release_tx, release_rx) = bounded::<()>(0);
+            // Create a rendezvous channel for this entry
+            // Python will hold the sender; when it drops, we continue
+            let (release_tx, release_rx) = bounded::<()>(0);
 
-        // Send entry info with borrowed data pointer
-        let info = BorrowedEntryInfo {
-            path: entry.path.to_string(),
-            container_path: entry.container_path.to_string(),
-            data_ptr: entry.data.as_ptr(),
-            data_len: entry.data.len(),
-            metadata: entry.metadata.cloned(),
-            release_channel: release_tx,
-        };
+            // Send entry info with borrowed data pointer
+            let info = BorrowedEntryInfo {
+                path: entry.path.to_string(),
+                container_path: entry.container_path.to_string(),
+                data_ptr: entry.data.as_ptr(),
+                data_len: entry.data.len(),
+                metadata: entry.metadata.cloned(),
+                release_channel: release_tx,
+            };
 
-        // Send through channel
-        if sender.send(Ok(info)).is_err() {
-            // Receiver dropped, stop iteration
-            return Ok(VisitAction::Handled);
-        }
+            // Send through channel
+            if sender.send(Ok(info)).is_err() {
+                // Receiver dropped, stop iteration
+                return Ok(VisitAction::Handled);
+            }
 
-        // Block until Python is done with this entry
-        // (release_rx.recv() returns Err when release_tx is dropped)
-        let _ = release_rx.recv();
+            // Block until Python is done with this entry
+            // (release_rx.recv() returns Err when release_tx is dropped)
+            let _ = release_rx.recv();
 
-        // Now entry.data will become invalid, but Python has already
-        // copied what it needed (or didn't need the data at all)
-        Ok(VisitAction::Continue)
-    })
+            // Now entry.data will become invalid, but Python has already
+            // copied what it needed (or didn't need the data at all)
+            Ok(VisitAction::Continue)
+        })
+        .map_err(|e| e.to_string())?;
+
+    match reportable_root_failure(&report) {
+        Some(failure) => Err(format!("{} ({})", failure.message, failure.path)),
+        None => Ok(()),
+    }
 }

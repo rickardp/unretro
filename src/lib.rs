@@ -14,6 +14,7 @@ use core::fmt;
 mod compat;
 mod error;
 mod format;
+mod limits;
 mod loader;
 mod metadata;
 
@@ -35,7 +36,7 @@ pub mod attributes;
 // Path sanitization utilities
 mod path_utils;
 #[cfg(any(
-    all(feature = "common", feature = "__backend_common"),
+    feature = "common",
     feature = "amiga",
     feature = "game",
     feature = "dos"
@@ -339,6 +340,12 @@ pub(crate) trait Container: Send + Sync {
     /// during iteration. Errors stop iteration immediately.
     fn visit(&self, visitor: &mut dyn FnMut(&Entry<'_>) -> Result<bool>) -> Result<()>;
 
+    /// Summary of entries left out because they were damaged or unsupported,
+    /// when the readable ones were still visited.
+    fn skipped_entries(&self) -> Option<String> {
+        None
+    }
+
     /// Get information about this container.
     fn info(&self) -> ContainerInfo;
 
@@ -372,10 +379,25 @@ pub(crate) trait Container: Send + Sync {
         self.get_file(path).map(compat::Cow::Borrowed)
     }
 
+    /// Whether the container itself stores a valid resource fork for the file
+    /// at `path`, as `<path>/..namedfork/rsrc`.
+    #[cfg(feature = "macintosh")]
+    fn has_resource_fork(&self, path: &str) -> bool {
+        use formats::macintosh::resource_fork::{RESOURCE_FORK_SUFFIX, ResourceFork};
+        self.get_file(&compat::format!("{path}{RESOURCE_FORK_SUFFIX}"))
+            .is_some_and(ResourceFork::is_valid)
+    }
+
     /// Whether a sibling file exists at `path` (same path rules as `get_file`).
     #[cfg(feature = "macintosh")]
     fn has_file(&self, path: &str) -> bool {
         self.get_file(path).is_some()
+    }
+
+    /// Whether a directory exists at `path`, for containers that can tell.
+    #[cfg(feature = "macintosh")]
+    fn has_dir(&self, _path: &str) -> bool {
+        false
     }
 }
 
@@ -397,7 +419,7 @@ pub(crate) const DEFAULT_MAX_DEPTH: u32 = 32;
 
 /// Maximum allowed decompressed size (4 GiB) to prevent decompression bombs.
 ///
-/// Formats like gzip, xz, zip, tar, and LHA can produce arbitrarily large output
+/// Formats like gzip, bzip2, xz, zip, tar, and LHA can produce arbitrarily large output
 /// from tiny compressed inputs. This limit bounds the maximum decompressed size
 /// for any single entry to prevent out-of-memory conditions.
 pub const MAX_DECOMPRESSED_SIZE: u64 = 4 * 1024 * 1024 * 1024;

@@ -18,6 +18,9 @@ pub enum ContainerFormat {
     /// `Gzip`-compressed single file.
     #[cfg(feature = "common")]
     Gzip,
+    /// `Bzip2`-compressed single file.
+    #[cfg(feature = "common")]
+    Bzip2,
     /// `TAR` archive format.
     #[cfg(feature = "common")]
     Tar,
@@ -31,6 +34,9 @@ pub enum ContainerFormat {
     /// `LHA/LZH` archive format.
     #[cfg(feature = "amiga")]
     Lha,
+    /// Amiga Disk File (`ADF`) with an `OFS/FFS` filesystem.
+    #[cfg(feature = "amiga")]
+    Adf,
 
     // RAR archive format
     /// `RAR` archive format.
@@ -93,6 +99,9 @@ pub enum ContainerFormat {
     /// `GPT`-partitioned disk image.
     #[cfg(feature = "dos")]
     Gpt,
+    /// `ISO 9660` CD-ROM image (with `Joliet` / `Rock Ridge` names).
+    #[cfg(feature = "dos")]
+    Iso9660,
 
     /// Unknown/unsupported format.
     Unknown,
@@ -109,11 +118,15 @@ impl ContainerFormat {
             #[cfg(feature = "common")]
             Self::Gzip => "Gzip Compressed",
             #[cfg(feature = "common")]
+            Self::Bzip2 => "Bzip2 Compressed",
+            #[cfg(feature = "common")]
             Self::Tar => "TAR Archive",
             #[cfg(feature = "xz")]
             Self::Xz => "XZ Compressed",
             #[cfg(feature = "amiga")]
             Self::Lha => "LHA Archive",
+            #[cfg(feature = "amiga")]
+            Self::Adf => "Amiga Disk Image",
             #[cfg(feature = "dos")]
             Self::Rar => "RAR Archive",
             #[cfg(feature = "macintosh")]
@@ -150,6 +163,8 @@ impl ContainerFormat {
             Self::Mbr => "MBR Disk Image",
             #[cfg(feature = "dos")]
             Self::Gpt => "GPT Disk Image",
+            #[cfg(feature = "dos")]
+            Self::Iso9660 => "ISO 9660 Disc Image",
             Self::Unknown => "Unknown",
         }
     }
@@ -182,11 +197,15 @@ impl ContainerFormat {
             #[cfg(feature = "common")]
             "gz" | "gzip" => Some(Self::Gzip),
             #[cfg(feature = "common")]
+            "bz2" | "bzip2" => Some(Self::Bzip2),
+            #[cfg(feature = "common")]
             "tar" => Some(Self::Tar),
             #[cfg(feature = "xz")]
             "xz" => Some(Self::Xz),
             #[cfg(feature = "amiga")]
             "lha" | "lzh" | "lzs" => Some(Self::Lha),
+            #[cfg(feature = "amiga")]
+            "adf" => Some(Self::Adf),
             #[cfg(feature = "dos")]
             "rar" => Some(Self::Rar),
             #[cfg(feature = "macintosh")]
@@ -213,13 +232,16 @@ impl ContainerFormat {
             "bun" => Some(Self::ImuseBundle),
             #[cfg(feature = "dos")]
             "ima" | "flp" | "vfd" => Some(Self::Fat),
+            // With `macintosh`, "iso" hints at HFS first (hybrid Mac discs).
+            #[cfg(all(feature = "dos", not(feature = "macintosh")))]
+            "iso" => Some(Self::Iso9660),
             _ => None,
         }
     }
 
     /// Returns `true` if this format is a multi-file container (archive, disk image, etc.).
     ///
-    /// Single-file wrappers like `Gzip`, `XZ`, `MacBinary`, and `BinHex` return `false`
+    /// Single-file wrappers like `Gzip`, `Bzip2`, `XZ`, `MacBinary`, and `BinHex` return `false`
     /// since they encode a single file rather than a directory structure.
     #[must_use]
     pub const fn is_multi_file(&self) -> bool {
@@ -228,13 +250,13 @@ impl ContainerFormat {
             #[cfg(feature = "common")]
             Self::Zip => true,
             #[cfg(feature = "common")]
-            Self::Gzip => false,
+            Self::Gzip | Self::Bzip2 => false,
             #[cfg(feature = "common")]
             Self::Tar => true,
             #[cfg(feature = "xz")]
             Self::Xz => false,
             #[cfg(feature = "amiga")]
-            Self::Lha => true,
+            Self::Lha | Self::Adf => true,
             #[cfg(feature = "dos")]
             Self::Rar => true,
             #[cfg(feature = "macintosh")]
@@ -248,7 +270,7 @@ impl ContainerFormat {
             #[cfg(feature = "game")]
             Self::Wad | Self::Pak | Self::Wolf3d | Self::ImuseBundle => true,
             #[cfg(feature = "dos")]
-            Self::Fat | Self::Mbr | Self::Gpt => true,
+            Self::Fat | Self::Mbr | Self::Gpt | Self::Iso9660 => true,
             Self::Unknown => false,
         }
     }

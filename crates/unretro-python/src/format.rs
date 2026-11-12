@@ -53,6 +53,16 @@ pub enum PyContainerFormat {
     Mbr = 20,
     /// GPT-partitioned disk image.
     Gpt = 21,
+    /// LucasArts SCUMM speech bundle (MONSTER.SOU and friends).
+    ScummSpeech = 22,
+    /// LucasArts digital iMUSE audio bundle (*.BUN).
+    ImuseBundle = 23,
+    /// ISO 9660 CD-ROM image (with Joliet / Rock Ridge names).
+    Iso9660 = 24,
+    /// Amiga Disk File (ADF) with an OFS/FFS filesystem.
+    Adf = 25,
+    /// Bzip2-compressed single file.
+    Bzip2 = 26,
     /// Unknown format.
     Unknown = 99,
 }
@@ -85,6 +95,11 @@ impl PyContainerFormat {
             Self::Fat => "FAT Disk Image",
             Self::Mbr => "MBR Disk Image",
             Self::Gpt => "GPT Disk Image",
+            Self::ScummSpeech => "SCUMM Speech",
+            Self::ImuseBundle => "iMUSE Bundle",
+            Self::Iso9660 => "ISO 9660 Disc Image",
+            Self::Adf => "Amiga Disk Image",
+            Self::Bzip2 => "Bzip2 Compressed",
             Self::Unknown => "Unknown",
         }
     }
@@ -108,8 +123,13 @@ impl PyContainerFormat {
             | Self::Rar
             | Self::Fat
             | Self::Mbr
-            | Self::Gpt => true,
+            | Self::Gpt
+            | Self::ScummSpeech
+            | Self::ImuseBundle
+            | Self::Iso9660
+            | Self::Adf => true,
             Self::Gzip
+            | Self::Bzip2
             | Self::Xz
             | Self::BinHex
             | Self::MacBinary
@@ -149,6 +169,11 @@ impl From<ContainerFormat> for PyContainerFormat {
             ContainerFormat::Fat => Self::Fat,
             ContainerFormat::Mbr => Self::Mbr,
             ContainerFormat::Gpt => Self::Gpt,
+            ContainerFormat::ScummSpeech => Self::ScummSpeech,
+            ContainerFormat::ImuseBundle => Self::ImuseBundle,
+            ContainerFormat::Iso9660 => Self::Iso9660,
+            ContainerFormat::Adf => Self::Adf,
+            ContainerFormat::Bzip2 => Self::Bzip2,
             ContainerFormat::Unknown => Self::Unknown,
             // `ContainerFormat` is `#[non_exhaustive]`; future variants
             // surface as `Unknown` until the Python bindings are extended.

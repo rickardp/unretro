@@ -1,6 +1,7 @@
 use crate::compat::{String, ToString, Vec, format};
 use crate::error::{Error, Result};
 use crate::format::ContainerFormat;
+use crate::limits::OutputBudget;
 use crate::sanitize_path_component;
 use crate::{Container, ContainerInfo, Entry};
 
@@ -70,6 +71,16 @@ fn validate_resource_fork(data: &[u8]) -> Option<()> {
     let type_count = raw_type_count + 1;
     let types_end = 2 + type_count * TYPE_ENTRY_SIZE;
     if type_list_offset + types_end > map_len {
+        return None;
+    }
+
+    // Reference lists are disjoint in a real fork, so together they fit in the
+    // map. This also keeps validation linear when every type points at the
+    // same large list.
+    let total_refs = (0..type_count)
+        .map(|t| be16(map, type_list_offset + 2 + t * TYPE_ENTRY_SIZE + 4) + 1)
+        .fold(0usize, usize::saturating_add);
+    if total_refs.saturating_mul(REF_ENTRY_SIZE) > map_len {
         return None;
     }
 
@@ -178,7 +189,10 @@ impl ResourceFork {
         let map_len = u32::from_be_bytes([data[12], data[13], data[14], data[15]]) as usize;
 
         // Validate offsets
-        if data_offset + data_len > data.len() || map_offset + map_len > data.len() {
+        let in_bounds = |offset: usize, len: usize| {
+            offset.checked_add(len).is_some_and(|end| end <= data.len())
+        };
+        if !in_bounds(data_offset, data_len) || !in_bounds(map_offset, map_len) {
             return Err(Error::invalid_format("Invalid resource fork offsets"));
         }
 
@@ -208,8 +222,14 @@ impl ResourceFork {
 
         let mut resources = Vec::new();
 
+        // Resources and reference lists are disjoint in a real fork, so the
+        // references fit in the map and their payloads in the fork. Crafted
+        // forks alias both; parsing stops once either bound is spent.
+        let mut refs_left = map_len / REF_ENTRY_SIZE;
+        let mut budget = OutputBudget::for_input(data.len(), 1);
+
         // Parse each type entry
-        for type_idx in 0..num_types {
+        'types: for type_idx in 0..num_types {
             let entry_offset = 2 + type_idx * 8;
             if entry_offset + 8 > type_list.len() {
                 break;
@@ -237,6 +257,10 @@ impl ResourceFork {
                 if ref_offset + 12 > map_len {
                     break;
                 }
+                if refs_left == 0 {
+                    break 'types;
+                }
+                refs_left -= 1;
 
                 let ref_entry = &data[map_offset + ref_offset..map_offset + ref_offset + 12];
                 let res_id = i16::from_be_bytes([ref_entry[0], ref_entry[1]]);
@@ -267,29 +291,29 @@ impl ResourceFork {
                 };
 
                 // Get resource data
-                let abs_data_offset = data_offset + res_data_offset;
-                if abs_data_offset + 4 > data.len() {
+                let Some(payload_start) = data_offset
+                    .checked_add(res_data_offset)
+                    .and_then(|at| at.checked_add(4))
+                    .filter(|&start| start <= data.len())
+                else {
                     continue;
-                }
-
-                let res_len = u32::from_be_bytes([
-                    data[abs_data_offset],
-                    data[abs_data_offset + 1],
-                    data[abs_data_offset + 2],
-                    data[abs_data_offset + 3],
-                ]) as usize;
-
-                if abs_data_offset + 4 + res_len > data.len() {
+                };
+                let res_len = be32(data, payload_start - 4);
+                let Some(payload) = payload_start
+                    .checked_add(res_len)
+                    .and_then(|end| data.get(payload_start..end))
+                else {
                     continue;
+                };
+                if budget.charge(payload.len(), "resource fork").is_err() {
+                    break 'types;
                 }
-
-                let res_data = data[abs_data_offset + 4..abs_data_offset + 4 + res_len].to_vec();
 
                 resources.push(Resource {
                     resource_type: res_type,
                     resource_id: res_id,
                     name,
-                    data: res_data,
+                    data: payload.to_vec(),
                 });
             }
         }
@@ -299,7 +323,14 @@ impl ResourceFork {
 
     #[must_use]
     pub fn is_valid(data: &[u8]) -> bool {
-        if data.len() < 16 {
+        Self::is_valid_header(data, data.len())
+    }
+
+    /// [`is_valid`](Self::is_valid) from the first 16 bytes of a fork that is
+    /// `fork_len` bytes long, for callers that have not read all of it.
+    #[must_use]
+    pub fn is_valid_header(data: &[u8], fork_len: usize) -> bool {
+        if data.len() < 16 || fork_len < 16 {
             return false;
         }
 
@@ -314,11 +345,27 @@ impl ResourceFork {
         }
 
         // Typical resource fork has data at offset 256 and reasonable lengths
-        data_offset < data.len()
-            && map_offset < data.len()
-            && data_offset.saturating_add(data_len) <= data.len()
-            && map_offset.saturating_add(map_len) <= data.len()
+        data_offset < fork_len
+            && map_offset < fork_len
+            && data_offset.saturating_add(data_len) <= fork_len
+            && map_offset.saturating_add(map_len) <= fork_len
             && map_len >= 28
+    }
+
+    /// `is_valid`, and the map lists at least one resource type.
+    ///
+    /// macOS writes a 286-byte placeholder fork with an empty map into
+    /// `._name` sidecars on volumes without native forks.
+    #[must_use]
+    pub fn has_resources(data: &[u8]) -> bool {
+        if !Self::is_valid(data) {
+            return false;
+        }
+        let map_offset = be32(data, 4);
+        let map = &data[map_offset..map_offset + be32(data, 12)];
+        let type_list_offset = be16(map, 24);
+        // Stored as count - 1; 0xFFFF means none.
+        type_list_offset + 2 <= map.len() && be16(map, type_list_offset) != 0xFFFF
     }
 
     #[must_use]
@@ -329,30 +376,35 @@ impl ResourceFork {
     }
 }
 
+/// Reads `path`'s native resource fork if it is non-empty and valid.
+#[cfg(feature = "std")]
+#[must_use]
+pub fn read_native_resource_fork(path: &std::path::Path) -> Option<Vec<u8>> {
+    let rsrc_data = std::fs::read(format!("{}{RESOURCE_FORK_SUFFIX}", path.display())).ok()?;
+    (!rsrc_data.is_empty() && ResourceFork::is_valid(&rsrc_data)).then_some(rsrc_data)
+}
+
 #[cfg(feature = "std")]
 pub fn visit_resource_fork(
     path: &std::path::Path,
     visitor: &mut dyn FnMut(&Entry<'_>) -> Result<bool>,
     numeric_identifiers: bool,
 ) -> Result<()> {
-    let rsrc_path_str = format!("{}/..namedfork/rsrc", path.display());
-    if let Ok(rsrc_data) = std::fs::read(&rsrc_path_str) {
-        if !rsrc_data.is_empty() && ResourceFork::is_valid(&rsrc_data) {
-            // Yield the resource fork as a single entry
-            let entry_path = format!("{}/..namedfork/rsrc", path.display());
-            let container_path = path.display().to_string();
-            let entry = Entry::new(&entry_path, &container_path, &rsrc_data);
-            let should_continue = visitor(&entry)?;
+    if let Some(rsrc_data) = read_native_resource_fork(path) {
+        // Yield the resource fork as a single entry
+        let entry_path = format!("{}{RESOURCE_FORK_SUFFIX}", path.display());
+        let container_path = path.display().to_string();
+        let entry = Entry::new(&entry_path, &container_path, &rsrc_data);
+        let should_continue = visitor(&entry)?;
 
-            // Recurse into the resource fork to yield individual resources
-            if should_continue {
-                let rsrc_container = ResourceForkContainer::from_bytes_with_options(
-                    &rsrc_data,
-                    entry_path,
-                    numeric_identifiers,
-                )?;
-                rsrc_container.visit(visitor)?;
-            }
+        // Recurse into the resource fork to yield individual resources
+        if should_continue {
+            let rsrc_container = ResourceForkContainer::from_bytes_with_options(
+                &rsrc_data,
+                entry_path,
+                numeric_identifiers,
+            )?;
+            rsrc_container.visit(visitor)?;
         }
     }
     Ok(())
@@ -412,10 +464,48 @@ impl Container for ResourceForkContainer {
     }
 }
 
+// A fork file found by content rather than by path. Yields its bytes as
+// `{prefix}/..namedfork/rsrc` so the loader descends into them like any other
+// fork and every resource's `container_path` names an entry that was yielded.
+pub struct BareResourceForkContainer {
+    prefix: String,
+    data: Vec<u8>,
+}
+
+impl BareResourceForkContainer {
+    #[must_use]
+    pub fn new(data: &[u8], prefix: String) -> Self {
+        Self {
+            prefix,
+            data: data.to_vec(),
+        }
+    }
+}
+
+impl Container for BareResourceForkContainer {
+    fn prefix(&self) -> &str {
+        &self.prefix
+    }
+
+    fn info(&self) -> ContainerInfo {
+        ContainerInfo {
+            path: self.prefix.clone(),
+            format: ContainerFormat::ResourceFork,
+            entry_count: Some(1),
+        }
+    }
+
+    fn visit(&self, visitor: &mut dyn FnMut(&Entry<'_>) -> Result<bool>) -> Result<()> {
+        let path = format!("{}{RESOURCE_FORK_SUFFIX}", self.prefix);
+        visitor(&Entry::new(&path, &self.prefix, &self.data))?;
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 pub(crate) type TestResource<'a> = ([u8; 4], i16, Option<&'a str>, &'a [u8]);
 
-/// Minimal well-formed resource fork: `(type, id, name, payload)` per resource.
+// Minimal well-formed resource fork: `(type, id, name, payload)` per resource.
 #[cfg(test)]
 pub(crate) fn build_test_fork(resources: &[TestResource<'_>]) -> Vec<u8> {
     let mut data = Vec::new();
@@ -471,6 +561,23 @@ pub(crate) fn build_test_fork(resources: &[TestResource<'_>]) -> Vec<u8> {
     fork
 }
 
+// What macOS writes into a sidecar when the file has no resources: header,
+// the "intentionally left blank" note, and a 30-byte map with no types.
+#[cfg(test)]
+pub(crate) fn build_placeholder_fork() -> Vec<u8> {
+    let mut fork = Vec::new();
+    for v in [256u32, 256, 0, 30] {
+        fork.extend_from_slice(&v.to_be_bytes());
+    }
+    fork.extend_from_slice(b"This resource fork intentionally left blank   ");
+    fork.resize(256, 0);
+    fork.extend_from_slice(&[0u8; 24]);
+    fork.extend_from_slice(&28u16.to_be_bytes());
+    fork.extend_from_slice(&30u16.to_be_bytes());
+    fork.extend_from_slice(&0xFFFFu16.to_be_bytes());
+    fork
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -489,6 +596,18 @@ mod tests {
         assert!(is_resource_fork_file(&fork));
         let parsed = ResourceFork::parse(&fork).unwrap();
         assert_eq!(parsed.resources.len(), 3);
+    }
+
+    #[test]
+    fn placeholder_fork_is_valid_but_has_no_resources() {
+        let blank = build_placeholder_fork();
+        assert_eq!(blank.len(), 286);
+        assert!(ResourceFork::is_valid(&blank));
+        assert!(ResourceFork::parse(&blank).unwrap().resources.is_empty());
+        assert!(!ResourceFork::has_resources(&blank));
+        assert!(!is_resource_fork_file(&blank));
+        assert!(ResourceFork::has_resources(&sample()));
+        assert!(!ResourceFork::has_resources(&[0xFF; 64]));
     }
 
     #[test]
@@ -553,8 +672,135 @@ mod tests {
         bad_len[256..260].copy_from_slice(&0x1000u32.to_be_bytes());
         assert!(!is_resource_fork_file(&bad_len));
 
+        // Types sharing one reference list: each list is in bounds on its
+        // own, but together they claim more space than the map has.
+        let a: &[u8] = b"a";
+        let shared = build_test_fork(&[
+            (*b"AAAA", 1, None, a),
+            (*b"AAAA", 2, None, a),
+            (*b"AAAA", 3, None, a),
+            (*b"AAAA", 4, None, a),
+            (*b"BBBB", 1, None, a),
+            (*b"CCCC", 1, None, a),
+            (*b"DDDD", 1, None, a),
+        ]);
+        assert!(is_resource_fork_file(&shared));
+        let mut shared_refs = shared.clone();
+        let shared_map = 256 + be32(&shared, 8);
+        let first_type = shared_map + 28 + 2;
+        for t in 1..4 {
+            let entry = first_type + t * 8;
+            let (head, tail) = shared_refs.split_at_mut(entry);
+            tail[4..8].copy_from_slice(&head[first_type + 4..first_type + 8]);
+        }
+        assert!(!is_resource_fork_file(&shared_refs));
+
         let empty = build_test_fork(&[]);
         assert!(ResourceFork::is_valid(&empty));
         assert!(!is_resource_fork_file(&empty));
+    }
+
+    // `types` type entries all using one list of `refs` references, every
+    // reference pointing at the same `payload_len`-byte resource.
+    fn aliased_fork(types: usize, refs: usize, payload_len: usize) -> Vec<u8> {
+        let refs_base = 2 + TYPE_ENTRY_SIZE * types;
+        let mut map = crate::compat::vec![0u8; 24];
+        map.extend_from_slice(&(MAP_HEADER_SIZE as u16).to_be_bytes());
+        let map_len = MAP_HEADER_SIZE + refs_base + REF_ENTRY_SIZE * refs;
+        map.extend_from_slice(&(map_len as u16).to_be_bytes());
+        map.extend_from_slice(&((types - 1) as u16).to_be_bytes());
+        for t in 0..types {
+            map.extend_from_slice(&(t as u32).to_be_bytes());
+            map.extend_from_slice(&((refs - 1) as u16).to_be_bytes());
+            map.extend_from_slice(&(refs_base as u16).to_be_bytes());
+        }
+        for r in 0..refs {
+            map.extend_from_slice(&(r as i16).to_be_bytes());
+            map.extend_from_slice(&[0xFF, 0xFF, 0, 0, 0, 0, 0, 0, 0, 0]);
+        }
+        assert_eq!(map.len(), map_len);
+
+        let data_len = 4 + payload_len;
+        let mut fork = Vec::new();
+        fork.extend_from_slice(&(HEADER_SIZE as u32).to_be_bytes());
+        fork.extend_from_slice(&((HEADER_SIZE + data_len) as u32).to_be_bytes());
+        fork.extend_from_slice(&(data_len as u32).to_be_bytes());
+        fork.extend_from_slice(&(map_len as u32).to_be_bytes());
+        fork.extend_from_slice(&(payload_len as u32).to_be_bytes());
+        fork.resize(HEADER_SIZE + data_len, 0xAB);
+        fork.extend_from_slice(&map);
+        fork
+    }
+
+    fn total_bytes(fork: &ResourceFork) -> usize {
+        fork.resources.iter().map(|r| r.data.len()).sum()
+    }
+
+    #[test]
+    fn parse_bounds_references_when_types_share_a_list() {
+        // Unbounded: 32 * 32 references, 64 MiB of copies from a 64 KiB fork.
+        let payload_len = 64 * 1024;
+        let fork = aliased_fork(32, 32, payload_len);
+        let map_len = be32(&fork, 12);
+        let parsed = ResourceFork::parse(&fork).unwrap();
+        assert!(!parsed.resources.is_empty());
+        assert!(
+            parsed.resources.len() <= map_len / REF_ENTRY_SIZE,
+            "{} references from a {map_len}-byte map",
+            parsed.resources.len()
+        );
+        assert!(parsed.resources.iter().all(|r| r.data.len() == payload_len));
+
+        // A well-formed fork is nowhere near the bound.
+        let payloads: Vec<[u8; 1]> = (0..200u8).map(|i| [i]).collect();
+        let many: Vec<TestResource<'_>> = payloads
+            .iter()
+            .enumerate()
+            .map(|(i, p)| ([b'T', b'Y', b'P', (i % 7) as u8], i as i16, None, &p[..]))
+            .collect();
+        let parsed = ResourceFork::parse(&build_test_fork(&many)).unwrap();
+        assert_eq!(parsed.resources.len(), 200);
+    }
+
+    #[test]
+    fn parse_budgets_references_sharing_one_payload() {
+        // One in-bounds list, so the reference bound alone does not help:
+        // unbounded this is 64 MiB of copies from a 1 MiB fork.
+        let fork = aliased_fork(1, 64, 1024 * 1024);
+        let parsed = ResourceFork::parse(&fork).unwrap();
+        assert!(!parsed.resources.is_empty());
+        let limit = (fork.len() as u64).max(crate::limits::BUDGET_FLOOR);
+        assert!(
+            total_bytes(&parsed) as u64 <= limit,
+            "{} bytes copied from a {}-byte fork",
+            total_bytes(&parsed),
+            fork.len()
+        );
+    }
+
+    #[test]
+    fn parse_rejects_out_of_range_offsets() {
+        let good = sample();
+        assert_eq!(ResourceFork::parse(&good).unwrap().resources.len(), 3);
+
+        // offset + length wraps a 32-bit usize to a small in-bounds value.
+        for field in [0, 4] {
+            let mut wrap = good.clone();
+            wrap[field..field + 4].copy_from_slice(&0xFFFF_FFF0u32.to_be_bytes());
+            wrap[field + 8..field + 12].copy_from_slice(&0x20u32.to_be_bytes());
+            assert!(ResourceFork::parse(&wrap).is_err(), "header field {field}");
+            assert!(!ResourceFork::is_valid(&wrap));
+            assert!(!is_resource_fork_file(&wrap));
+        }
+
+        // Length prefixes that wrap `offset + 4 + length` on 32-bit; the
+        // other two resources still parse.
+        for len in [0xFFFF_FFFFu32, 0xFFFF_FF00, 0xFFFF_FEFC] {
+            let mut bad_len = good.clone();
+            bad_len[256..260].copy_from_slice(&len.to_be_bytes());
+            let parsed = ResourceFork::parse(&bad_len).unwrap();
+            assert_eq!(parsed.resources.len(), 2, "length {len:#x}");
+            assert!(!is_resource_fork_file(&bad_len));
+        }
     }
 }

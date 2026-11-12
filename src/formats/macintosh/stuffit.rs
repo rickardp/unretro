@@ -1,54 +1,185 @@
+//! `StuffIt` (`.sit`) archives: classic `SIT!` and `StuffIt` 5.
+//!
+//! Container glue over the reader in `sit`, which is written from the format
+//! specification in `docs/stuffit/`.
+
+use crate::compat::{String, ToString, Vec, format};
 use crate::error::{Error, Result};
 use crate::format::ContainerFormat;
+use crate::limits::OutputBudget;
 use crate::sanitize_path_component;
 use crate::{Container, ContainerInfo, Entry, Metadata};
 
 use super::resource_fork::ResourceFork;
-use parser::SitArchive as LocalSitArchive;
+use super::sit::{self, ForkInfo, SitEntry};
 
-const SIT5_SIGNATURE: &[u8] = b"StuffIt";
-
-const SIT1_SIGNATURE: &[u8] = b"SIT!";
+// Unpacked bytes allowed per archive, as a multiple of its length. All forks
+// are held in memory at once, so this is also the memory amplification bound.
+// No ratio covers what the methods can express (about 15,000x for methods 2
+// and 13, unbounded for a single-leaf method 3 tree and for method 15); the
+// largest expansion measured on real archives is 49x, mostly-empty disk
+// images. Archives below 16 KiB get the budget's fixed floor instead.
+const BUDGET_RATIO: u64 = 1024;
 
 #[must_use]
 pub fn is_stuffit_archive(data: &[u8]) -> bool {
-    // SIT! 1.x signature
-    if data.len() >= 4 && &data[0..4] == SIT1_SIGNATURE {
-        return true;
+    sit::detect(data).is_some() && !is_opaque_installer(data)
+}
+
+// Installer applications are classic archives whose forks all use method 14
+// in a framing the specification does not describe (containers.md 2.3 knows
+// only the raw RFC 1951 stream). Descending would deliver no contents, so
+// such a file is left to its caller as an ordinary file: true when every
+// fork with contents is an unencrypted method 14 fork and the first of them
+// does not decode.
+fn is_opaque_installer(data: &[u8]) -> bool {
+    let Ok(archive) = sit::parse(data) else {
+        return false;
+    };
+    let mut forks = archive
+        .entries
+        .iter()
+        .flat_map(|entry| [&entry.rsrc, &entry.data])
+        .filter(|fork| fork.unpacked_len != 0);
+    let Some(first) = forks.next() else {
+        return false;
+    };
+    let installer = |fork: &ForkInfo| fork.method == 14 && !fork.encrypted;
+    if !installer(first) || !forks.all(installer) {
+        return false;
     }
-    // StuffIt 5.0+ signature
-    if data.len() >= 7 && &data[0..7] == SIT5_SIGNATURE {
-        return true;
-    }
-    false
+    let mut budget = OutputBudget::for_input(data.len(), BUDGET_RATIO);
+    sit::read_fork(data, first, &mut budget).is_err()
 }
 
 struct StuffItEntry {
-    name: String,
+    // Index into `StuffItContainer::nodes`.
+    node: usize,
     data_fork: Vec<u8>,
     resource_fork: Vec<u8>,
     metadata: Option<Metadata>,
 }
 
+// Name of a listed entry, file or folder, made safe as one path component
+// (containers.md 2.6) and given this crate's usual replacements.
+struct Node {
+    name: String,
+    parent: Option<usize>,
+}
+
 pub struct StuffItContainer {
     prefix: String,
+    // One per listed entry, in listing order. A folder name is held once,
+    // not per descendant: paths are joined only for the entry being visited.
+    nodes: Vec<Node>,
     entries: Vec<StuffItEntry>,
+    skipped: Option<String>,
 }
 
 impl StuffItContainer {
     pub fn from_bytes(data: &[u8], prefix: String, _depth: u32) -> Result<Self> {
-        let entries = parse_and_extract(data)?;
+        let archive = sit::parse(data)?;
+        let mut budget = OutputBudget::for_input(data.len(), BUDGET_RATIO);
+        // Stored names are single components: each is made safe on its own,
+        // never split.
+        let nodes: Vec<Node> = archive
+            .entries
+            .iter()
+            .map(|entry| Node {
+                name: sanitize_path_component(&sit::safe_component(&entry.name)),
+                parent: entry.parent,
+            })
+            .collect();
+        let mut entries = Vec::new();
+        let mut skipped = Skipped::default();
 
-        Ok(Self { prefix, entries })
+        for (node, entry) in archive.entries.iter().enumerate() {
+            if entry.is_folder {
+                continue;
+            }
+            // A fork error delivers no contents: without its data fork the
+            // file is left out, without its resource fork only that fork is.
+            let data_fork = match sit::read_fork(data, &entry.data, &mut budget) {
+                Ok(bytes) => bytes,
+                Err(err) => {
+                    skipped.fork(&nodes, node, "data", &err);
+                    continue;
+                }
+            };
+            let resource_fork =
+                sit::read_fork(data, &entry.rsrc, &mut budget).unwrap_or_else(|err| {
+                    skipped.fork(&nodes, node, "resource", &err);
+                    Vec::new()
+                });
+            entries.push(StuffItEntry {
+                node,
+                data_fork,
+                resource_fork,
+                metadata: build_stuffit_metadata(entry),
+            });
+        }
+
+        Ok(Self {
+            prefix,
+            nodes,
+            entries,
+            skipped: skipped.summary(archive.incomplete, archive.findings.last()),
+        })
+    }
+}
+
+// Appends the names from the outermost folder down to `nodes[index]`,
+// separated by `/`.
+fn push_path(nodes: &[Node], index: usize, path: &mut String) {
+    let mut chain = Vec::new();
+    let mut next = Some(index);
+    // Parents have lower indices, so the walk ends.
+    while let Some((at, node)) = next.and_then(|at| Some((at, nodes.get(at)?))) {
+        chain.push(node.name.as_str());
+        next = node.parent.filter(|&parent| parent < at);
+    }
+    for (position, name) in chain.iter().rev().enumerate() {
+        if position > 0 {
+            path.push('/');
+        }
+        path.push_str(name);
+    }
+}
+
+#[derive(Default)]
+struct Skipped {
+    forks: usize,
+    first: Option<String>,
+}
+
+impl Skipped {
+    fn fork(&mut self, nodes: &[Node], node: usize, which: &str, err: &Error) {
+        self.forks += 1;
+        if self.first.is_none() {
+            let mut path = String::new();
+            push_path(nodes, node, &mut path);
+            self.first = Some(format!("{path} ({which} fork): {err}"));
+        }
     }
 
-    fn entry_path(&self, name: &str) -> String {
-        format!("{}/{}", self.prefix, sanitize_path_component(name))
+    fn summary(self, incomplete: bool, last_finding: Option<&String>) -> Option<String> {
+        let forks = self
+            .first
+            .map(|first| format!("{} unreadable fork(s) left out, first: {first}", self.forks));
+        let listing = incomplete.then(|| match last_finding {
+            Some(reason) => format!("entry list is incomplete ({reason})"),
+            None => "entry list is incomplete".to_string(),
+        });
+        match (listing, forks) {
+            (Some(listing), Some(forks)) => Some(format!("StuffIt: {listing}; {forks}")),
+            (Some(message), None) | (None, Some(message)) => Some(format!("StuffIt: {message}")),
+            (None, None) => None,
+        }
     }
 }
 
 fn compression_method_name(method: u8) -> &'static str {
-    match method & 0x0F {
+    match method {
         0 => "none",
         1 => "rle",
         2 => "lzw",
@@ -57,225 +188,36 @@ fn compression_method_name(method: u8) -> &'static str {
         6 => "fixhuf",
         8 => "mw",
         13 => "lz77+huff",
-        14 => "installer",
+        14 => "deflate",
         15 => "arsenic",
         _ => "unknown",
     }
 }
 
-fn build_stuffit_metadata(
-    file_type: &[u8; 4],
-    creator: &[u8; 4],
-    data_method: u8,
-    rsrc_method: u8,
-) -> Option<Metadata> {
-    let mut meta = Metadata::new().with_type_creator(*file_type, *creator);
+// An empty fork has no method worth reporting, whatever its header says.
+fn reported_method(fork: &ForkInfo) -> u8 {
+    if fork.unpacked_len == 0 {
+        0
+    } else {
+        fork.method
+    }
+}
 
-    // Add compression info for data fork
+fn build_stuffit_metadata(entry: &SitEntry) -> Option<Metadata> {
+    let mut meta = Metadata::new().with_type_creator(entry.file_type, entry.creator);
+    let data_method = reported_method(&entry.data);
+    let rsrc_method = reported_method(&entry.rsrc);
+
     if data_method != 0 {
-        let comp_name = compression_method_name(data_method);
-        if rsrc_method != 0 && data_method != rsrc_method {
-            // Both forks use different compression
-            let rsrc_comp = compression_method_name(rsrc_method);
-            meta.compression_method = Some(format!("data:{}, rsrc:{}", comp_name, rsrc_comp));
+        let name = compression_method_name(data_method);
+        meta.compression_method = Some(if rsrc_method != 0 && data_method != rsrc_method {
+            format!("data:{name}, rsrc:{}", compression_method_name(rsrc_method))
         } else {
-            meta.compression_method = Some(comp_name.to_string());
-        }
+            name.to_string()
+        });
     }
 
     if meta.is_empty() { None } else { Some(meta) }
-}
-
-fn parse_and_extract(data: &[u8]) -> Result<Vec<StuffItEntry>> {
-    let mut all_entries = Vec::new();
-    let mut local_result = None;
-    let mut crate_result = None;
-
-    // Try local parser for classic SIT!
-    if data.len() >= 4 && &data[0..4] == SIT1_SIGNATURE {
-        if let Ok(archive) = LocalSitArchive::parse(data) {
-            local_result = Some(archive);
-        }
-    }
-
-    // Try stuffit crate
-    if let Ok(archive) = stuffit::SitArchive::parse(data) {
-        crate_result = Some(archive);
-    }
-
-    if local_result.is_none() && crate_result.is_none() {
-        return Err(Error::invalid_format(
-            "Could not parse StuffIt archive with either parser",
-        ));
-    }
-
-    // Build name->index map for crate result for O(1) fallback lookups
-    let crate_name_index: std::collections::HashMap<&str, usize> = crate_result
-        .as_ref()
-        .map(|arch| {
-            arch.entries
-                .iter()
-                .enumerate()
-                .filter(|(_, e)| !e.is_folder)
-                .map(|(i, e)| (e.name.as_str(), i))
-                .collect()
-        })
-        .unwrap_or_default();
-
-    // Helper to try decompressing an entry via the stuffit crate
-    let try_crate_entry = |name: &str| -> Option<StuffItEntry> {
-        let &idx = crate_name_index.get(name)?;
-        let entry = &crate_result.as_ref()?.entries[idx];
-        let decomp_result = if entry.is_compressed {
-            entry.decompressed_forks()
-        } else {
-            Ok((entry.data_fork.clone(), entry.resource_fork.clone()))
-        };
-        let (data_fork, resource_fork) = decomp_result.ok()?;
-        if data_fork.is_empty() && resource_fork.is_empty() {
-            return None;
-        }
-        let metadata = build_stuffit_metadata(
-            &entry.file_type,
-            &entry.creator,
-            entry.data_method,
-            entry.rsrc_method,
-        );
-        Some(StuffItEntry {
-            name: entry.name.clone(),
-            data_fork,
-            resource_fork,
-            metadata,
-        })
-    };
-
-    if let Some(ref local) = local_result {
-        // Iterate local parser entries directly (no name collection or re-search)
-        for entry in local.entries.iter().filter(|e| !e.is_folder) {
-            // Try local parser decompression first
-            if let Ok((data_fork, resource_fork)) = entry.decompressed_forks() {
-                if !data_fork.is_empty() || !resource_fork.is_empty() {
-                    let metadata = build_stuffit_metadata(
-                        &entry.file_type,
-                        &entry.creator,
-                        entry.data_method,
-                        entry.rsrc_method,
-                    );
-                    all_entries.push(StuffItEntry {
-                        name: entry.name.clone(),
-                        data_fork,
-                        resource_fork,
-                        metadata,
-                    });
-                    continue;
-                }
-            }
-            // Fallback to stuffit crate via index lookup
-            if let Some(crate_entry) = try_crate_entry(&entry.name) {
-                all_entries.push(crate_entry);
-            }
-        }
-    } else {
-        // Only crate parser available - iterate its entries directly
-        for entry in crate_result
-            .as_ref()
-            .map(|a| a.entries.as_slice())
-            .unwrap_or_default()
-            .iter()
-            .filter(|e| !e.is_folder)
-        {
-            if let Some(crate_entry) = try_crate_entry(&entry.name) {
-                all_entries.push(crate_entry);
-            }
-        }
-    }
-
-    Ok(all_entries)
-}
-
-#[cfg(test)]
-mod stuffit_tests {
-    use super::*;
-
-    #[test]
-    fn test_parse_and_extract_rejects_invalid_data() {
-        // Neither local parser nor stuffit crate should parse random bytes
-        let result = parse_and_extract(b"this is not a stuffit archive at all");
-        assert!(result.is_err(), "Should reject invalid data");
-    }
-
-    #[test]
-    fn test_parse_and_extract_rejects_empty_data() {
-        let result = parse_and_extract(b"");
-        assert!(result.is_err(), "Should reject empty data");
-    }
-
-    #[test]
-    fn test_parse_and_extract_rejects_truncated_sit1() {
-        // SIT1 signature but truncated - should fail gracefully
-        let result = parse_and_extract(b"SIT!\x00\x00\x00\x00");
-        assert!(result.is_err(), "Should reject truncated SIT1 data");
-    }
-
-    #[test]
-    fn test_parse_and_extract_rejects_truncated_sit5() {
-        // StuffIt 5.0+ signature but truncated
-        let mut data = vec![0u8; 90];
-        data[80..87].copy_from_slice(b"StuffIt");
-        let result = parse_and_extract(&data);
-        // This may or may not be an error (the crate parser might accept it),
-        // but it should not panic
-        let _ = result;
-    }
-
-    #[test]
-    fn test_parse_and_extract_with_valid_sit1_empty_archive() {
-        // Create a minimal valid SIT1 archive header with 0 files.
-        // Archive header: 22 bytes
-        //   0-3: "SIT!" signature
-        //   4-5: num files (0)
-        //   6-9: total size (22 = header only)
-        //   10-13: "rLau"
-        //   14-21: zeros
-        let mut data = vec![0u8; 22];
-        data[0..4].copy_from_slice(b"SIT!");
-        data[4..6].copy_from_slice(&0u16.to_be_bytes()); // 0 files
-        data[6..10].copy_from_slice(&22u32.to_be_bytes()); // total size = header only
-        data[10..14].copy_from_slice(b"rLau");
-
-        // Should succeed with empty entries (or fail gracefully if parser is strict)
-        // Acceptable for parser to reject this; only the Ok case has assertions.
-        if let Ok(entries) = parse_and_extract(&data) {
-            assert!(entries.is_empty(), "Empty archive should have no entries");
-        }
-    }
-
-    #[test]
-    fn test_build_stuffit_metadata_uncompressed() {
-        // Method 0 = no compression, should return metadata only if type/creator is set
-        let meta = build_stuffit_metadata(b"\x00\x00\x00\x00", b"\x00\x00\x00\x00", 0, 0);
-        assert!(meta.is_none(), "All-zero metadata should be None");
-    }
-
-    #[test]
-    fn test_build_stuffit_metadata_with_compression() {
-        let meta = build_stuffit_metadata(b"TEXT", b"ttxt", 5, 0).unwrap();
-        assert_eq!(
-            meta.compression_method,
-            Some("lzah".to_string()),
-            "Method 5 = lzah"
-        );
-    }
-
-    #[test]
-    fn test_build_stuffit_metadata_different_fork_methods() {
-        let meta = build_stuffit_metadata(b"TEXT", b"ttxt", 1, 3).unwrap();
-        assert_eq!(
-            meta.compression_method,
-            Some("data:rle, rsrc:huffman".to_string()),
-            "Different fork methods should both be listed"
-        );
-    }
 }
 
 impl Container for StuffItContainer {
@@ -284,8 +226,12 @@ impl Container for StuffItContainer {
     }
 
     fn visit(&self, visitor: &mut dyn FnMut(&Entry<'_>) -> Result<bool>) -> Result<()> {
+        let mut full_path = String::new();
         for entry in &self.entries {
-            let full_path = self.entry_path(&entry.name);
+            full_path.clear();
+            full_path.push_str(&self.prefix);
+            full_path.push('/');
+            push_path(&self.nodes, entry.node, &mut full_path);
 
             // Always yield the file entry (even if 0-byte data fork)
             let e = match &entry.metadata {
@@ -298,12 +244,16 @@ impl Container for StuffItContainer {
 
             // Yield resource fork if present and valid
             if !entry.resource_fork.is_empty() && ResourceFork::is_valid(&entry.resource_fork) {
-                let rsrc_path = format!("{}/..namedfork/rsrc", full_path);
+                let rsrc_path = format!("{full_path}/..namedfork/rsrc");
                 let e = Entry::new(&rsrc_path, &full_path, &entry.resource_fork);
                 visitor(&e)?;
             }
         }
         Ok(())
+    }
+
+    fn skipped_entries(&self) -> Option<String> {
+        self.skipped.clone()
     }
 
     fn info(&self) -> ContainerInfo {
@@ -315,678 +265,596 @@ impl Container for StuffItContainer {
     }
 }
 
-mod parser {
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::limits::BUDGET_FLOOR;
 
-    use std::io::{Cursor, Read, Seek, SeekFrom};
-
-    use crate::sanitize_path_component;
-
-    #[derive(Debug)]
-    pub enum StuffItError {
-        InvalidSignature,
-        Malformed(String),
-        UnsupportedMethod(u8),
-        Io(std::io::Error),
-        Decompression(String),
-    }
-
-    impl std::fmt::Display for StuffItError {
-        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-            match self {
-                Self::InvalidSignature => write!(f, "Invalid StuffIt signature"),
-                Self::Malformed(msg) => write!(f, "Malformed archive: {msg}"),
-                Self::UnsupportedMethod(m) => write!(f, "Unsupported compression method: {m}"),
-                Self::Io(e) => write!(f, "I/O error: {e}"),
-                Self::Decompression(msg) => write!(f, "Decompression error: {msg}"),
-            }
-        }
-    }
-
-    impl std::error::Error for StuffItError {}
-
-    impl From<std::io::Error> for StuffItError {
-        fn from(e: std::io::Error) -> Self {
-            Self::Io(e)
-        }
-    }
-
-    #[derive(Debug, Clone)]
-    pub struct SitArchive {
-        pub entries: Vec<SitEntry>,
-    }
-
-    #[derive(Debug, Clone)]
-    pub struct SitEntry {
-        pub name: String,
-        pub data_fork: Vec<u8>,
-        pub resource_fork: Vec<u8>,
-        pub is_folder: bool,
-        pub data_method: u8,
-        pub rsrc_method: u8,
-        pub data_ulen: u32,
-        pub rsrc_ulen: u32,
-        pub file_type: [u8; 4],
-        pub creator: [u8; 4],
-    }
-
-    impl SitEntry {
-        pub fn decompressed_forks(&self) -> Result<(Vec<u8>, Vec<u8>), StuffItError> {
-            let data = if self.data_fork.is_empty() {
-                Vec::new()
-            } else {
-                decompress(&self.data_fork, self.data_method, self.data_ulen as usize)?
-            };
-
-            let rsrc = if self.resource_fork.is_empty() {
-                Vec::new()
-            } else {
-                decompress(
-                    &self.resource_fork,
-                    self.rsrc_method,
-                    self.rsrc_ulen as usize,
-                )?
-            };
-
-            Ok((data, rsrc))
-        }
-    }
-
-    // Entry header offsets (112 bytes total)
-    const SITFH_RSRC_METHOD: usize = 0;
-    const SITFH_DATA_METHOD: usize = 1;
-    const SITFH_FNAME_SIZE: usize = 2;
-    const SITFH_FNAME: usize = 3;
-    const SITFH_FILE_TYPE: usize = 66;
-    const SITFH_CREATOR: usize = 70;
-    const SITFH_RSRC_ULEN: usize = 84;
-    const SITFH_DATA_ULEN: usize = 88;
-    const SITFH_RSRC_CLEN: usize = 92;
-    const SITFH_DATA_CLEN: usize = 96;
-    const SITFH_HDR_CRC: usize = 110;
-
-    const SIT_ENTRY_SIZE: u64 = 112;
-
-    // Method flags
-    const METHOD_MASK: u8 = 0x0F;
-    const FOLDER_START: u8 = 0x20;
-    const FOLDER_END: u8 = 0x21;
-
-    impl SitArchive {
-        pub fn parse(data: &[u8]) -> Result<Self, StuffItError> {
-            if data.len() < 22 {
-                return Err(StuffItError::Malformed("Archive too small".into()));
-            }
-
-            // Check signature
-            if &data[0..4] != b"SIT!" {
-                // Check for StuffIt 5.0 format (not supported in this minimal parser)
-                if data.len() >= 87 && &data[80..87] == b"StuffIt" {
-                    return Err(StuffItError::Malformed(
-                        "StuffIt 5.0 format not supported by this parser".into(),
-                    ));
-                }
-                return Err(StuffItError::InvalidSignature);
-            }
-
-            // Read archive header
-            // Bytes 4-5: number of files (hint only)
-            // Bytes 6-9: total archive size
-            let total_size = u32::from_be_bytes([data[6], data[7], data[8], data[9]]) as u64;
-
-            // Bytes 10-13: "rLau" signature (author signature for Raymond Lau)
-            // Bytes 14-15: version info (varies by StuffIt version)
-
-            let mut cursor = Cursor::new(data);
-            cursor.seek(SeekFrom::Start(22))?; // Skip 22-byte archive header
-
-            let mut entries = Vec::new();
-            let mut folder_stack: Vec<String> = Vec::new();
-
-            // Read entries until end
-            while cursor.position() + SIT_ENTRY_SIZE <= total_size {
-                // Read 112-byte header
-                let mut header = [0u8; 112];
-                if cursor.read_exact(&mut header).is_err() {
-                    break;
-                }
-
-                // Validate header CRC (IBM CRC-16 of first 110 bytes)
-                let stored_crc =
-                    u16::from_be_bytes([header[SITFH_HDR_CRC], header[SITFH_HDR_CRC + 1]]);
-                let computed_crc = crc16_ibm(&header[..110]);
-
-                if stored_crc != computed_crc {
-                    // Some archives have invalid CRCs, try to continue
-                    // Don't fail, some old archives have bad CRCs
-                }
-
-                let rsrc_method = header[SITFH_RSRC_METHOD];
-                let data_method = header[SITFH_DATA_METHOD];
-
-                // Check for folder markers (masked to remove encrypted/folder-contains-encrypted flags)
-                let rsrc_masked = rsrc_method & !0x90;
-                let data_masked = data_method & !0x90;
-
-                if rsrc_masked == FOLDER_START || data_masked == FOLDER_START {
-                    // Folder start marker
-                    let name = read_mac_string(
-                        &header[SITFH_FNAME..SITFH_FNAME + 31],
-                        header[SITFH_FNAME_SIZE] as usize,
-                    );
-
-                    let full_path = build_path(&folder_stack, &name);
-
-                    entries.push(SitEntry {
-                        name: full_path.clone(),
-                        data_fork: Vec::new(),
-                        resource_fork: Vec::new(),
-                        is_folder: true,
-                        data_method: 0,
-                        rsrc_method: 0,
-                        data_ulen: 0,
-                        rsrc_ulen: 0,
-                        file_type: [0; 4],
-                        creator: [0; 4],
-                    });
-
-                    folder_stack.push(name);
-                    continue;
-                } else if rsrc_masked == FOLDER_END || data_masked == FOLDER_END {
-                    // Folder end marker
-                    folder_stack.pop();
-                    continue;
-                }
-
-                // Regular file entry
-                let name = read_mac_string(
-                    &header[SITFH_FNAME..SITFH_FNAME + 31],
-                    header[SITFH_FNAME_SIZE] as usize,
-                );
-
-                // Read type and creator codes
-                let file_type: [u8; 4] = header[SITFH_FILE_TYPE..SITFH_FILE_TYPE + 4]
-                    .try_into()
-                    .unwrap_or([0; 4]);
-                let creator: [u8; 4] = header[SITFH_CREATOR..SITFH_CREATOR + 4]
-                    .try_into()
-                    .unwrap_or([0; 4]);
-
-                let rsrc_len_unpacked = u32::from_be_bytes([
-                    header[SITFH_RSRC_ULEN],
-                    header[SITFH_RSRC_ULEN + 1],
-                    header[SITFH_RSRC_ULEN + 2],
-                    header[SITFH_RSRC_ULEN + 3],
-                ]);
-                let data_len_unpacked = u32::from_be_bytes([
-                    header[SITFH_DATA_ULEN],
-                    header[SITFH_DATA_ULEN + 1],
-                    header[SITFH_DATA_ULEN + 2],
-                    header[SITFH_DATA_ULEN + 3],
-                ]);
-                let rsrc_len_packed = u32::from_be_bytes([
-                    header[SITFH_RSRC_CLEN],
-                    header[SITFH_RSRC_CLEN + 1],
-                    header[SITFH_RSRC_CLEN + 2],
-                    header[SITFH_RSRC_CLEN + 3],
-                ]);
-                let data_len_packed = u32::from_be_bytes([
-                    header[SITFH_DATA_CLEN],
-                    header[SITFH_DATA_CLEN + 1],
-                    header[SITFH_DATA_CLEN + 2],
-                    header[SITFH_DATA_CLEN + 3],
-                ]);
-
-                let full_path = build_path(&folder_stack, &name);
-
-                // Read fork data
-                let data_start = cursor.position() as usize;
-
-                let resource_fork = if rsrc_len_packed > 0 {
-                    if data_start + rsrc_len_packed as usize > data.len() {
-                        return Err(StuffItError::Malformed(
-                            "Resource fork extends past end".into(),
-                        ));
-                    }
-                    data[data_start..data_start + rsrc_len_packed as usize].to_vec()
-                } else {
-                    Vec::new()
-                };
-
-                let data_fork_start = data_start + rsrc_len_packed as usize;
-                let data_fork = if data_len_packed > 0 {
-                    if data_fork_start + data_len_packed as usize > data.len() {
-                        return Err(StuffItError::Malformed("Data fork extends past end".into()));
-                    }
-                    data[data_fork_start..data_fork_start + data_len_packed as usize].to_vec()
-                } else {
-                    Vec::new()
-                };
-
-                // Advance cursor past fork data
-                cursor.seek(SeekFrom::Start(
-                    (data_fork_start + data_len_packed as usize) as u64,
-                ))?;
-
-                entries.push(SitEntry {
-                    name: full_path,
-                    data_fork,
-                    resource_fork,
-                    is_folder: false,
-                    data_method: data_method & METHOD_MASK,
-                    rsrc_method: rsrc_method & METHOD_MASK,
-                    data_ulen: data_len_unpacked,
-                    rsrc_ulen: rsrc_len_unpacked,
-                    file_type,
-                    creator,
-                });
-            }
-
-            Ok(Self { entries })
-        }
-    }
-
-    fn build_path(folder_stack: &[String], name: &str) -> String {
-        let sanitized_name = sanitize_path_component(name);
-        if folder_stack.is_empty() {
-            sanitized_name
-        } else {
-            let sanitized_folders: Vec<String> = folder_stack
-                .iter()
-                .map(|f| sanitize_path_component(f))
-                .collect();
-            format!("{}/{}", sanitized_folders.join("/"), sanitized_name)
-        }
-    }
-
-    fn read_mac_string(data: &[u8], len: usize) -> String {
-        let len = len.min(data.len()).min(31);
-        crate::formats::macintosh::encoding::decode_mac_roman_cstring(&data[..len])
-    }
-
-    fn crc16_ibm(data: &[u8]) -> u16 {
-        let mut crc: u16 = 0;
-        for &byte in data {
-            crc ^= u16::from(byte);
-            for _ in 0..8 {
+    fn crc16(data: &[u8]) -> u16 {
+        data.iter().fold(0, |crc, &byte| {
+            (0..8).fold(crc ^ u16::from(byte), |crc, _| {
                 if crc & 1 != 0 {
-                    crc = (crc >> 1) ^ 0xA001;
+                    (crc >> 1) ^ 0xA001
                 } else {
-                    crc >>= 1;
+                    crc >> 1
                 }
-            }
-        }
-        crc
+            })
+        })
     }
 
-    fn decompress(data: &[u8], method: u8, uncomp_len: usize) -> Result<Vec<u8>, StuffItError> {
-        let method = method & METHOD_MASK;
+    fn put(bytes: &mut [u8], offset: usize, value: &[u8]) {
+        bytes[offset..offset + value.len()].copy_from_slice(value);
+    }
 
-        match method {
-            0 => {
-                // Method 0: Store (no compression)
-                Ok(data.to_vec())
-            }
-            1 => {
-                // Method 1: RLE
-                decompress_rle(data, uncomp_len)
-            }
-            2 => {
-                // Method 2: LZW
-                decompress_lzw(data, uncomp_len)
-            }
-            3 => {
-                // Method 3: Huffman
-                decompress_huffman(data, uncomp_len)
-            }
-            13 => {
-                // Method 13: StuffIt 1.5.1 LZ77 + Huffman
-                decompress_sit13(data, uncomp_len)
-            }
-            _ => Err(StuffItError::UnsupportedMethod(method)),
+    // One fork of a hand-built entry: method byte, packed bytes, and the
+    // unpacked length and checksum its header declares.
+    #[derive(Clone, Copy)]
+    struct TestFork<'a> {
+        method: u8,
+        packed: &'a [u8],
+        unpacked_len: u32,
+        checksum: u16,
+    }
+
+    const NO_FORK: TestFork<'static> = TestFork {
+        method: 0,
+        packed: b"",
+        unpacked_len: 0,
+        checksum: 0,
+    };
+
+    fn stored(bytes: &[u8]) -> TestFork<'_> {
+        TestFork {
+            method: 0,
+            packed: bytes,
+            unpacked_len: bytes.len() as u32,
+            checksum: crc16(bytes),
         }
     }
 
-    fn decompress_rle(data: &[u8], uncomp_len: usize) -> Result<Vec<u8>, StuffItError> {
-        let mut output = Vec::with_capacity(uncomp_len);
-        let mut i = 0;
-
-        while i < data.len() && output.len() < uncomp_len {
-            let byte = data[i];
-            i += 1;
-
-            if byte == 0x90 {
-                // Escape byte
-                if i >= data.len() {
-                    break;
-                }
-                let count = data[i] as usize;
-                i += 1;
-
-                if count == 0 {
-                    // Literal 0x90
-                    output.push(0x90);
-                } else if let Some(&prev) = output.last() {
-                    // Repeat previous byte
-                    for _ in 1..count {
-                        if output.len() >= uncomp_len {
-                            break;
-                        }
-                        output.push(prev);
-                    }
-                }
-            } else {
-                output.push(byte);
-            }
-        }
-
-        Ok(output)
+    // Classic record (containers.md 3.4) followed by its forks.
+    fn classic_record(name: &[u8], rsrc: TestFork<'_>, data: TestFork<'_>) -> Vec<u8> {
+        let mut header = [0u8; 112];
+        header[0] = rsrc.method;
+        header[1] = data.method;
+        header[2] = name.len() as u8;
+        put(&mut header, 3, name);
+        let name_crc = crc16(&header[2..34]);
+        put(&mut header, 34, &name_crc.to_be_bytes());
+        put(&mut header, 66, b"TEXTttxt");
+        put(&mut header, 84, &rsrc.unpacked_len.to_be_bytes());
+        put(&mut header, 88, &data.unpacked_len.to_be_bytes());
+        put(&mut header, 92, &(rsrc.packed.len() as u32).to_be_bytes());
+        put(&mut header, 96, &(data.packed.len() as u32).to_be_bytes());
+        put(&mut header, 100, &rsrc.checksum.to_be_bytes());
+        put(&mut header, 102, &data.checksum.to_be_bytes());
+        let header_crc = crc16(&header[..110]);
+        put(&mut header, 110, &header_crc.to_be_bytes());
+        [&header[..], rsrc.packed, data.packed].concat()
     }
 
-    fn decompress_lzw(data: &[u8], uncomp_len: usize) -> Result<Vec<u8>, StuffItError> {
-        if data.is_empty() {
-            return Ok(Vec::new());
+    fn classic_file(name: &[u8], data: &[u8]) -> Vec<u8> {
+        classic_record(name, NO_FORK, stored(data))
+    }
+
+    // Folder start (0x20) or end (0x21) marker.
+    fn classic_marker(kind: u8, name: &[u8]) -> Vec<u8> {
+        let marker = TestFork {
+            method: kind,
+            ..NO_FORK
+        };
+        classic_record(name, marker, marker)
+    }
+
+    // Classic archive header (containers.md 3.2) and records.
+    fn classic_archive(records: &[Vec<u8>]) -> Vec<u8> {
+        let mut archive = vec![0u8; 22];
+        put(&mut archive, 0, b"SIT!");
+        put(&mut archive, 4, &(records.len() as u16).to_be_bytes());
+        put(&mut archive, 10, b"rLau");
+        archive[14] = 2;
+        archive[19] = 22;
+        archive.extend(records.iter().flatten());
+        let total = archive.len() as u32;
+        put(&mut archive, 6, &total.to_be_bytes());
+        archive
+    }
+
+    const SIT5_FIRST: u32 = 114;
+    const SIT5_FOLDER: u8 = 0x40;
+    // Entry header with a one-byte name, and second block.
+    const SIT5_ENTRY_LEN: u32 = 49 + 36;
+
+    // StuffIt 5 file header (containers.md 4.2) and entries.
+    fn sit5_archive(top_level: u16, entries: &[Vec<u8>]) -> Vec<u8> {
+        let mut archive = Vec::new();
+        archive.extend_from_slice(b"StuffIt (c)1997-1998");
+        archive.extend_from_slice(b" Aladdin Systems, Inc., http://www.aladdinsys.com/StuffIt/");
+        archive.extend_from_slice(b"\r\n\x1A\x00\x05\x10");
+        assert_eq!(archive.len(), 84);
+        archive.resize(114, 0);
+        put(&mut archive, 88, &SIT5_FIRST.to_be_bytes());
+        put(&mut archive, 92, &top_level.to_be_bytes());
+        put(&mut archive, 94, &SIT5_FIRST.to_be_bytes());
+        put(&mut archive, 100, b"\x0D\xA5\xA5Reserved\xA5\xA5\x00");
+        archive.extend(entries.iter().flatten());
+        let total = archive.len() as u32;
+        put(&mut archive, 84, &total.to_be_bytes());
+        let header_crc = crc16(&archive[..114]);
+        put(&mut archive, 98, &header_crc.to_be_bytes());
+        archive
+    }
+
+    // Entry header, second block and data fork (containers.md 4.5, 4.6).
+    // For a folder `field34` is the first-child offset and `field46` the
+    // child count; for a file they are the unpacked length and the method
+    // (high byte), with `packed_len` at 38.
+    fn sit5_entry(
+        flags: u8,
+        name: u8,
+        next: u32,
+        field34: u32,
+        packed_len: u32,
+        field46: u16,
+        data: &[u8],
+    ) -> Vec<u8> {
+        let mut entry = vec![0u8; 49];
+        put(&mut entry, 0, &[0xA5; 4]);
+        entry[4] = 1;
+        put(&mut entry, 6, &49u16.to_be_bytes());
+        entry[9] = flags;
+        put(&mut entry, 22, &next.to_be_bytes());
+        put(&mut entry, 30, &1u16.to_be_bytes());
+        put(&mut entry, 34, &field34.to_be_bytes());
+        put(&mut entry, 38, &packed_len.to_be_bytes());
+        put(&mut entry, 42, &crc16(data).to_be_bytes());
+        put(&mut entry, 46, &field46.to_be_bytes());
+        entry[48] = name;
+        let header_crc = crc16(&entry);
+        put(&mut entry, 32, &header_crc.to_be_bytes());
+
+        let mut second = [0u8; 36];
+        let second_crc = crc16(&second);
+        put(&mut second, 2, &second_crc.to_be_bytes());
+        entry.extend_from_slice(&second);
+        entry.extend_from_slice(data);
+        entry
+    }
+
+    fn sit5_file(name: u8, next: u32, data: &[u8]) -> Vec<u8> {
+        let len = data.len() as u32;
+        sit5_entry(0, name, next, len, len, 0, data)
+    }
+
+    fn open(data: &[u8]) -> StuffItContainer {
+        assert!(is_stuffit_archive(data));
+        StuffItContainer::from_bytes(data, "a.sit".to_string(), 0).unwrap()
+    }
+
+    fn paths(container: &StuffItContainer) -> Vec<String> {
+        container
+            .entries
+            .iter()
+            .map(|entry| {
+                let mut path = String::new();
+                push_path(&container.nodes, entry.node, &mut path);
+                path
+            })
+            .collect()
+    }
+
+    fn unpacked_total(container: &StuffItContainer) -> usize {
+        container
+            .entries
+            .iter()
+            .map(|e| e.data_fork.len() + e.resource_fork.len())
+            .sum()
+    }
+
+    #[test]
+    fn detection_requires_a_full_header() {
+        assert!(!is_stuffit_archive(b""));
+        // A Finder FREF record for StuffIt's own file type.
+        assert!(!is_stuffit_archive(b"SIT!\x00\x00\x00"));
+        assert!(!is_stuffit_archive(b"this is not a stuffit archive at all"));
+
+        let empty = classic_archive(&[]);
+        assert!(is_stuffit_archive(&empty));
+        assert!(!is_stuffit_archive(&empty[..21]));
+        assert!(open(&empty).entries.is_empty());
+        let mut no_second_signature = empty;
+        put(&mut no_second_signature, 10, &[0; 4]);
+        assert!(!is_stuffit_archive(&no_second_signature));
+
+        // The first record has to be a plausible one.
+        let mut archive = classic_archive(&[classic_file(b"f", b"data")]);
+        assert!(is_stuffit_archive(&archive));
+        archive[22 + 110] ^= 0xFF;
+        assert!(!is_stuffit_archive(&archive));
+
+        let sit5 = sit5_archive(1, &[sit5_file(b'f', 0, b"data")]);
+        assert!(is_stuffit_archive(&sit5));
+        assert!(!is_stuffit_archive(&sit5[..113]));
+        // The banner alone, and the banner with no usable first entry.
+        assert!(!is_stuffit_archive(b"StuffIt"));
+        assert!(!is_stuffit_archive(&sit5[..114]));
+        let mut wrong_version = sit5;
+        wrong_version[82] = 4;
+        assert!(!is_stuffit_archive(&wrong_version));
+    }
+
+    #[test]
+    fn undetected_data_is_rejected() {
+        for data in [&b""[..], b"SIT!\x00\x00\x00\x00", b"not an archive"] {
+            assert!(StuffItContainer::from_bytes(data, String::new(), 0).is_err());
         }
+    }
 
-        let mut output = Vec::with_capacity(uncomp_len);
-        let mut reader = BitReaderLE::new(data);
+    #[test]
+    fn entries_have_nested_sanitised_paths() {
+        let archive = classic_archive(&[
+            classic_marker(0x20, b"dir"),
+            classic_file(b"a/b:c", b"1"),
+            classic_marker(0x20, b".."),
+            classic_file(b".", b"2"),
+            classic_marker(0x21, b""),
+            classic_marker(0x21, b""),
+            classic_file(b"..", b"3"),
+        ]);
+        let container = open(&archive);
+        assert_eq!(paths(&container), ["dir/a_b_c", "dir/__/_", "__"]);
+        assert_eq!(container.skipped_entries(), None);
 
-        // LZW parameters for StuffIt (Unix compress compatible)
-        const CLEAR_CODE: u16 = 256;
-        const MAX_BITS: u8 = 14;
-        const MAX_SYMBOLS: u16 = 1 << MAX_BITS;
+        let mut visited = Vec::new();
+        container
+            .visit(&mut |entry| {
+                visited.push((entry.path.to_string(), entry.data.to_vec()));
+                Ok(true)
+            })
+            .unwrap();
+        assert_eq!(visited[0], ("a.sit/dir/a_b_c".to_string(), b"1".to_vec()));
+        assert_eq!(visited.len(), 3);
+    }
 
-        // Dictionary: each entry is (parent, byte)
-        // For codes 0-255, parent is -1 (no parent)
-        // parent stored as u16 with 0xFFFF meaning "no parent"
-        let mut dict: Vec<(u16, u8)> = Vec::with_capacity(MAX_SYMBOLS as usize);
+    #[test]
+    fn both_forks_are_delivered() {
+        let archive = classic_archive(&[
+            classic_record(b"both", stored(b"resource bytes"), stored(b"data bytes")),
+            classic_record(b"none", NO_FORK, NO_FORK),
+        ]);
+        let container = open(&archive);
+        assert_eq!(paths(&container), ["both", "none"]);
+        assert_eq!(container.entries[0].data_fork, b"data bytes");
+        assert_eq!(container.entries[0].resource_fork, b"resource bytes");
+        assert!(container.entries[1].data_fork.is_empty());
 
-        // Initialize with single-byte entries
-        for i in 0..256 {
-            dict.push((0xFFFF, i as u8));
-        }
-        // Reserve code 256 for clear
-        dict.push((0xFFFF, 0));
+        let sit5 = sit5_archive(
+            2,
+            &[
+                sit5_file(b'f', SIT5_FIRST + SIT5_ENTRY_LEN + 4, b"ffff"),
+                sit5_file(b'g', 0, b"gggg"),
+            ],
+        );
+        let container = open(&sit5);
+        assert_eq!(paths(&container), ["f", "g"]);
+        assert_eq!(container.entries[1].data_fork, b"gggg");
+        assert_eq!(container.skipped_entries(), None);
+    }
 
-        let mut code_bits: u8 = 9;
-        let mut prev_code: Option<u16> = None;
-        let mut symbol_counter: u32 = 0;
+    #[test]
+    fn unreadable_forks_are_left_out_and_reported() {
+        let mut bad_checksum = stored(b"data");
+        bad_checksum.checksum ^= 1;
+        let encrypted = TestFork {
+            method: 0x80,
+            packed: &[0; 16],
+            unpacked_len: 16,
+            checksum: 0,
+        };
+        let unsupported = TestFork {
+            method: 5,
+            ..stored(b"data")
+        };
+        let archive = classic_archive(&[
+            classic_record(b"bad data", NO_FORK, bad_checksum),
+            classic_record(b"encrypted", NO_FORK, encrypted),
+            classic_record(b"method 5", NO_FORK, unsupported),
+            classic_record(b"bad rsrc", bad_checksum, stored(b"kept")),
+            classic_file(b"good", b"good"),
+        ]);
+        let container = open(&archive);
+        // Never the packed bytes, never a partial fork.
+        assert_eq!(paths(&container), ["bad rsrc", "good"]);
+        assert_eq!(container.entries[0].data_fork, b"kept");
+        assert!(container.entries[0].resource_fork.is_empty());
+        let message = container.skipped_entries().unwrap();
+        assert!(message.contains("4 unreadable fork(s)"), "{message}");
+        assert!(message.contains("bad data (data fork)"), "{message}");
+        assert!(message.contains("checksum mismatch"), "{message}");
+    }
 
-        while output.len() < uncomp_len {
-            let code = match reader.read_bits_le(code_bits) {
-                Some(c) => c,
-                None => break,
+    #[test]
+    fn truncated_archive_is_reported_incomplete() {
+        let archive = classic_archive(&[classic_file(b"f", b"data"), classic_file(b"g", b"data")]);
+        let container = open(&archive[..archive.len() - 60]);
+        assert_eq!(paths(&container), ["f"]);
+        let message = container.skipped_entries().unwrap();
+        assert!(message.contains("incomplete"), "{message}");
+    }
+
+    // A lone leaf: every output byte is `A` and costs no input.
+    const HUFFMAN_ALL_A: [u8; 2] = [0xA0, 0x80];
+
+    #[test]
+    fn declared_size_beyond_the_input_is_refused() {
+        let zeros = [0u8; 64];
+        for (method, packed, declared) in [
+            (3, &HUFFMAN_ALL_A[..], u32::MAX),
+            (3, &zeros[..], 64 << 20),
+            (13, &zeros[..], 64 << 20),
+            (2, &zeros[..], 64 << 20),
+            (1, &zeros[..], 64 << 20),
+        ] {
+            let fork = TestFork {
+                method,
+                packed,
+                unpacked_len: declared,
+                checksum: 0,
             };
-            symbol_counter += 1;
-
-            if code == CLEAR_CODE {
-                // Skip padding bits to next byte boundary (Unix compress quirk)
-                let symbols_in_block = symbol_counter % 8;
-                if symbols_in_block != 0 {
-                    for _ in 0..(8 - symbols_in_block) {
-                        let _ = reader.read_bits_le(code_bits);
-                    }
-                }
-
-                // Reset dictionary
-                dict.truncate(257); // Keep 256 bytes + clear code
-                code_bits = 9;
-                prev_code = None;
-                symbol_counter = 0;
-                continue;
-            }
-
-            let num_symbols = dict.len() as u16;
-
-            // Decode the code
-            let first_byte: u8;
-            let decoded = match code.cmp(&num_symbols) {
-                std::cmp::Ordering::Less => {
-                    let s = decode_lzw_string(&dict, code);
-                    first_byte = s[0];
-                    s
-                }
-                std::cmp::Ordering::Equal => {
-                    // Special case: code not yet in dictionary (KwKwK case)
-                    if let Some(pc) = prev_code {
-                        let mut s = decode_lzw_string(&dict, pc);
-                        first_byte = s[0];
-                        s.push(first_byte);
-                        s
-                    } else {
-                        return Err(StuffItError::Decompression(
-                            "Invalid LZW stream: KwKwK without prev".into(),
-                        ));
-                    }
-                }
-                std::cmp::Ordering::Greater => {
-                    return Err(StuffItError::Decompression(format!(
-                        "Invalid LZW code: {} >= {} (code_bits={})",
-                        code, num_symbols, code_bits
-                    )));
-                }
-            };
-
-            output.extend_from_slice(&decoded);
-
-            // Add new dictionary entry
-            if let Some(pc) = prev_code {
-                if dict.len() < MAX_SYMBOLS as usize {
-                    dict.push((pc, first_byte));
-
-                    // Increase code bits when we hit a power of 2
-                    // Code bits increase AFTER we've filled the current range
-                    if dict.len() < MAX_SYMBOLS as usize && (dict.len() & (dict.len() - 1)) == 0 {
-                        code_bits += 1;
-                    }
-                }
-            }
-
-            prev_code = Some(code);
-        }
-
-        output.truncate(uncomp_len);
-        Ok(output)
-    }
-
-    fn decode_lzw_string(dict: &[(u16, u8)], mut code: u16) -> Vec<u8> {
-        let mut result = Vec::new();
-
-        while code < dict.len() as u16 {
-            let (prefix, suffix) = dict[code as usize];
-            result.push(suffix);
-            if prefix == 0xFFFF {
-                break;
-            }
-            code = prefix;
-        }
-
-        result.reverse();
-        result
-    }
-
-    fn decompress_huffman(data: &[u8], uncomp_len: usize) -> Result<Vec<u8>, StuffItError> {
-        if data.is_empty() || uncomp_len == 0 {
-            return Ok(Vec::new());
-        }
-
-        let mut reader = BitReader::new(data);
-        let mut output = Vec::with_capacity(uncomp_len);
-
-        // Read Huffman tree
-        let tree = read_huffman_tree(&mut reader)?;
-
-        // Decode data
-        while output.len() < uncomp_len {
-            let byte = decode_huffman_symbol(&tree, &mut reader)?;
-            output.push(byte);
-        }
-
-        Ok(output)
-    }
-
-    #[derive(Debug)]
-    enum HuffmanNode {
-        Leaf(u8),
-        Branch(Box<HuffmanNode>, Box<HuffmanNode>),
-    }
-
-    fn read_huffman_tree(reader: &mut BitReader) -> Result<HuffmanNode, StuffItError> {
-        let bit = reader
-            .read_bit()
-            .ok_or_else(|| StuffItError::Decompression("Unexpected end of Huffman tree".into()))?;
-
-        if bit {
-            // Leaf node - read 8-bit value
-            let value = reader.read_bits(8).ok_or_else(|| {
-                StuffItError::Decompression("Unexpected end reading Huffman leaf".into())
-            })?;
-            Ok(HuffmanNode::Leaf(value as u8))
-        } else {
-            // Branch node - read left and right subtrees
-            let left = read_huffman_tree(reader)?;
-            let right = read_huffman_tree(reader)?;
-            Ok(HuffmanNode::Branch(Box::new(left), Box::new(right)))
+            let container = open(&classic_archive(&[classic_record(b"bomb", NO_FORK, fork)]));
+            assert!(container.entries.is_empty(), "method {method}");
+            assert!(container.skipped_entries().is_some(), "method {method}");
         }
     }
 
-    fn decode_huffman_symbol(
-        tree: &HuffmanNode,
-        reader: &mut BitReader,
-    ) -> Result<u8, StuffItError> {
-        let mut node = tree;
+    #[test]
+    fn forks_share_one_output_budget_per_archive() {
+        const FORK_LEN: u32 = 1 << 20;
+        let fork = TestFork {
+            method: 3,
+            packed: &HUFFMAN_ALL_A,
+            unpacked_len: FORK_LEN,
+            checksum: crc16(&vec![b'A'; FORK_LEN as usize]),
+        };
+        let records: Vec<Vec<u8>> = (0..40)
+            .map(|_| classic_record(b"a", NO_FORK, fork))
+            .collect();
+        let container = open(&classic_archive(&records));
+        assert_eq!(unpacked_total(&container) as u64, BUDGET_FLOOR);
+        assert_eq!(
+            container.entries.len() as u64,
+            BUDGET_FLOOR / u64::from(FORK_LEN)
+        );
+        let message = container.skipped_entries().unwrap();
+        assert!(message.contains("output limit exceeded"), "{message}");
+    }
 
-        loop {
-            match node {
-                HuffmanNode::Leaf(value) => return Ok(*value),
-                HuffmanNode::Branch(left, right) => {
-                    let bit = reader.read_bit().ok_or_else(|| {
-                        StuffItError::Decompression("Unexpected end in Huffman decode".into())
-                    })?;
-                    node = if bit { right.as_ref() } else { left.as_ref() };
-                }
-            }
+    #[test]
+    fn sit5_cycles_end_the_listing() {
+        // A file whose next offset is itself.
+        let archive = sit5_archive(3, &[sit5_file(b'f', SIT5_FIRST, b"ffff")]);
+        let container = open(&archive);
+        assert_eq!(paths(&container), ["f"]);
+        assert!(container.skipped_entries().unwrap().contains("incomplete"));
+
+        // Two files that link to each other.
+        let second = SIT5_FIRST + SIT5_ENTRY_LEN + 4;
+        let archive = sit5_archive(
+            9,
+            &[
+                sit5_file(b'f', second, b"ffff"),
+                sit5_file(b'g', SIT5_FIRST, b"gggg"),
+            ],
+        );
+        let container = open(&archive);
+        assert_eq!(paths(&container), ["f", "g"]);
+        assert!(container.skipped_entries().unwrap().contains("incomplete"));
+
+        // A folder that is its own first child, and one whose child is its
+        // parent's sibling chain again.
+        let own_child = sit5_entry(SIT5_FOLDER, b'd', 0, SIT5_FIRST, 0, 5, b"");
+        let container = open(&sit5_archive(1, &[own_child]));
+        assert!(container.entries.is_empty());
+        assert!(container.skipped_entries().unwrap().contains("incomplete"));
+
+        let archive = sit5_archive(
+            2,
+            &[
+                sit5_entry(SIT5_FOLDER, b'd', second - 4, second - 4, 0, 2, b""),
+                sit5_file(b'f', SIT5_FIRST, b"ffff"),
+            ],
+        );
+        let container = open(&archive);
+        assert_eq!(paths(&container), ["d/f"]);
+        assert!(container.skipped_entries().unwrap().contains("incomplete"));
+    }
+
+    // Files whose forks all claim the bytes of the entries behind them: no
+    // offset repeats, but every file would copy most of the archive.
+    #[test]
+    fn sit5_overlapping_forks_end_the_listing() {
+        const FILES: u32 = 64;
+        let total = SIT5_FIRST + FILES * SIT5_ENTRY_LEN;
+        let entries: Vec<Vec<u8>> = (0..FILES)
+            .map(|index| {
+                let end = SIT5_FIRST + (index + 1) * SIT5_ENTRY_LEN;
+                let next = if index + 1 < FILES { end } else { 0 };
+                let fork_len = total - end;
+                sit5_entry(0, b'f', next, fork_len, fork_len, 0, b"")
+            })
+            .collect();
+        let archive = sit5_archive(FILES as u16, &entries);
+        assert_eq!(archive.len() as u32, total);
+        let listed = sit::parse(&archive).unwrap().entries.len();
+        assert!(listed > 0 && listed < FILES as usize, "{listed}");
+        let container = open(&archive);
+        assert!(unpacked_total(&container) <= archive.len());
+        let message = container.skipped_entries().unwrap();
+        assert!(message.contains("overlapping entries"), "{message}");
+    }
+
+    // The start of a genuine Installer fork: block count, block size and
+    // unpacked size, little-endian, then bits that are not RFC 1951.
+    const INSTALLER_FORK: [u8; 12] = [
+        0x01, 0x00, 0xCF, 0x02, 0x00, 0x00, 0x6E, 0x0A, 0x00, 0x00, 0x55, 0x0B,
+    ];
+
+    #[test]
+    fn installer_with_only_undecodable_method_14_is_not_descended() {
+        let installer = TestFork {
+            method: 14,
+            packed: &INSTALLER_FORK,
+            unpacked_len: 2670,
+            checksum: 0x6358,
+        };
+        let records = [
+            classic_marker(0x20, b"App"),
+            classic_record(b"Icon", installer, NO_FORK),
+            classic_record(b"Read Me", installer, installer),
+            classic_marker(0x21, b""),
+        ];
+        let mut archive = classic_archive(&records);
+        put(&mut archive, 0, b"ST46");
+        assert!(sit::detect(&archive).is_some());
+        // No fork could be delivered: the file stays a file.
+        assert!(!is_stuffit_archive(&archive));
+
+        // One readable fork of another method, and the archive is listed
+        // with the method 14 forks reported.
+        let mut mixed = classic_archive(&[
+            classic_record(b"Icon", installer, NO_FORK),
+            classic_file(b"Read Me", b"text"),
+        ]);
+        put(&mut mixed, 0, b"ST46");
+        assert!(is_stuffit_archive(&mixed));
+        let container = open(&mixed);
+        assert_eq!(paths(&container), ["Icon", "Read Me"]);
+        let message = container.skipped_entries().unwrap();
+        assert!(
+            message.contains("unsupported method 14 variant"),
+            "{message}"
+        );
+
+        // Archives without contents are not installers.
+        let empty = classic_archive(&[classic_record(b"none", NO_FORK, NO_FORK)]);
+        assert!(is_stuffit_archive(&empty));
+    }
+
+    // Method 14 as the specification frames it stays a readable archive.
+    #[cfg(feature = "common")]
+    #[test]
+    fn raw_deflate_method_14_archive_is_descended() {
+        let mut packed = vec![0x01, 0x04, 0x00, 0xFB, 0xFF];
+        packed.extend_from_slice(b"text");
+        let fork = TestFork {
+            method: 14,
+            packed: &packed,
+            unpacked_len: 4,
+            checksum: crc16(b"text"),
+        };
+        let archive = classic_archive(&[classic_record(b"f", NO_FORK, fork)]);
+        let container = open(&archive);
+        assert_eq!(container.entries[0].data_fork, b"text");
+        assert_eq!(container.skipped_entries(), None);
+    }
+
+    // Reported input: 12 packed bytes of method 15 whose zero run announces a
+    // 2^24-byte block for a fork of unpacked length 1.
+    #[test]
+    fn arsenic_zero_run_bomb_is_refused() {
+        let mut fork_header = classic_record(b"f0", NO_FORK, NO_FORK);
+        let stream = [
+            0x42, 0xC1, 0xEC, 0x1D, 0xDE, 0x96, 0x71, 0xF8, 0x7C, 0x56, 0xE2, 0x00,
+        ];
+        fork_header[1] = 15;
+        put(&mut fork_header, 88, &1u32.to_be_bytes());
+        put(&mut fork_header, 96, &12u32.to_be_bytes());
+        let header_crc = crc16(&fork_header[..110]);
+        put(&mut fork_header, 110, &header_crc.to_be_bytes());
+        fork_header.extend_from_slice(&stream);
+        let records: Vec<Vec<u8>> = (0..200).map(|_| fork_header.clone()).collect();
+
+        let started = std::time::Instant::now();
+        let container = open(&classic_archive(&records));
+        // 80 MiB and 50 ms per fork before the block was bounded by the
+        // output still owed; generous for a loaded machine.
+        assert!(started.elapsed() < std::time::Duration::from_secs(5));
+        assert!(container.entries.is_empty());
+        let message = container.skipped_entries().unwrap();
+        assert!(message.contains("200 unreadable fork(s)"), "{message}");
+        assert!(
+            message.contains("output exceeds the unpacked length"),
+            "{message}"
+        );
+    }
+
+    // Names are held once per listed entry, however deep the entry lies.
+    #[test]
+    fn folder_names_are_shared_between_entries() {
+        const DEPTH: usize = 60;
+        const FILES: usize = 500;
+        let folder = [b'd'; 31];
+        let mut records: Vec<Vec<u8>> = (0..DEPTH).map(|_| classic_marker(0x20, &folder)).collect();
+        records.extend((0..FILES).map(|_| classic_record(b"f", NO_FORK, NO_FORK)));
+        let archive = classic_archive(&records);
+        let container = open(&archive);
+        assert_eq!(container.entries.len(), FILES);
+        assert_eq!(container.nodes.len(), DEPTH + FILES);
+        let held: usize = container.nodes.iter().map(|node| node.name.len()).sum();
+        assert_eq!(held, DEPTH * 31 + FILES);
+
+        let mut longest = 0;
+        container
+            .visit(&mut |entry| {
+                longest = longest.max(entry.path.len());
+                Ok(true)
+            })
+            .unwrap();
+        assert_eq!(longest, "a.sit".len() + DEPTH * 32 + 2);
+    }
+
+    fn entry_with_methods(data: (u8, u32), rsrc: (u8, u32)) -> SitEntry {
+        let fork = |(method, unpacked_len): (u8, u32)| ForkInfo {
+            method,
+            method_byte: method,
+            unpacked_len,
+            ..ForkInfo::default()
+        };
+        SitEntry {
+            name: "f".to_string(),
+            parent: None,
+            is_folder: false,
+            file_type: *b"TEXT",
+            creator: *b"ttxt",
+            finder_flags: 0,
+            created: 0,
+            modified: 0,
+            data: fork(data),
+            rsrc: fork(rsrc),
         }
     }
 
-    fn decompress_sit13(_data: &[u8], _uncomp_len: usize) -> Result<Vec<u8>, StuffItError> {
-        // The stuffit crate handles Method 13, so we defer to it
-        Err(StuffItError::UnsupportedMethod(13))
-    }
+    #[test]
+    fn metadata_names_the_compression_methods() {
+        let method = |data, rsrc| {
+            build_stuffit_metadata(&entry_with_methods(data, rsrc))
+                .unwrap()
+                .compression_method
+        };
+        assert_eq!(method((0, 9), (0, 9)), None);
+        assert_eq!(method((5, 9), (0, 0)), Some("lzah".to_string()));
+        assert_eq!(method((13, 9), (13, 9)), Some("lz77+huff".to_string()));
+        assert_eq!(
+            method((1, 9), (3, 9)),
+            Some("data:rle, rsrc:huffman".to_string())
+        );
+        // An empty fork carries no method.
+        assert_eq!(method((13, 0), (15, 9)), None);
+        assert_eq!(method((15, 9), (13, 0)), Some("arsenic".to_string()));
 
-    struct BitReader<'a> {
-        data: &'a [u8],
-        pos: usize,
-        bit_pos: u8,
-    }
-
-    impl<'a> BitReader<'a> {
-        fn new(data: &'a [u8]) -> Self {
-            Self {
-                data,
-                pos: 0,
-                bit_pos: 0,
-            }
-        }
-
-        fn read_bit(&mut self) -> Option<bool> {
-            if self.pos >= self.data.len() {
-                return None;
-            }
-
-            let bit = (self.data[self.pos] >> (7 - self.bit_pos)) & 1 != 0;
-            self.bit_pos += 1;
-            if self.bit_pos >= 8 {
-                self.bit_pos = 0;
-                self.pos += 1;
-            }
-            Some(bit)
-        }
-
-        fn read_bits(&mut self, count: u8) -> Option<u16> {
-            let mut result = 0u16;
-            for _ in 0..count {
-                let bit = self.read_bit()?;
-                result = (result << 1) | if bit { 1 } else { 0 };
-            }
-            Some(result)
-        }
-    }
-
-    struct BitReaderLE<'a> {
-        data: &'a [u8],
-        pos: usize,
-        bit_buffer: u32,
-        bits_in_buffer: u8,
-    }
-
-    impl<'a> BitReaderLE<'a> {
-        fn new(data: &'a [u8]) -> Self {
-            Self {
-                data,
-                pos: 0,
-                bit_buffer: 0,
-                bits_in_buffer: 0,
-            }
-        }
-
-        fn read_bits_le(&mut self, count: u8) -> Option<u16> {
-            // Fill the buffer with enough bits
-            while self.bits_in_buffer < count {
-                if self.pos >= self.data.len() {
-                    if self.bits_in_buffer == 0 {
-                        return None;
-                    }
-                    break;
-                }
-                self.bit_buffer |= (self.data[self.pos] as u32) << self.bits_in_buffer;
-                self.bits_in_buffer += 8;
-                self.pos += 1;
-            }
-
-            if self.bits_in_buffer < count {
-                return None;
-            }
-
-            let result = (self.bit_buffer & ((1 << count) - 1)) as u16;
-            self.bit_buffer >>= count;
-            self.bits_in_buffer -= count;
-            Some(result)
-        }
-    }
-
-    #[cfg(test)]
-    mod tests {
-        use super::*;
-
-        #[test]
-        fn test_crc16_ibm() {
-            // Test vector
-            let data = b"123456789";
-            let crc = crc16_ibm(data);
-            assert_eq!(crc, 0xBB3D);
-        }
-
-        #[test]
-        fn test_rle_decompress() {
-            // "AB" followed by escape to repeat B 5 times
-            let compressed = vec![0x41, 0x42, 0x90, 0x05];
-            let result = decompress_rle(&compressed, 6).unwrap();
-            assert_eq!(result, b"ABBBBB");
-        }
-
-        #[test]
-        fn test_rle_literal_escape() {
-            // Literal 0x90 byte (escape followed by 0)
-            let compressed = vec![0x90, 0x00];
-            let result = decompress_rle(&compressed, 1).unwrap();
-            assert_eq!(result, vec![0x90]);
-        }
-
-        #[test]
-        fn test_mac_string() {
-            let data = b"Hello\x00\x00\x00";
-            let result = read_mac_string(data, 8);
-            assert_eq!(result, "Hello");
-        }
+        let mut plain = entry_with_methods((0, 0), (0, 0));
+        plain.file_type = [0; 4];
+        plain.creator = [0; 4];
+        assert!(build_stuffit_metadata(&plain).is_none());
     }
 }

@@ -3,7 +3,7 @@ use crate::error::{Error, Result};
 use crate::format::ContainerFormat;
 use crate::{Container, ContainerInfo, Entry, Metadata};
 
-use super::resource_fork::ResourceFork;
+use super::resource_fork::is_resource_fork_file;
 
 const APPLE_DOUBLE_MAGIC: u32 = 0x0005_1607;
 const APPLE_DOUBLE_HEADER_SIZE: usize = 26;
@@ -80,6 +80,25 @@ pub struct AppleDoubleFile {
 
 impl AppleDoubleFile {
     pub fn parse(data: &[u8]) -> Result<Self> {
+        let fields = AppleDoubleFields::scan(data)?;
+        Ok(Self {
+            resource_fork: fields.resource_fork.to_vec(),
+            file_type: fields.file_type,
+            creator: fields.creator,
+        })
+    }
+}
+
+// Borrowed view of an AppleDouble file, so checks that only look at the fork
+// do not copy it.
+struct AppleDoubleFields<'a> {
+    resource_fork: &'a [u8],
+    file_type: Option<[u8; 4]>,
+    creator: Option<[u8; 4]>,
+}
+
+impl<'a> AppleDoubleFields<'a> {
+    fn scan(data: &'a [u8]) -> Result<Self> {
         if data.len() < 26 {
             return Err(Error::invalid_format("AppleDouble file too short"));
         }
@@ -91,7 +110,7 @@ impl AppleDoubleFile {
 
         let num_entries = u16::from_be_bytes([data[24], data[25]]) as usize;
 
-        let mut resource_fork = Vec::new();
+        let mut resource_fork: &[u8] = &[];
         let mut file_type = None;
         let mut creator = None;
 
@@ -120,13 +139,17 @@ impl AppleDoubleFile {
                 data[entry_offset + 11],
             ]) as usize;
 
-            if offset + length > data.len() {
+            let Some(body) = offset
+                .checked_add(length)
+                .and_then(|end| data.get(offset..end))
+            else {
                 continue;
-            }
+            };
 
             match entry_id {
-                ENTRY_RESOURCE_FORK => {
-                    resource_fork = data[offset..offset + length].to_vec();
+                // First non-empty one wins.
+                ENTRY_RESOURCE_FORK if resource_fork.is_empty() => {
+                    resource_fork = body;
                 }
                 ENTRY_FINDER_INFO if length >= 8 => {
                     // Finder Info: first 4 bytes = type, next 4 bytes = creator
@@ -167,23 +190,43 @@ pub struct AppleDoubleContainer {
 }
 
 impl AppleDoubleContainer {
-    pub fn from_bytes(data: &[u8], prefix: String, _depth: u32) -> Result<Self> {
+    pub fn from_bytes(data: &[u8], prefix: String) -> Result<Self> {
         if !is_apple_double_file(data) {
             return Err(Error::invalid_format("Not an AppleDouble file"));
         }
-        let ad = AppleDoubleFile::parse(data)?;
-        let resource_fork = if ResourceFork::is_valid(&ad.resource_fork) {
-            ad.resource_fork
-        } else {
-            Vec::new()
-        };
+        let fields = AppleDoubleFields::scan(data)?;
+        if !has_valid_resource_fork(fields.resource_fork) {
+            return Err(Error::invalid_format(
+                "AppleDouble file has no valid resource fork",
+            ));
+        }
         Ok(Self {
             prefix,
-            resource_fork,
-            file_type: ad.file_type,
-            creator: ad.creator,
+            resource_fork: fields.resource_fork.to_vec(),
+            file_type: fields.file_type,
+            creator: fields.creator,
         })
     }
+}
+
+// Strict, so the container always yields at least one resource: a lenient
+// check would open macOS's empty placeholder fork as a container with nothing
+// in it, and the file's bytes would vanish from leaf traversal.
+fn has_valid_resource_fork(resource_fork: &[u8]) -> bool {
+    is_resource_fork_file(resource_fork)
+}
+
+/// AppleDouble file whose resource fork is structurally valid and holds at
+/// least one resource.
+///
+/// Only these open as a standalone container; others (e.g. a Finder-info-only
+/// `._Folder`, or a sidecar with an empty placeholder fork) stay leaves so
+/// their bytes are still listed and extracted.
+#[must_use]
+pub fn is_standalone_apple_double(data: &[u8]) -> bool {
+    is_apple_double_file(data)
+        && AppleDoubleFields::scan(data)
+            .is_ok_and(|fields| has_valid_resource_fork(fields.resource_fork))
 }
 
 impl Container for AppleDoubleContainer {
@@ -192,9 +235,6 @@ impl Container for AppleDoubleContainer {
     }
 
     fn visit(&self, visitor: &mut dyn FnMut(&Entry<'_>) -> Result<bool>) -> Result<()> {
-        if self.resource_fork.is_empty() {
-            return Ok(());
-        }
         let rsrc_path = format!("{}/..namedfork/rsrc", self.prefix);
         let metadata = match (self.file_type, self.creator) {
             (Some(ft), Some(cr)) => Some(Metadata::new().with_type_creator(ft, cr)),
@@ -213,7 +253,7 @@ impl Container for AppleDoubleContainer {
         ContainerInfo {
             path: self.prefix.clone(),
             format: ContainerFormat::AppleDouble,
-            entry_count: Some(usize::from(!self.resource_fork.is_empty())),
+            entry_count: Some(1),
         }
     }
 }
@@ -227,7 +267,7 @@ impl Container for AppleDoubleContainer {
 // `AppleDoubleFile::parse` so the enrichment and yield/recurse stay in the
 // same place.
 
-/// AppleDouble with optional Finder Info and a resource-fork entry.
+// AppleDouble with optional Finder Info and a resource-fork entry.
 #[cfg(test)]
 pub(crate) fn build_apple_double(version: u32, rsrc: &[u8], finder: Option<&[u8; 8]>) -> Vec<u8> {
     let mut entries: Vec<(u32, Vec<u8>)> = Vec::new();
@@ -314,7 +354,7 @@ mod tests {
         let fork =
             crate::formats::macintosh::resource_fork::build_test_fork(&[(*b"CODE", 1, None, &[1])]);
         let ad = build_apple_double(0x0002_0000, &fork, Some(b"APPLtest"));
-        let container = AppleDoubleContainer::from_bytes(&ad, "app.rsrc".to_string(), 8).unwrap();
+        let container = AppleDoubleContainer::from_bytes(&ad, "app.rsrc".to_string()).unwrap();
         assert_eq!(container.info().format, ContainerFormat::AppleDouble);
         let mut seen = Vec::new();
         container
@@ -338,6 +378,62 @@ mod tests {
                 Some(*b"test")
             )]
         );
+    }
+
+    #[test]
+    fn repeated_resource_fork_entries_use_the_first() {
+        let bodies: [&[u8]; 3] = [b"first", b"second", b"third"];
+        let mut ad = APPLE_DOUBLE_MAGIC.to_be_bytes().to_vec();
+        ad.extend_from_slice(&0x0002_0000u32.to_be_bytes());
+        ad.extend_from_slice(&[0u8; 16]);
+        ad.extend_from_slice(&(bodies.len() as u16).to_be_bytes());
+        let mut offset = APPLE_DOUBLE_HEADER_SIZE + 12 * bodies.len();
+        for body in bodies {
+            ad.extend_from_slice(&ENTRY_RESOURCE_FORK.to_be_bytes());
+            ad.extend_from_slice(&(offset as u32).to_be_bytes());
+            ad.extend_from_slice(&(body.len() as u32).to_be_bytes());
+            offset += body.len();
+        }
+        for body in bodies {
+            ad.extend_from_slice(body);
+        }
+        assert_eq!(AppleDoubleFile::parse(&ad).unwrap().resource_fork, b"first");
+    }
+
+    #[test]
+    fn out_of_range_entries_are_skipped() {
+        let fork =
+            crate::formats::macintosh::resource_fork::build_test_fork(&[(*b"CODE", 1, None, &[1])]);
+        let good = build_apple_double(0x0002_0000, &fork, Some(b"APPLtest"));
+        assert!(is_standalone_apple_double(&good));
+
+        // Resource fork descriptor is the second entry. offset + length wraps
+        // a 32-bit usize to a small in-bounds value.
+        let rsrc_entry = APPLE_DOUBLE_HEADER_SIZE + 12;
+        for (offset, length) in [
+            (0xFFFF_FFF0u32, 0x20u32),
+            (0x20, 0xFFFF_FFF0),
+            (u32::MAX, u32::MAX),
+            (good.len() as u32, 1),
+        ] {
+            let mut bad = good.clone();
+            bad[rsrc_entry + 4..rsrc_entry + 8].copy_from_slice(&offset.to_be_bytes());
+            bad[rsrc_entry + 8..rsrc_entry + 12].copy_from_slice(&length.to_be_bytes());
+            let ad = AppleDoubleFile::parse(&bad).unwrap();
+            assert!(ad.resource_fork.is_empty(), "{offset:#x}+{length:#x}");
+            assert_eq!(ad.file_type, Some(*b"APPL"));
+            assert!(!is_standalone_apple_double(&bad));
+            assert!(AppleDoubleContainer::from_bytes(&bad, "x".to_string()).is_err());
+        }
+    }
+
+    #[test]
+    fn empty_placeholder_fork_is_not_standalone() {
+        let blank = crate::formats::macintosh::resource_fork::build_placeholder_fork();
+        let ad = build_apple_double(0x0002_0000, &blank, Some(b"TEXTttxt"));
+        assert_eq!(AppleDoubleFile::parse(&ad).unwrap().resource_fork, blank);
+        assert!(!is_standalone_apple_double(&ad));
+        assert!(AppleDoubleContainer::from_bytes(&ad, "._x".to_string()).is_err());
     }
 
     #[test]

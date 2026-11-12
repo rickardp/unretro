@@ -34,10 +34,30 @@ const RAR5_END_HEADER: u64 = 5;
 /// disc images while blocking decompression bombs.
 const MAX_COMPRESSION_RATIO: u64 = 1000;
 
-/// Minimum packed size (bytes) below which the ratio check applies.
-/// Tiny stored entries (< 64 bytes packed) are exempt because even a
-/// 1-byte packed entry decompressing to a few KB is harmless.
+/// Packed size (bytes) used as the ratio floor for tiny entries.
+/// An entry packed into fewer bytes is measured as if it were this large,
+/// so a few packed bytes may still expand to a few KB, but no further.
 const RATIO_CHECK_MIN_PACKED: u64 = 64;
+
+// The decoders size their output buffer from `unpacked_size` before decoding
+// anything, so the declared size has to be bounded by the input up front.
+fn check_declared_size(kind: &str, name: &str, packed_size: u64, unpacked_size: u64) -> Result<()> {
+    if unpacked_size > crate::MAX_DECOMPRESSED_SIZE {
+        return Err(Error::invalid_format(format!(
+            "{kind} entry '{name}' declared size {unpacked_size} exceeds {} byte limit",
+            crate::MAX_DECOMPRESSED_SIZE
+        )));
+    }
+    let ratio_base = packed_size.max(RATIO_CHECK_MIN_PACKED);
+    if unpacked_size / ratio_base > MAX_COMPRESSION_RATIO {
+        return Err(Error::invalid_format(format!(
+            "{kind} entry '{name}' compression ratio ({:.0}:1) exceeds safety limit ({}:1)",
+            unpacked_size as f64 / ratio_base as f64,
+            MAX_COMPRESSION_RATIO
+        )));
+    }
+    Ok(())
+}
 
 #[must_use]
 pub fn is_rar_archive(data: &[u8]) -> bool {
@@ -142,16 +162,12 @@ fn parse_rar4(data: &[u8]) -> Result<Vec<RarEntry>> {
                 || file_hdr.name.ends_with('\\')
                 || is_rar4_directory(&data[offset..], &file_hdr);
             if !is_dir && !file_hdr.is_encrypted && !file_hdr.continues_from_previous {
-                if file_hdr.packed_size >= RATIO_CHECK_MIN_PACKED
-                    && file_hdr.unpacked_size / file_hdr.packed_size > MAX_COMPRESSION_RATIO
-                {
-                    return Err(Error::invalid_format(format!(
-                        "RAR4 entry '{}' compression ratio ({:.0}:1) exceeds safety limit ({}:1)",
-                        file_hdr.name,
-                        file_hdr.unpacked_size as f64 / file_hdr.packed_size as f64,
-                        MAX_COMPRESSION_RATIO
-                    )));
-                }
+                check_declared_size(
+                    "RAR4",
+                    &file_hdr.name,
+                    file_hdr.packed_size,
+                    file_hdr.unpacked_size,
+                )?;
 
                 let compressed_data = &data[data_start..data_end];
 
@@ -250,9 +266,10 @@ fn parse_rar5(data: &[u8]) -> Result<Vec<RarEntry>> {
     let mut offset = 8; // Skip RAR5 marker (8 bytes)
 
     // Parse archive header
-    let (_archive_hdr, consumed) = Rar5ArchiveHeaderParser::parse(&data[offset..])
+    let (archive_hdr, consumed) = Rar5ArchiveHeaderParser::parse(&data[offset..])
         .map_err(|e| Error::invalid_format(format!("Invalid RAR5 archive header: {e}")))?;
     offset += consumed;
+    let solid_archive = archive_hdr.archive_flags.is_solid;
 
     let mut decoder = crate::formats::dos::rar_stream::decompress::rar5::Rar5Decoder::new();
 
@@ -286,16 +303,12 @@ fn parse_rar5(data: &[u8]) -> Result<Vec<RarEntry>> {
                 && !file_hdr.is_encrypted()
                 && !file_hdr.continues_from_previous()
             {
-                if file_hdr.packed_size >= RATIO_CHECK_MIN_PACKED
-                    && file_hdr.unpacked_size / file_hdr.packed_size > MAX_COMPRESSION_RATIO
-                {
-                    return Err(Error::invalid_format(format!(
-                        "RAR5 entry '{}' compression ratio ({:.0}:1) exceeds safety limit ({}:1)",
-                        file_hdr.name,
-                        file_hdr.unpacked_size as f64 / file_hdr.packed_size as f64,
-                        MAX_COMPRESSION_RATIO
-                    )));
-                }
+                check_declared_size(
+                    "RAR5",
+                    &file_hdr.name,
+                    file_hdr.packed_size,
+                    file_hdr.unpacked_size,
+                )?;
 
                 let compressed_data = &data[data_start..data_end];
 
@@ -313,6 +326,7 @@ fn parse_rar5(data: &[u8]) -> Result<Vec<RarEntry>> {
                             file_hdr.unpacked_size,
                             file_hdr.compression.method,
                             file_hdr.compression.is_solid,
+                            solid_archive,
                         )
                         .map_err(|e| {
                             Error::decompression(format!(
@@ -442,5 +456,61 @@ impl Container for RarContainer {
         index
             .get(&lower)
             .map(|&idx| self.entries[idx].data.as_slice())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn declared_size_accepts_plausible_entries() {
+        // Stored, ordinary ratio, and a tiny entry expanding to a few KB.
+        for (packed, unpacked) in [
+            (0, 0),
+            (1000, 1000),
+            (1 << 20, 20 << 20),
+            (10, 4096),
+            (64, 64 * MAX_COMPRESSION_RATIO),
+            (crate::MAX_DECOMPRESSED_SIZE, crate::MAX_DECOMPRESSED_SIZE),
+        ] {
+            assert!(
+                check_declared_size("RAR5", "ok.bin", packed, unpacked).is_ok(),
+                "{packed} -> {unpacked}"
+            );
+        }
+    }
+
+    #[test]
+    fn declared_size_rejects_tiny_entry_claiming_huge_output() {
+        // Entries under 64 packed bytes used to skip the check entirely.
+        for packed in [0, 1, 63] {
+            for unpacked in [1 << 20, crate::MAX_DECOMPRESSED_SIZE, u64::MAX] {
+                assert!(
+                    check_declared_size("RAR4", "bomb.bin", packed, unpacked).is_err(),
+                    "{packed} -> {unpacked}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn declared_size_rejects_ratio_and_absolute_limit() {
+        let err = check_declared_size("RAR5", "bomb.bin", 1000, 1000 * 1001).unwrap_err();
+        assert!(err.to_string().contains("compression ratio"), "{err}");
+
+        // Ratio is fine (1:1) but the size is past MAX_DECOMPRESSED_SIZE.
+        let over = crate::MAX_DECOMPRESSED_SIZE + 1;
+        let err = check_declared_size("RAR5", "big.bin", over, over).unwrap_err();
+        assert!(err.to_string().contains("byte limit"), "{err}");
+    }
+
+    #[test]
+    fn rar4_decoder_does_not_preallocate_declared_size() {
+        // Garbage stream: whatever the outcome, 4 GiB must not be reserved.
+        let mut decoder = Rar29Decoder::new();
+        if let Ok(output) = decoder.decompress(&[0x5A; 64], u64::from(u32::MAX)) {
+            assert!(output.capacity() <= 64 * 1024 * 1024);
+        }
     }
 }

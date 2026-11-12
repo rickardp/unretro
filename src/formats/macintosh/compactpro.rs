@@ -461,7 +461,7 @@ struct RleOutput {
 impl RleOutput {
     fn new(capacity: usize) -> Self {
         Self {
-            output: Vec::with_capacity(capacity),
+            output: Vec::with_capacity(crate::limits::prealloc_hint(capacity as u64)),
             state: RleState::None,
             save_char: 0,
             remaining: capacity,
@@ -655,6 +655,11 @@ fn read_huffman_tree(reader: &mut BitReader, size: usize) -> Vec<HuffNode> {
         j = (j << 1) + tree_count[k as usize];
     }
     let unused = (1u32 << max_length).saturating_sub(j);
+    let tree_size = size * 2 + 8;
+    // Every entry needs a leaf slot; a code table that cannot fit is corrupt.
+    if entries.len().saturating_add(unused as usize) > tree_size {
+        return vec![HuffNode::default(); tree_size];
+    }
     for _ in 0..unused {
         entries.push((size as u16, max_length));
     }
@@ -669,7 +674,6 @@ fn read_huffman_tree(reader: &mut BitReader, size: usize) -> Vec<HuffNode> {
     });
 
     // Build tree
-    let tree_size = size * 2 + 8;
     let mut tree = vec![HuffNode::default(); tree_size];
 
     if entries.is_empty() || max_length == 0 {
@@ -686,7 +690,10 @@ fn read_huffman_tree(reader: &mut BitReader, size: usize) -> Vec<HuffNode> {
             idx -= 1;
             tree[next].is_leaf = true;
             tree[next].value = entries[idx].0;
-            next -= 1;
+            next = match next.checked_sub(1) {
+                Some(n) => n,
+                None => return vec![HuffNode::default(); tree_size],
+            };
         }
 
         // Build internal nodes
@@ -698,7 +705,10 @@ fn read_huffman_tree(reader: &mut BitReader, size: usize) -> Vec<HuffNode> {
                 tree[next].one = j;
                 tree[next].zero = j - 1;
                 j -= 2;
-                next -= 1;
+                next = match next.checked_sub(1) {
+                    Some(n) => n,
+                    None => return vec![HuffNode::default(); tree_size],
+                };
             }
         }
         lvl_start = parents;
@@ -789,12 +799,11 @@ fn decompress_rle_lzh(input: &[u8], output_len: usize) -> Result<Vec<u8>> {
                 let offset_lo = reader.get_6bits() as usize;
                 let offset = (offset_hi << 6) | offset_lo;
 
-                let mut back_ptr = lz_ptr.wrapping_sub(offset);
-                for _ in 0..length {
-                    let byte = lz_buffer[back_ptr & (CIRCSIZE - 1)];
+                let back_start = lz_ptr.wrapping_sub(offset);
+                for i in 0..length {
+                    let byte = lz_buffer[back_start.wrapping_add(i) & (CIRCSIZE - 1)];
                     lz_buffer[lz_ptr & (CIRCSIZE - 1)] = byte;
                     lz_ptr += 1;
-                    back_ptr += 1;
                     rle.output_char(byte);
                     if rle.remaining == 0 {
                         break;
@@ -837,5 +846,36 @@ mod tests {
         let input = [b'A', ESC1, ESC2, 0x05];
         let result = decompress_rle(&input, 5).unwrap();
         assert_eq!(result, b"AAAAA");
+    }
+
+    #[test]
+    fn test_rle_huge_declared_size_does_not_drive_allocation() {
+        let input = [b'A', ESC1, ESC2, 0x05];
+        let result = decompress_rle(&input, u32::MAX as usize).unwrap();
+        assert_eq!(result, b"AAAAA");
+        assert!(result.capacity() <= crate::limits::PREALLOC_LIMIT);
+    }
+
+    #[test]
+    fn test_rle_output_larger_than_prealloc_limit() {
+        let target = crate::limits::PREALLOC_LIMIT + 1000;
+        let input = vec![b'Z'; target];
+        let result = decompress_rle(&input, target).unwrap();
+        assert_eq!(result, input);
+    }
+
+    #[test]
+    fn test_huffman_tree_with_oversized_padding_is_rejected() {
+        // One code of length 15 leaves 32767 unused codes, far more than the
+        // literal tree's node table can hold.
+        let mut input = vec![0, 0, 0, 0, 1, 0xF0];
+        input.extend_from_slice(&[0; 10]);
+        let output = decompress(&input, 100, true).unwrap();
+        assert!(output.is_empty());
+    }
+
+    #[test]
+    fn test_decompress_rejects_implausible_ratio() {
+        assert!(decompress(&[b'A'; 4], u32::MAX as usize, false).is_err());
     }
 }

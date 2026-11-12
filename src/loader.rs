@@ -17,23 +17,29 @@ use crate::formats::macintosh::resource_fork;
 use crate::source::{MmapStrategy, Source};
 use crate::{Container, ContainerInfo, DEFAULT_MAX_DEPTH, Entry, EntryType};
 
+#[cfg(feature = "common")]
+use crate::formats::common::bzip2_container::{Bzip2Container, is_bzip2_file};
 #[cfg(feature = "std")]
 use crate::formats::common::directory::DirectoryContainer;
-#[cfg(all(feature = "common", feature = "__backend_common"))]
+#[cfg(feature = "common")]
 use crate::formats::common::gzip::{GzipContainer, is_gzip_file};
-#[cfg(all(feature = "common", feature = "__backend_common"))]
+#[cfg(feature = "common")]
 use crate::formats::common::tar::{TarContainer, could_be_legacy_tar, is_tar_archive};
 #[cfg(all(feature = "xz", feature = "__backend_xz"))]
 use crate::formats::common::xz::{XzContainer, is_xz_file};
-#[cfg(all(feature = "common", feature = "__backend_common"))]
-use crate::formats::common::zip::{ZipContainer, is_zip_archive};
+#[cfg(feature = "common")]
+use crate::formats::common::zip::{ZipContainer, is_embedded_zip_archive, is_zip_archive};
 
+#[cfg(feature = "amiga")]
+use crate::formats::amiga::adf::{AdfContainer, is_adf_image};
 #[cfg(feature = "amiga")]
 use crate::formats::amiga::lha::{LhaContainer, is_lha_archive};
 
-#[cfg(all(feature = "macintosh", feature = "__backend_mac_binhex"))]
+#[cfg(feature = "macintosh")]
+use crate::compat::Cow;
+#[cfg(feature = "macintosh")]
 use crate::formats::macintosh::binhex::{BinHexContainer, is_binhex_file};
-#[cfg(all(feature = "macintosh", feature = "__backend_mac_stuffit"))]
+#[cfg(feature = "macintosh")]
 use crate::formats::macintosh::stuffit::{StuffItContainer, is_stuffit_archive};
 #[cfg(feature = "macintosh")]
 use crate::formats::macintosh::{
@@ -43,7 +49,7 @@ use crate::formats::macintosh::{
     macbinary::{
         AppleSingleContainer, MacBinaryContainer, is_apple_single_file, is_macbinary_file,
     },
-    resource_fork::ResourceFork,
+    resource_fork::{BareResourceForkContainer, RESOURCE_FORK_SUFFIX, ResourceFork},
 };
 #[cfg(feature = "macintosh")]
 use crate::metadata::Metadata;
@@ -71,6 +77,9 @@ use crate::formats::dos::fat::{FatContainer, is_fat_image};
 
 #[cfg(feature = "dos")]
 use crate::formats::dos::gpt::{GptContainer, is_gpt_image};
+
+#[cfg(feature = "dos")]
+use crate::formats::dos::iso9660::{Iso9660Container, is_iso9660_image};
 
 #[cfg(feature = "dos")]
 use crate::formats::dos::mbr::{MbrContainer, is_mbr_image};
@@ -101,6 +110,9 @@ pub enum TraversalDiagnosticCode {
     NestedContainerTraversalFailed,
     /// Native resource fork traversal failed.
     ResourceForkTraversalFailed,
+    /// A container was traversed, but damaged or unsupported entries in it
+    /// were left out. Recoverable at any depth, including the root.
+    ContainerEntriesSkipped,
 }
 
 impl TraversalDiagnosticCode {
@@ -812,19 +824,26 @@ where
         let (ad_metadata_override, ad_resource_fork): (Option<Metadata>, Option<Vec<u8>>) = {
             // If this entry IS a sidecar and a companion data file exists in
             // the same container, hide it — the companion's iteration will
-            // pick up the sidecar's metadata.
-            if apple_double::is_apple_double_path(entry.path)
-                && apple_double::is_apple_double_file(entry.data)
-            {
-                if let Some(rel) = extract_relative_path(entry.path, &prefix) {
-                    if let Some(companion) = apple_double::data_fork_path(rel) {
-                        if container.has_file(&companion) {
-                            return Ok(true);
-                        }
-                    }
+            // pick up the sidecar's metadata. A sidecar without a resource
+            // fork holds only Finder info; it is also hidden when it belongs
+            // to a directory or sits in a Finder zip's `__MACOSX/` tree.
+            let rel = extract_relative_path(entry.path, &prefix);
+            if let Some(rel) = rel.as_deref().filter(|rel| {
+                apple_double::is_apple_double_path(rel)
+                    && apple_double::is_apple_double_file(entry.data)
+            }) {
+                let companion = apple_double::data_fork_path(rel);
+                if companion.as_deref().is_some_and(|c| container.has_file(c)) {
+                    return Ok(true);
+                }
+                if !apple_double::is_standalone_apple_double(entry.data)
+                    && (rel.starts_with("__MACOSX/")
+                        || companion.as_deref().is_some_and(|c| container.has_dir(c)))
+                {
+                    return Ok(true);
                 }
                 (None, None)
-            } else if let Some(rel) = extract_relative_path(entry.path, &prefix) {
+            } else if let Some(rel) = rel.as_deref() {
                 let sidecar_data = apple_double::resource_fork_paths(rel)
                     .into_iter()
                     .find_map(|p| container.read_file(&p));
@@ -842,9 +861,8 @@ where
                                     ),
                                     _ => None,
                                 };
-                                let rsrc = if !ad.resource_fork.is_empty()
-                                    && ResourceFork::is_valid(&ad.resource_fork)
-                                {
+                                // An empty placeholder fork is no fork.
+                                let rsrc = if ResourceFork::has_resources(&ad.resource_fork) {
                                     Some(ad.resource_fork)
                                 } else {
                                     None
@@ -969,40 +987,34 @@ where
                     detected_format,
                 )
             };
-            match open_result {
-                Ok(nested) => {
-                    if let Err(err) = visit_container_recursive(
-                        nested.as_ref(),
-                        path_filter,
-                        depth - 1,
-                        options,
-                        entry_types,
-                        visitor,
-                        report,
-                        false,
-                    ) {
-                        visitor_error = Some(err);
-                        return Err(visitor_error_sentinel());
-                    }
-                }
-                Err(err) => report.push_diagnostic(
-                    TraversalDiagnosticCode::NestedContainerOpenFailed,
-                    entry.path,
-                    err.to_string(),
-                ),
+            if let Err(err) = visit_nested(
+                open_result,
+                entry.path,
+                path_filter,
+                depth - 1,
+                options,
+                entry_types,
+                visitor,
+                report,
+            ) {
+                visitor_error = Some(err);
+                return Err(visitor_error_sentinel());
             }
         }
 
         // If we had an AppleDouble sidecar with a resource fork AND we did not
         // route that resource fork through the HFS/NDIF descent above, yield
-        // it as its own `..namedfork/rsrc` entry so downstream visitors can
-        // see the resource fork contents.
+        // it as its own `..namedfork/rsrc` entry and descend into it, so its
+        // resources appear exactly as a native or MacBinary fork's would.
         #[cfg(feature = "macintosh")]
         if let Some(rsrc) = ad_resource_fork {
-            let rsrc_path = format!("{}/..namedfork/rsrc", entry.path);
+            let rsrc_path = format!("{}{RESOURCE_FORK_SUFFIX}", entry.path);
             let filtered_out = matches!(path_filter, PathFilter::Prefix(filter)
                 if !path_matches_prefix(&rsrc_path, filter));
-            if !matches!(detected_format, Some(ContainerFormat::Hfs)) && !filtered_out {
+            if !matches!(detected_format, Some(ContainerFormat::Hfs))
+                && !filtered_out
+                && !has_native_resource_fork(container, entry.path, &prefix)
+            {
                 let rsrc_entry = Entry::new(&rsrc_path, entry.container_path, &rsrc)
                     .with_container_format(ContainerFormat::ResourceFork);
                 let recurse = if matches!(entry_types, EntryType::Containers | EntryType::All) {
@@ -1017,37 +1029,27 @@ where
                 } else {
                     true
                 };
-                // Descend so the sidecar's resources appear exactly as a
-                // native or MacBinary fork's would.
                 if recurse && depth > 1 {
-                    match open_container_internal(
+                    let open_result = open_container_internal(
                         &rsrc,
                         &rsrc_path,
                         &rsrc_path,
                         depth - 1,
                         options,
                         Some(ContainerFormat::ResourceFork),
+                    );
+                    if let Err(err) = visit_nested(
+                        open_result,
+                        &rsrc_path,
+                        path_filter,
+                        depth - 1,
+                        options,
+                        entry_types,
+                        visitor,
+                        report,
                     ) {
-                        Ok(nested) => {
-                            if let Err(err) = visit_container_recursive(
-                                nested.as_ref(),
-                                path_filter,
-                                depth - 1,
-                                options,
-                                entry_types,
-                                visitor,
-                                report,
-                                false,
-                            ) {
-                                visitor_error = Some(err);
-                                return Err(visitor_error_sentinel());
-                            }
-                        }
-                        Err(err) => report.push_diagnostic(
-                            TraversalDiagnosticCode::NestedContainerOpenFailed,
-                            &rsrc_path,
-                            err.to_string(),
-                        ),
+                        visitor_error = Some(err);
+                        return Err(visitor_error_sentinel());
                     }
                 }
             }
@@ -1070,9 +1072,60 @@ where
             prefix,
             err.to_string(),
         );
+    } else if let Some(message) = container.skipped_entries() {
+        report.push_diagnostic(
+            TraversalDiagnosticCode::ContainerEntriesSkipped,
+            prefix,
+            message,
+        );
     }
 
     Ok(())
+}
+
+// Open failures become diagnostics; only visitor errors propagate.
+#[allow(clippy::too_many_arguments)]
+fn visit_nested<F>(
+    open_result: Result<Box<dyn Container>>,
+    path: &str,
+    path_filter: &PathFilter,
+    depth: u32,
+    options: LoaderOptions,
+    entry_types: EntryType,
+    visitor: &mut F,
+    report: &mut VisitReport,
+) -> Result<()>
+where
+    F: FnMut(&Entry<'_>) -> Result<VisitAction>,
+{
+    match open_result {
+        Ok(nested) => visit_container_recursive(
+            nested.as_ref(),
+            path_filter,
+            depth,
+            options,
+            entry_types,
+            visitor,
+            report,
+            false,
+        ),
+        Err(err) => {
+            report.push_diagnostic(
+                TraversalDiagnosticCode::NestedContainerOpenFailed,
+                path,
+                err.to_string(),
+            );
+            Ok(())
+        }
+    }
+}
+
+// A native fork (macOS filesystem, or one an archive stores itself) is yielded
+// by the container. On non-HFS volumes macOS synthesizes it from the `._name`
+// sidecar, so yielding the sidecar's fork as well would duplicate it.
+#[cfg(feature = "macintosh")]
+fn has_native_resource_fork(container: &dyn Container, entry_path: &str, prefix: &str) -> bool {
+    extract_relative_path(entry_path, prefix).is_some_and(|rel| container.has_resource_fork(&rel))
 }
 
 fn visitor_error_sentinel() -> Error {
@@ -1087,10 +1140,7 @@ fn last_path_component(path: &str) -> &str {
     path.rsplit(['/', '\\']).next().unwrap_or(path)
 }
 
-#[cfg(any(
-    all(feature = "common", feature = "__backend_common"),
-    all(feature = "xz", feature = "__backend_xz")
-))]
+#[cfg(any(feature = "common", all(feature = "xz", feature = "__backend_xz")))]
 // Matches `std::path::Path::file_stem` semantics without requiring `std::path`
 // (this code compiles under `no_std`). Specifically:
 //   * "foo.ext"    -> Some("foo")
@@ -1109,6 +1159,24 @@ fn path_file_stem(path: &str) -> Option<&str> {
     match file_name.rsplit_once('.') {
         Some((stem, _)) if !stem.is_empty() => Some(stem),
         _ => Some(file_name),
+    }
+}
+
+// Name of the payload of a single-file compressed wrapper. `.tgz`, `.txz`
+// and `.tbz2`/`.tbz`/`.tb2` are shorthand for `.tar.gz`, `.tar.xz` and
+// `.tar.bz2`, so the payload keeps a `.tar` name.
+#[cfg(any(feature = "common", all(feature = "xz", feature = "__backend_xz")))]
+fn decompressed_name(path: &str) -> String {
+    let stem = path_file_stem(path).unwrap_or("unknown");
+    match path_extension(path) {
+        Some(ext)
+            if ["tgz", "txz", "tbz2", "tbz", "tb2"]
+                .iter()
+                .any(|short| ext.eq_ignore_ascii_case(short)) =>
+        {
+            format!("{stem}.tar")
+        }
+        _ => stem.to_string(),
     }
 }
 
@@ -1133,7 +1201,7 @@ fn open_container_internal(
     #[cfg(not(any(feature = "macintosh", feature = "dos")))]
     let _ = options;
     #[cfg(not(any(
-        all(feature = "common", feature = "__backend_common"),
+        feature = "common",
         all(feature = "xz", feature = "__backend_xz"),
         feature = "amiga",
         feature = "macintosh",
@@ -1153,28 +1221,44 @@ fn open_container_internal(
             prefix.to_string(),
             depth,
         )?)),
+        #[cfg(feature = "amiga")]
+        Some(ContainerFormat::Adf) => Ok(Box::new(AdfContainer::from_bytes(
+            data,
+            prefix.to_string(),
+            depth,
+        )?)),
         #[cfg(all(feature = "dos", feature = "__backend_dos_rar"))]
         Some(ContainerFormat::Rar) => Ok(Box::new(RarContainer::from_bytes(
             data,
             prefix.to_string(),
             depth,
         )?)),
-        #[cfg(all(feature = "common", feature = "__backend_common"))]
+        #[cfg(feature = "common")]
         Some(ContainerFormat::Zip) => Ok(Box::new(ZipContainer::from_bytes(
             data,
             prefix.to_string(),
             depth,
         )?)),
-        #[cfg(all(feature = "common", feature = "__backend_common"))]
+        #[cfg(feature = "common")]
         Some(ContainerFormat::Tar) => Ok(Box::new(TarContainer::from_bytes(
             data,
             prefix.to_string(),
             depth,
         )?)),
-        #[cfg(all(feature = "common", feature = "__backend_common"))]
+        #[cfg(feature = "common")]
         Some(ContainerFormat::Gzip) => {
-            let inner_name = path_file_stem(path).unwrap_or("unknown").to_string();
+            let inner_name = decompressed_name(path);
             Ok(Box::new(GzipContainer::from_bytes(
+                data,
+                prefix.to_string(),
+                inner_name,
+                depth,
+            )?))
+        }
+        #[cfg(feature = "common")]
+        Some(ContainerFormat::Bzip2) => {
+            let inner_name = decompressed_name(path);
+            Ok(Box::new(Bzip2Container::from_bytes(
                 data,
                 prefix.to_string(),
                 inner_name,
@@ -1183,7 +1267,7 @@ fn open_container_internal(
         }
         #[cfg(all(feature = "xz", feature = "__backend_xz"))]
         Some(ContainerFormat::Xz) => {
-            let inner_name = path_file_stem(path).unwrap_or("unknown").to_string();
+            let inner_name = decompressed_name(path);
             Ok(Box::new(XzContainer::from_bytes(
                 data,
                 prefix.to_string(),
@@ -1197,7 +1281,7 @@ fn open_container_internal(
             prefix.to_string(),
             depth,
         )?)),
-        #[cfg(all(feature = "macintosh", feature = "__backend_mac_stuffit"))]
+        #[cfg(feature = "macintosh")]
         Some(ContainerFormat::StuffIt) => Ok(Box::new(StuffItContainer::from_bytes(
             data,
             prefix.to_string(),
@@ -1209,7 +1293,7 @@ fn open_container_internal(
             prefix.to_string(),
             depth,
         )?)),
-        #[cfg(all(feature = "macintosh", feature = "__backend_mac_binhex"))]
+        #[cfg(feature = "macintosh")]
         Some(ContainerFormat::BinHex) => Ok(Box::new(BinHexContainer::from_bytes(
             data,
             prefix.to_string(),
@@ -1229,23 +1313,24 @@ fn open_container_internal(
         )?)),
         #[cfg(feature = "macintosh")]
         Some(ContainerFormat::AppleDouble) => Ok(Box::new(
-            apple_double::AppleDoubleContainer::from_bytes(data, prefix.to_string(), depth)?,
+            apple_double::AppleDoubleContainer::from_bytes(data, prefix.to_string())?,
         )),
         #[cfg(feature = "macintosh")]
         Some(ContainerFormat::ResourceFork) => {
-            // A content-detected bare fork is rooted at `{prefix}/..namedfork/rsrc`
-            // so its resources have the same path shape as every other fork.
-            use crate::formats::macintosh::resource_fork::RESOURCE_FORK_SUFFIX;
-            let fork_prefix = if prefix.ends_with(RESOURCE_FORK_SUFFIX) {
-                prefix.to_string()
+            if prefix.ends_with(RESOURCE_FORK_SUFFIX) {
+                Ok(Box::new(ResourceForkContainer::from_bytes_with_options(
+                    data,
+                    prefix.to_string(),
+                    options.numeric_identifiers,
+                )?))
             } else {
-                format!("{prefix}{RESOURCE_FORK_SUFFIX}")
-            };
-            Ok(Box::new(ResourceForkContainer::from_bytes_with_options(
-                data,
-                fork_prefix,
-                options.numeric_identifiers,
-            )?))
+                // Content-detected: nest the fork one level down so its
+                // resources have the same path shape as every other fork.
+                Ok(Box::new(BareResourceForkContainer::new(
+                    data,
+                    prefix.to_string(),
+                )))
+            }
         }
         #[cfg(feature = "game")]
         Some(ContainerFormat::Scumm) => Ok(Box::new(ScummContainer::from_bytes(
@@ -1302,6 +1387,12 @@ fn open_container_internal(
             prefix.to_string(),
             depth,
             options.numeric_identifiers,
+        )?)),
+        #[cfg(feature = "dos")]
+        Some(ContainerFormat::Iso9660) => Ok(Box::new(Iso9660Container::from_bytes(
+            data,
+            prefix.to_string(),
+            depth,
         )?)),
         Some(ContainerFormat::Unknown) | None => Err(Error::unsupported(format!(
             "Could not detect container format for: {path}"
@@ -1386,7 +1477,7 @@ pub fn detect_format(path: &str, data: Option<&[u8]>) -> Option<ContainerFormat>
 
     let data = data?;
     #[cfg(not(any(
-        all(feature = "common", feature = "__backend_common"),
+        feature = "common",
         all(feature = "xz", feature = "__backend_xz"),
         feature = "amiga",
         feature = "dos",
@@ -1400,7 +1491,7 @@ pub fn detect_format(path: &str, data: Option<&[u8]>) -> Option<ContainerFormat>
 
     // Helper macro to check format with content validation.
     #[cfg(any(
-        all(feature = "common", feature = "__backend_common"),
+        feature = "common",
         all(feature = "xz", feature = "__backend_xz"),
         feature = "amiga",
         feature = "dos",
@@ -1417,11 +1508,17 @@ pub fn detect_format(path: &str, data: Option<&[u8]>) -> Option<ContainerFormat>
     // If we have an extension hint, try that format first (optimistic probe)
     if let Some(hint) = ext_hint {
         match hint {
-            #[cfg(all(feature = "common", feature = "__backend_common"))]
-            ContainerFormat::Zip => try_format!(is_zip_archive, ContainerFormat::Zip),
-            #[cfg(all(feature = "common", feature = "__backend_common"))]
+            #[cfg(feature = "common")]
+            ContainerFormat::Zip => {
+                if is_zip_archive(data) || is_embedded_zip_archive(data) {
+                    return Some(ContainerFormat::Zip);
+                }
+            }
+            #[cfg(feature = "common")]
             ContainerFormat::Gzip => try_format!(is_gzip_file, ContainerFormat::Gzip),
-            #[cfg(all(feature = "common", feature = "__backend_common"))]
+            #[cfg(feature = "common")]
+            ContainerFormat::Bzip2 => try_format!(is_bzip2_file, ContainerFormat::Bzip2),
+            #[cfg(feature = "common")]
             ContainerFormat::Tar => {
                 // For .tar extension, try POSIX magic first, then legacy validation
                 if is_tar_archive(data) || could_be_legacy_tar(data) {
@@ -1432,17 +1529,19 @@ pub fn detect_format(path: &str, data: Option<&[u8]>) -> Option<ContainerFormat>
             ContainerFormat::Xz => try_format!(is_xz_file, ContainerFormat::Xz),
             #[cfg(feature = "amiga")]
             ContainerFormat::Lha => try_format!(is_lha_archive, ContainerFormat::Lha),
+            #[cfg(feature = "amiga")]
+            ContainerFormat::Adf => try_format!(is_adf_image, ContainerFormat::Adf),
             #[cfg(all(feature = "dos", feature = "__backend_dos_rar"))]
             ContainerFormat::Rar => try_format!(is_rar_archive, ContainerFormat::Rar),
             #[cfg(feature = "macintosh")]
             ContainerFormat::Hfs => try_format!(is_hfs_image, ContainerFormat::Hfs),
-            #[cfg(all(feature = "macintosh", feature = "__backend_mac_stuffit"))]
+            #[cfg(feature = "macintosh")]
             ContainerFormat::StuffIt => try_format!(is_stuffit_archive, ContainerFormat::StuffIt),
             #[cfg(feature = "macintosh")]
             ContainerFormat::CompactPro => {
                 try_format!(is_compactpro_archive, ContainerFormat::CompactPro);
             }
-            #[cfg(all(feature = "macintosh", feature = "__backend_mac_binhex"))]
+            #[cfg(feature = "macintosh")]
             ContainerFormat::BinHex => try_format!(is_binhex_file, ContainerFormat::BinHex),
             #[cfg(feature = "macintosh")]
             ContainerFormat::MacBinary => {
@@ -1469,22 +1568,34 @@ pub fn detect_format(path: &str, data: Option<&[u8]>) -> Option<ContainerFormat>
             }
             #[cfg(feature = "dos")]
             ContainerFormat::Fat => try_format!(is_fat_image, ContainerFormat::Fat),
+            #[cfg(feature = "dos")]
+            ContainerFormat::Iso9660 => try_format!(is_iso9660_image, ContainerFormat::Iso9660),
             _ => {}
         }
     }
 
     // Fall through to full probe sequence if extension hint didn't match
 
-    #[cfg(all(feature = "common", feature = "__backend_common"))]
+    #[cfg(feature = "common")]
     if is_zip_archive(data) {
         return Some(ContainerFormat::Zip);
     }
-    #[cfg(all(feature = "common", feature = "__backend_common"))]
+    // A UDIF image's data fork can start with a bzip2 chunk, so the trailer
+    // has to be checked before the stream probes.
+    #[cfg(feature = "macintosh")]
+    if crate::formats::macintosh::hfs::is_udif(data) {
+        return Some(ContainerFormat::Hfs);
+    }
+    #[cfg(feature = "common")]
     if is_gzip_file(data) {
         return Some(ContainerFormat::Gzip);
     }
+    #[cfg(feature = "common")]
+    if is_bzip2_file(data) {
+        return Some(ContainerFormat::Bzip2);
+    }
     // Only detect TAR by POSIX magic in content-based detection (no extension)
-    #[cfg(all(feature = "common", feature = "__backend_common"))]
+    #[cfg(feature = "common")]
     if is_tar_archive(data) {
         return Some(ContainerFormat::Tar);
     }
@@ -1505,21 +1616,19 @@ pub fn detect_format(path: &str, data: Option<&[u8]>) -> Option<ContainerFormat>
         if is_hfs_image(data) {
             return Some(ContainerFormat::Hfs);
         }
-        #[cfg(feature = "__backend_mac_stuffit")]
         if is_stuffit_archive(data) {
             return Some(ContainerFormat::StuffIt);
         }
         if is_compactpro_archive(data) {
             return Some(ContainerFormat::CompactPro);
         }
-        #[cfg(feature = "__backend_mac_binhex")]
         if is_binhex_file(data) {
             return Some(ContainerFormat::BinHex);
         }
         if is_apple_single_file(data) {
             return Some(ContainerFormat::AppleSingle);
         }
-        if apple_double::is_apple_double_file(data) {
+        if apple_double::is_standalone_apple_double(data) {
             return Some(ContainerFormat::AppleDouble);
         }
         if is_macbinary_file(data) {
@@ -1554,6 +1663,8 @@ pub fn detect_format(path: &str, data: Option<&[u8]>) -> Option<ContainerFormat>
         // FAT must be checked first (most specific: valid jump + BPB),
         // then GPT (protective MBR + "EFI PART" magic),
         // then MBR (generic 0x55AA signature with partition entries),
+        // then ISO 9660 ("CD001" at sector 16; after the partition maps, so
+        // isohybrid images keep opening as their partition table),
         // then RAR (distinctive magic, no ambiguity)
         if is_fat_image(data) {
             return Some(ContainerFormat::Fat);
@@ -1564,10 +1675,20 @@ pub fn detect_format(path: &str, data: Option<&[u8]>) -> Option<ContainerFormat>
         if is_mbr_image(data) {
             return Some(ContainerFormat::Mbr);
         }
+        if is_iso9660_image(data) {
+            return Some(ContainerFormat::Iso9660);
+        }
         #[cfg(feature = "__backend_dos_rar")]
         if is_rar_archive(data) {
             return Some(ContainerFormat::Rar);
         }
+    }
+
+    // After the magic-number formats: needs the DOS signature plus a
+    // checksummed root block, so it cannot shadow any of them.
+    #[cfg(feature = "amiga")]
+    if is_adf_image(data) {
+        return Some(ContainerFormat::Adf);
     }
 
     // A bare resource fork has no magic; probe it last with strict
@@ -1575,6 +1696,13 @@ pub fn detect_format(path: &str, data: Option<&[u8]>) -> Option<ContainerFormat>
     #[cfg(feature = "macintosh")]
     if crate::formats::macintosh::resource_fork::is_resource_fork_file(data) {
         return Some(ContainerFormat::ResourceFork);
+    }
+
+    // ZIP behind prepended data (self-extractors). Found from the end of the
+    // file, so it comes after every format identified by its start.
+    #[cfg(feature = "common")]
+    if is_embedded_zip_archive(data) {
+        return Some(ContainerFormat::Zip);
     }
 
     None
@@ -1585,11 +1713,19 @@ pub fn detect_format(path: &str, data: Option<&[u8]>) -> Option<ContainerFormat>
 /// Entry paths are formatted as `{prefix}/{relative_path}`.
 /// This extracts just the `relative_path` portion.
 #[cfg(feature = "macintosh")]
-fn extract_relative_path<'a>(full_path: &'a str, prefix: &str) -> Option<&'a str> {
-    // Strip the prefix and the following slash (a directory root given as
-    // `dir/` yields entries `dir/name`, not `dir//name`).
-    let expected_prefix = format!("{}/", prefix.trim_end_matches('/'));
-    full_path.strip_prefix(&expected_prefix)
+fn extract_relative_path<'a>(full_path: &'a str, prefix: &str) -> Option<Cow<'a, str>> {
+    // Filesystem directory entries on Windows are joined with `\\`; the
+    // result always uses `/` so sidecar path conventions apply unchanged.
+    let is_sep = |c: char| c == '/' || (cfg!(windows) && c == '\\');
+    // A directory root given as `dir/` yields entries `dir/name`, not `dir//name`.
+    let rel = full_path
+        .strip_prefix(prefix.trim_end_matches(is_sep))?
+        .strip_prefix(is_sep)?;
+    if cfg!(windows) && rel.contains('\\') {
+        Some(Cow::Owned(rel.replace('\\', "/")))
+    } else {
+        Some(Cow::Borrowed(rel))
+    }
 }
 
 /// Check if an entry path matches a prefix filter.
@@ -1609,6 +1745,20 @@ fn path_matches_prefix(entry_path: &str, filter: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(any(feature = "common", all(feature = "xz", feature = "__backend_xz")))]
+    #[test]
+    fn decompressed_name_expands_tar_shorthand() {
+        assert_eq!(decompressed_name("dir/a.txt.gz"), "a.txt");
+        assert_eq!(decompressed_name("a.tgz"), "a.tar");
+        assert_eq!(decompressed_name("a.zip.TGZ"), "a.zip.tar");
+        assert_eq!(decompressed_name("a.txz"), "a.tar");
+        assert_eq!(decompressed_name("dir/a.txt.bz2"), "a.txt");
+        for short in ["a.tbz2", "a.tbz", "a.tb2", "a.TBZ2"] {
+            assert_eq!(decompressed_name(short), "a.tar");
+        }
+        assert_eq!(decompressed_name("noext"), "noext");
+    }
 
     #[test]
     fn test_path_matches_prefix_exact() {
@@ -1683,6 +1833,140 @@ mod tests {
             "other.lha/file.mod",
             "archive.lha/file.mod"
         ));
+    }
+
+    #[cfg(feature = "common")]
+    mod bzip2 {
+        use super::*;
+
+        // python3: a tarfile (USTAR) with "docs/readme.txt" and "data.bin"
+        // through bz2.compress, and bz2.compress(b"first, ") followed by
+        // bz2.compress(b"second").
+        const TAR_BZ2: &[u8] =
+            b"\x42\x5a\x68\x39\x31\x41\x59\x26\x53\x59\x6f\xcb\x5e\x40\x00\x00\xad\x7b\x83\xff\
+            \xff\xff\xff\xff\xff\xff\xff\xa0\x40\x7f\x67\x9e\x40\x00\x02\x00\x01\x0c\x08\x30\
+            \x00\xbb\x5a\x2a\x20\x01\xea\x32\x19\x18\x98\x8d\x34\x06\x8d\x01\x93\x40\xd3\x46\
+            \x80\x68\x01\xb2\x43\x27\xa9\x93\x4d\x34\xc4\x64\x1a\x30\x98\x4c\x40\x00\x00\xd0\
+            \xd3\x10\x64\x06\x41\x90\x4a\x53\x53\xd2\x4d\x30\x46\x8c\x26\x08\x69\x90\x69\xa3\
+            \x09\x86\x9a\x68\x9a\x34\xf4\x09\xea\x64\xda\x80\xf4\x7f\x6f\x91\x00\xc0\xc4\x96\
+            \x11\x11\x33\x43\x04\x10\xbe\xe3\xe6\x22\x40\x70\xae\x50\xa3\x80\x41\x08\x24\xc2\
+            \x0e\x29\x72\x67\x80\xb0\x04\x64\xca\x04\xd1\x32\x95\x33\x6a\x55\x38\xf4\x11\xac\
+            \x92\x6a\x2b\x5d\x65\xd8\xb1\x66\xd2\xa1\x43\x0d\xdb\xd7\xf0\x61\xc5\x8f\x26\x5c\
+            \xd9\xf4\x61\x6f\xdf\x6e\x3f\xb9\x45\xb4\x12\x60\xda\x81\x07\x9e\x58\x87\xa3\x2c\
+            \xb8\xd2\x86\x96\xbf\x5c\xde\x63\xa2\x95\x14\x88\xea\xe2\x46\x88\x4c\x8e\x1c\x79\
+            \x73\xe9\xd5\xe0\x80\x0f\x1c\x49\x1e\x4f\xba\x34\x47\x7b\x7f\xda\xb0\x7c\x08\xa5\
+            \x84\x50\xe1\x49\x98\x42\x82\x10\xc1\x04\x5b\x80\x9d\x2e\x02\x6c\xe1\x10\x37\x8b\
+            \xb9\x22\x9c\x28\x48\x37\xe5\xaf\x20\x00";
+        const TWO_STREAMS: &[u8] =
+            b"\x42\x5a\x68\x39\x31\x41\x59\x26\x53\x59\x67\x0e\x0f\x82\x00\x00\x01\x11\x80\x40\
+            \x04\x01\x20\x1c\x00\x20\x00\x31\x0c\x00\xc4\xc2\x2d\xce\x5d\xe2\xee\x48\xa7\x0a\
+            \x12\x0c\xe1\xc1\xf0\x40\x42\x5a\x68\x39\x31\x41\x59\x26\x53\x59\x26\x8a\x02\x34\
+            \x00\x00\x02\x81\x80\x0e\x01\x88\x00\x20\x00\x22\x18\x68\x30\x07\x02\x98\x5d\xc9\
+            \x14\xe1\x42\x40\x9a\x28\x08\xd0";
+
+        type Listing = Vec<(String, Vec<u8>)>;
+
+        fn leaves(data: &[u8], name: &str) -> Result<Listing> {
+            let mut entries = Listing::new();
+            Loader::from_bytes(data.to_vec(), name).visit(EntryType::Leaves, |e| {
+                entries.push((e.path.to_string(), e.data.to_vec()));
+                Ok(VisitAction::Continue)
+            })?;
+            Ok(entries)
+        }
+
+        fn tar_listing(name: &str, inner: &str) -> Listing {
+            let data: Vec<u8> = (0..64).collect();
+            vec![
+                (format!("{name}/{inner}/data.bin"), data),
+                (
+                    format!("{name}/{inner}/docs/readme.txt"),
+                    b"hello from tar\n".to_vec(),
+                ),
+            ]
+        }
+
+        #[test]
+        fn tar_bz2_lists_the_inner_files() {
+            assert_eq!(
+                leaves(TAR_BZ2, "t.tar.bz2").unwrap(),
+                tar_listing("t.tar.bz2", "t.tar")
+            );
+        }
+
+        #[test]
+        fn tar_shorthand_extensions_list_the_inner_files() {
+            for name in ["t.tbz2", "t.tbz", "t.tb2", "T.TBZ2"] {
+                let stem = &name[..1];
+                assert_eq!(
+                    leaves(TAR_BZ2, name).unwrap(),
+                    tar_listing(name, &format!("{stem}.tar")),
+                    "{name}"
+                );
+            }
+        }
+
+        #[test]
+        fn detected_by_content_without_extension() {
+            for name in ["archive", "archive.dat", "archive.gz", "archive.bin"] {
+                assert_eq!(
+                    detect_format(name, Some(TAR_BZ2)),
+                    Some(ContainerFormat::Bzip2),
+                    "{name}"
+                );
+            }
+            assert_eq!(
+                detect_format("t.bz2", Some(TAR_BZ2)),
+                Some(ContainerFormat::Bzip2)
+            );
+            // The extension alone is not enough.
+            assert_eq!(detect_format("t.bz2", Some(b"BZh9 plain text")), None);
+
+            // POSIX tar magic is found in the payload of an extensionless file.
+            assert_eq!(
+                leaves(TAR_BZ2, "archive").unwrap(),
+                tar_listing("archive", "archive")
+            );
+        }
+
+        #[test]
+        fn streams_are_concatenated_and_trailing_bytes_ignored() {
+            let expected = vec![("t.txt.bz2/t.txt".to_string(), b"first, second".to_vec())];
+            assert_eq!(leaves(TWO_STREAMS, "t.txt.bz2").unwrap(), expected);
+            let padded = [TWO_STREAMS, &[0u8; 700]].concat();
+            assert_eq!(leaves(&padded, "t.txt.bz2").unwrap(), expected);
+        }
+
+        // Entries seen and the diagnostics reported for a file that fails to open.
+        fn failure(data: &[u8]) -> (usize, Vec<String>) {
+            let mut seen = 0;
+            let report = Loader::from_bytes(data.to_vec(), "t.tar.bz2")
+                .visit_with_report(EntryType::All, |_| {
+                    seen += 1;
+                    Ok(VisitAction::Continue)
+                })
+                .unwrap();
+            let messages = report.diagnostics.into_iter().map(|d| d.message);
+            (seen, messages.collect())
+        }
+
+        #[test]
+        fn corrupt_and_truncated_files_are_reported() {
+            let mut corrupt = TAR_BZ2.to_vec();
+            corrupt[TAR_BZ2.len() / 2] ^= 0x04;
+            let (seen, messages) = failure(&corrupt);
+            assert_eq!(seen, 0);
+            assert!(messages[0].contains("bzip2"), "{messages:?}");
+
+            for cut in [10, 11, TAR_BZ2.len() / 2, TAR_BZ2.len() - 1] {
+                let (seen, messages) = failure(&TAR_BZ2[..cut]);
+                assert_eq!(seen, 0, "cut {cut}");
+                assert!(
+                    messages[0].contains("unexpected end"),
+                    "cut {cut}: {messages:?}"
+                );
+            }
+        }
     }
 
     #[cfg(feature = "macintosh")]
@@ -1762,6 +2046,27 @@ mod tests {
         }
 
         #[test]
+        fn relative_path_uses_forward_slashes() {
+            assert_eq!(extract_relative_path("d/a/b", "d").as_deref(), Some("a/b"));
+            assert_eq!(extract_relative_path("d/a", "d/").as_deref(), Some("a"));
+            assert_eq!(extract_relative_path("/a", "/").as_deref(), Some("a"));
+            assert_eq!(extract_relative_path("da/b", "d"), None);
+            #[cfg(windows)]
+            assert_eq!(
+                extract_relative_path(r"C:\d\sub\._a", r"C:\d").as_deref(),
+                Some("sub/._a")
+            );
+        }
+
+        #[test]
+        fn apple_double_without_valid_fork_is_not_a_container() {
+            let no_fork = build_apple_double(0x0002_0000, &[], Some(b"fldrMACS"));
+            assert_eq!(detect_format("._Folder", Some(&no_fork)), None);
+            let bad_fork = build_apple_double(0x0002_0000, &[0xFF; 64], None);
+            assert_eq!(detect_format("x.rsrc", Some(&bad_fork)), None);
+        }
+
+        #[test]
         fn non_forks_are_not_detected_as_resource_forks() {
             let fork = fork();
             assert_eq!(detect_format("x", Some(&fork[..fork.len() - 1])), None);
@@ -1779,7 +2084,7 @@ mod tests {
     // P1: Format passthrough tests - verify pre_detected_format is used
     // ========================================================================
 
-    #[cfg(all(feature = "common", feature = "__backend_common"))]
+    #[cfg(all(feature = "common", feature = "std"))]
     #[test]
     fn test_open_container_internal_with_predetected_format() {
         // Create a minimal ZIP archive
@@ -1811,7 +2116,7 @@ mod tests {
         assert_eq!(container.info().entry_count, Some(1));
     }
 
-    #[cfg(all(feature = "common", feature = "__backend_common"))]
+    #[cfg(all(feature = "common", feature = "std"))]
     #[test]
     fn test_open_container_internal_none_format_falls_back_to_detection() {
         // Create a minimal ZIP archive
@@ -1837,7 +2142,7 @@ mod tests {
         assert_eq!(container.info().entry_count, Some(1));
     }
 
-    #[cfg(all(feature = "common", feature = "__backend_common"))]
+    #[cfg(all(feature = "common", feature = "std"))]
     #[test]
     fn test_open_container_internal_wrong_predetected_format_still_works() {
         // If pre-detected format doesn't match data, the open call may fail gracefully.

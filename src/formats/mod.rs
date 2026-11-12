@@ -2,9 +2,9 @@
 //!
 //! Formats are organized into categories:
 //!
-//! - **common** - Always included formats (`ZIP`, `GZIP`)
+//! - **common** - Always included formats (`ZIP`, `GZIP`, `BZIP2`)
 //! - **macintosh** - Classic Macintosh formats (`HFS`, `StuffIt`, `BinHex`, `MacBinary`)
-//! - **amiga** - Amiga formats (`LHA`)
+//! - **amiga** - Amiga formats (`LHA`, `ADF`)
 //! - **game** - Game-specific formats (`SCUMM`)
 
 pub mod common;
@@ -20,6 +20,9 @@ pub mod game;
 
 #[cfg(feature = "dos")]
 pub mod dos;
+
+#[cfg(any(feature = "macintosh", feature = "dos"))]
+pub(crate) mod cd_sector;
 
 use crate::compat::FastMap;
 

@@ -1,8 +1,15 @@
-use crate::compat::{FastMap, String, Vec, format, vec};
+use crate::compat::{Cow, FastMap, String, Vec, format, vec};
 use crate::error::{Error, Result};
 use crate::format::ContainerFormat;
+use crate::formats::cd_sector::{CD_RAW_SECTOR_SIZE, CD_USER_DATA_SIZE, RawCd};
+use crate::limits::{BUDGET_FLOOR, OutputBudget};
 use crate::sanitize_hfs_path;
 use crate::{Container, ContainerInfo, Entry, Metadata};
+#[cfg(all(feature = "no_std", not(feature = "std")))]
+use alloc::collections::{BTreeMap, BTreeSet};
+use core::ops::Range;
+#[cfg(not(all(feature = "no_std", not(feature = "std"))))]
+use std::collections::{BTreeMap, BTreeSet};
 
 const HFS_SIGNATURE: u16 = 0x4244;
 
@@ -18,30 +25,95 @@ const APM_PARTITION_SIGNATURE: u16 = 0x504D;
 
 const MDB_OFFSET: usize = 1024;
 
+// CNID keying the catalog file's own extents in the extents overflow file.
+const CATALOG_FILE_ID: u32 = 4;
+
 const NDIF_BLOCK_SIZE: usize = 512;
 
-#[must_use]
-pub fn is_hfs_image(data: &[u8]) -> bool {
-    // Raw HFS/MFS: signature at offset 1024
-    if data.len() >= MDB_OFFSET + 2 {
-        let sig = u16::from_be_bytes([data[MDB_OFFSET], data[MDB_OFFSET + 1]]);
-        if sig == HFS_SIGNATURE || sig == MFS_SIGNATURE {
-            return true;
+// A valid volume stores every fork in its own allocation blocks, so all forks
+// together cannot exceed the volume size. 2x leaves slack for mildly
+// cross-linked volumes while stopping extents that alias the same blocks.
+const FORK_BUDGET_RATIO: u64 = 2;
+
+// Sorts and merges ranges so that their lengths add up to the bytes covered.
+fn merge_ranges(ranges: &mut Vec<Range<usize>>) {
+    ranges.sort_unstable_by_key(|range| range.start);
+    let mut merged: Vec<Range<usize>> = Vec::with_capacity(ranges.len());
+    for range in ranges.drain(..) {
+        match merged.last_mut() {
+            Some(last) if range.start <= last.end => last.end = last.end.max(range.end),
+            _ => merged.push(range),
+        }
+    }
+    *ranges = merged;
+}
+
+fn ranges_len(ranges: &[Range<usize>]) -> usize {
+    ranges.iter().map(ExactSizeIterator::len).sum()
+}
+
+// Budgets for fork bytes read from one volume. `backed` lists the sorted,
+// disjoint parts of the volume that hold stored or decoded data; the rest is
+// the zero-fill of a sparse UDIF/NDIF image, which cost no input and was never
+// written. Zero-fill must not fund copies of real data, so the two are bounded
+// separately: by the same argument as `FORK_BUDGET_RATIO`, forks cannot hold
+// more backed bytes than the volume has, nor more bytes than the volume.
+struct ForkBudget {
+    backed: Vec<Range<usize>>,
+    copied: OutputBudget,
+    total: OutputBudget,
+}
+
+impl ForkBudget {
+    fn new(volume_len: usize, backed: Vec<Range<usize>>) -> Self {
+        Self {
+            copied: OutputBudget::for_input(ranges_len(&backed), FORK_BUDGET_RATIO),
+            total: OutputBudget::for_input(volume_len, FORK_BUDGET_RATIO),
+            backed,
         }
     }
 
-    // DiskCopy 4.2: magic at offset 0x52
-    if data.len() >= 0x54 {
-        let magic = u16::from_be_bytes([data[0x52], data[0x53]]);
-        if magic == DISKCOPY_MAGIC {
-            // Verify HFS/MFS inside (84-byte header)
-            if data.len() >= 84 + MDB_OFFSET + 2 {
-                let sig = u16::from_be_bytes([data[84 + MDB_OFFSET], data[84 + MDB_OFFSET + 1]]);
-                if sig == HFS_SIGNATURE || sig == MFS_SIGNATURE {
-                    return true;
-                }
+    // `dst` must be zeroed: only the backed parts of `volume[src]` are
+    // written, so zero-fill stays uncommitted in the copy as well.
+    fn copy(&mut self, volume: &[u8], src: Range<usize>, dst: &mut [u8]) -> Result<()> {
+        let first = self.backed.partition_point(|range| range.end <= src.start);
+        for range in &self.backed[first..] {
+            if range.start >= src.end {
+                break;
             }
+            let part = range.start.max(src.start)..range.end.min(src.end);
+            self.copied.charge(part.len(), "HFS")?;
+            dst[part.start - src.start..part.end - src.start].copy_from_slice(&volume[part]);
         }
+        Ok(())
+    }
+}
+
+// Deflate cannot expand beyond 1032:1; ADC and KenCode stay below that.
+const MAX_CHUNK_EXPANSION: u64 = 1032;
+
+// Limit on image bytes covered by stored or compressed UDIF/NDIF chunks, which
+// in a valid image each have their own backing bytes. Zero-fill chunks are not
+// counted: sparse images are legitimate.
+fn chunk_budget(backing_len: usize) -> u64 {
+    (backing_len as u64)
+        .saturating_mul(MAX_CHUNK_EXPANSION)
+        .max(BUDGET_FLOOR)
+}
+
+fn charge_chunk(budget: &mut u64, bytes: usize, what: &str) -> Result<()> {
+    *budget = budget.checked_sub(bytes as u64).ok_or_else(|| {
+        Error::decompression(format!(
+            "{what}: chunks cover more data than their backing bytes can hold"
+        ))
+    })?;
+    Ok(())
+}
+
+#[must_use]
+pub fn is_hfs_image(data: &[u8]) -> bool {
+    if has_plain_volume(data) {
+        return true;
     }
 
     // UDIF: "koly" at end - 512
@@ -55,22 +127,34 @@ pub fn is_hfs_image(data: &[u8]) -> bool {
     // Apple Partition Map (APM): Used by .toast and raw CD images
     // Must verify we can actually find an HFS partition inside
     if let Some(hfs_offset) = find_apm_hfs_partition(data) {
-        // Verify HFS/MFS signature at the partition offset + MDB_OFFSET
-        let mdb_offset = hfs_offset + MDB_OFFSET;
-        if data.len() >= mdb_offset + 2 {
-            let sig = u16::from_be_bytes([data[mdb_offset], data[mdb_offset + 1]]);
-            if sig == HFS_SIGNATURE || sig == MFS_SIGNATURE {
-                return true;
-            }
+        if has_mdb_signature(data, hfs_offset) {
+            return true;
         }
     }
 
     // Raw 2352-byte CD sectors containing a cooked Apple partition map.
-    if let Some(cooked) = cdrom_user_data(data) {
-        return is_hfs_image(&cooked);
+    if let Some(cd) = RawCd::detect(data) {
+        return raw_cd_has_volume(cd.sector_count(), |sector| cd.user_data(sector));
     }
 
     false
+}
+
+fn is_volume_signature(hi: u8, lo: u8) -> bool {
+    let sig = u16::from_be_bytes([hi, lo]);
+    sig == HFS_SIGNATURE || sig == MFS_SIGNATURE
+}
+
+fn has_mdb_signature(data: &[u8], volume_offset: usize) -> bool {
+    let mdb = volume_offset
+        .checked_add(MDB_OFFSET)
+        .and_then(|mdb_offset| data.get(mdb_offset..));
+    matches!(mdb, Some(&[hi, lo, ..]) if is_volume_signature(hi, lo))
+}
+
+// Bare HFS/MFS volume, or one behind a DiskCopy 4.2 header.
+fn has_plain_volume(data: &[u8]) -> bool {
+    has_mdb_signature(data, 0) || (get_hfs_data_offset(data) > 0 && has_mdb_signature(data, 84))
 }
 
 fn find_apm_hfs_partition(data: &[u8]) -> Option<usize> {
@@ -91,17 +175,23 @@ fn find_apm_hfs_partition(data: &[u8]) -> Option<usize> {
         return None;
     }
 
-    // APM entries are 512-byte records. On some CD images the driver
-    // descriptor map reports a 2048-byte device block size while the partition
-    // map itself still starts at byte 512.
-    let entry_size = 512;
-    let map_start = [NDIF_BLOCK_SIZE, block_size].into_iter().find(|&offset| {
-        data.len() >= offset + entry_size
+    // On some CD images the driver descriptor map reports a 2048-byte device
+    // block size while the partition map still uses 512-byte blocks starting
+    // at byte 512. Otherwise the map starts at block 1 in device blocks. Entry
+    // stride and partition start blocks use the same unit as the map.
+    let candidates = if block_size < NDIF_BLOCK_SIZE {
+        [block_size, NDIF_BLOCK_SIZE]
+    } else {
+        [NDIF_BLOCK_SIZE, block_size]
+    };
+    let map_start = candidates.into_iter().find(|&offset| {
+        data.len() >= offset + NDIF_BLOCK_SIZE
             && u16::from_be_bytes([data[offset], data[offset + 1]]) == APM_PARTITION_SIGNATURE
     })?;
+    let map_block_size = map_start;
 
     let mut entry_offset = map_start;
-    if data.len() < entry_offset + entry_size {
+    if data.len() < entry_offset + map_block_size {
         return None;
     }
 
@@ -126,8 +216,8 @@ fn find_apm_hfs_partition(data: &[u8]) -> Option<usize> {
 
     // Scan all partition entries looking for Apple_HFS
     for i in 0..map_entries {
-        entry_offset = map_start + i * entry_size;
-        if data.len() < entry_offset + entry_size {
+        entry_offset = map_start + i * map_block_size;
+        if data.len() < entry_offset + map_block_size {
             break;
         }
 
@@ -155,44 +245,62 @@ fn find_apm_hfs_partition(data: &[u8]) -> Option<usize> {
                 data[entry_offset + 11],
             ]) as usize;
 
-            return start_block.checked_mul(entry_size);
+            return start_block.checked_mul(map_block_size);
         }
     }
 
     None
 }
 
-fn cdrom_user_data(data: &[u8]) -> Option<Vec<u8>> {
-    const RAW_SECTOR_SIZE: usize = 2352;
-    const USER_DATA_OFFSET: usize = 16;
-    const USER_DATA_SIZE: usize = 2048;
+// Sectors holding the driver map and the largest partition map that
+// `find_apm_hfs_partition` reads: 128 entries of 4096 bytes after block 0.
+const CD_PROBE_SECTORS: usize = 129 * 4096 / CD_USER_DATA_SIZE;
 
-    if data.len() < RAW_SECTOR_SIZE * 2 || data.len() % RAW_SECTOR_SIZE != 0 {
-        return None;
+// `is_hfs_image` for the user data of a raw CD image, reading only the sectors
+// that decide the answer instead of cooking the whole image.
+fn raw_cd_has_volume<'a>(sector_count: usize, user_data: impl Fn(usize) -> &'a [u8]) -> bool {
+    let mut head = Vec::new();
+    for sector in 0..sector_count.min(CD_PROBE_SECTORS) {
+        head.extend_from_slice(user_data(sector));
+    }
+    if has_plain_volume(&head) {
+        return true;
     }
 
-    let sectors_to_probe = (data.len() / RAW_SECTOR_SIZE).min(16);
-    let valid_headers = (0..sectors_to_probe)
-        .filter(|&sector| {
-            let offset = sector * RAW_SECTOR_SIZE;
-            data[offset] == 0x00
-                && data[offset + 1..offset + 11].iter().all(|&b| b == 0xFF)
-                && data[offset + 11] == 0x00
-                && matches!(data[offset + 15], 0x01 | 0x02)
-        })
-        .count();
+    // The partition itself can start anywhere in the image.
+    let byte = |pos: usize| {
+        (pos / CD_USER_DATA_SIZE < sector_count)
+            .then(|| user_data(pos / CD_USER_DATA_SIZE)[pos % CD_USER_DATA_SIZE])
+    };
+    let signature = find_apm_hfs_partition(&head)
+        .and_then(|hfs_offset| hfs_offset.checked_add(MDB_OFFSET + 1))
+        .and_then(|lo| Some((byte(lo - 1)?, byte(lo)?)));
+    matches!(signature, Some((hi, lo)) if is_volume_signature(hi, lo))
+}
 
-    if valid_headers < sectors_to_probe.saturating_sub(1).max(1) {
-        return None;
+// Cooked image, with `backed` (see `ForkBudget`) mapped onto it. Sectors
+// outside `backed` are zero-fill and are not copied, so they stay uncommitted.
+fn cdrom_user_data(data: &[u8], backed: &mut Vec<Range<usize>>) -> Option<Vec<u8>> {
+    let cd = RawCd::detect(data)?;
+    let mut cooked = vec![0u8; cd.sector_count() * CD_USER_DATA_SIZE];
+    let mut cooked_ranges = Vec::with_capacity(backed.len());
+    let mut next = 0;
+    for range in backed.iter() {
+        let first = (range.start / CD_RAW_SECTOR_SIZE).max(next);
+        let end = range
+            .end
+            .div_ceil(CD_RAW_SECTOR_SIZE)
+            .min(cd.sector_count());
+        for sector in first..end {
+            cooked[sector * CD_USER_DATA_SIZE..][..CD_USER_DATA_SIZE]
+                .copy_from_slice(cd.user_data(sector));
+        }
+        if first < end {
+            cooked_ranges.push(first * CD_USER_DATA_SIZE..end * CD_USER_DATA_SIZE);
+            next = end;
+        }
     }
-
-    let sector_count = data.len() / RAW_SECTOR_SIZE;
-    let mut cooked = Vec::with_capacity(sector_count * USER_DATA_SIZE);
-    for sector in 0..sector_count {
-        let offset = sector * RAW_SECTOR_SIZE + USER_DATA_OFFSET;
-        cooked.extend_from_slice(&data[offset..offset + USER_DATA_SIZE]);
-    }
-
+    *backed = cooked_ranges;
     Some(cooked)
 }
 
@@ -272,8 +380,14 @@ impl MasterDirectoryBlock {
         first_alloc_byte + u64::from(block) * u64::from(self.alloc_block_size)
     }
 
-    fn read_extents(&self, volume: &[u8], extents: &[ExtentDescriptor], max_size: u32) -> Vec<u8> {
-        let mut result = Vec::new();
+    fn read_extents(
+        &self,
+        volume: &[u8],
+        extents: &[ExtentDescriptor],
+        max_size: u32,
+        budget: &mut ForkBudget,
+    ) -> Result<Vec<u8>> {
+        let mut segments: Vec<Range<usize>> = Vec::new();
         let mut remaining = max_size as usize;
 
         for extent in extents {
@@ -281,19 +395,34 @@ impl MasterDirectoryBlock {
                 break;
             }
 
-            let offset = self.alloc_block_to_offset(extent.start_block) as usize;
-            let extent_size = usize::from(extent.block_count) * self.alloc_block_size as usize;
+            let Ok(offset) = usize::try_from(self.alloc_block_to_offset(extent.start_block)) else {
+                continue;
+            };
+            let extent_size =
+                usize::from(extent.block_count).saturating_mul(self.alloc_block_size as usize);
             let read_size = extent_size
                 .min(remaining)
                 .min(volume.len().saturating_sub(offset));
 
             if offset < volume.len() {
-                result.extend_from_slice(&volume[offset..offset + read_size]);
+                segments.push(offset..offset + read_size);
                 remaining -= read_size;
             }
         }
 
-        result
+        let total = max_size as usize - remaining;
+        budget.total.charge(total, "HFS")?;
+        // Not `zeroed_buffer`: on macOS its probe allocation is reused for the
+        // zeroed one, which then gets cleared by hand and so fully committed.
+        let mut result = vec![0u8; total];
+        let mut pos = 0;
+        for segment in segments {
+            let len = segment.len();
+            budget.copy(volume, segment, &mut result[pos..pos + len])?;
+            pos += len;
+        }
+
+        Ok(result)
     }
 }
 
@@ -372,19 +501,14 @@ struct HfsDirEntry {
     parent_id: u32,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 enum ForkType {
     Data,
     Resource,
 }
 
-#[derive(Debug)]
-struct ExtentOverflowRecord {
-    fork_type: ForkType,
-    file_id: u32,
-    start_block: u16,
-    extents: [ExtentDescriptor; 3],
-}
+// Overflow extent records keyed by (file ID, fork, first logical block).
+type ExtentOverflow = BTreeMap<(u32, ForkType, u16), [ExtentDescriptor; 3]>;
 
 // =============================================================================
 // MFS (Macintosh File System) Support
@@ -864,7 +988,13 @@ fn kencode_decompress(src: &[u8], dst: &mut [u8]) -> Result<usize> {
     Ok(dst_pos)
 }
 
-fn ndif_decompress(data_fork: &[u8], bcem: &[u8]) -> Result<Vec<u8>> {
+// Returns the image and the ranges its chunks decoded into (see `ForkBudget`).
+// `backed_len` is how much of `data_fork` is itself backed by input.
+fn ndif_decompress(
+    data_fork: &[u8],
+    bcem: &[u8],
+    backed_len: usize,
+) -> Result<(Vec<u8>, Vec<Range<usize>>)> {
     let header = parse_ndif_header(bcem)?;
     let chunks = parse_ndif_chunks(bcem, header.num_chunks)?;
 
@@ -879,7 +1009,7 @@ fn ndif_decompress(data_fork: &[u8], bcem: &[u8]) -> Result<Vec<u8>> {
             total_size
         )));
     }
-    let mut output = vec![0u8; total_size];
+    let mut output = crate::limits::zeroed_buffer(total_size, "NDIF")?;
 
     // V3: Use checked_mul for chunk buffer allocation
     let max_chunk_bytes = (header.max_chunk_size_blocks as usize)
@@ -892,69 +1022,73 @@ fn ndif_decompress(data_fork: &[u8], bcem: &[u8]) -> Result<Vec<u8>> {
             "NDIF: max_chunk_size exceeds total image size",
         ));
     }
-    let mut chunk_buf = vec![0u8; max_chunk_bytes];
+    let mut chunk_buf = crate::limits::zeroed_buffer(max_chunk_bytes, "NDIF")?;
+
+    let mut budget = chunk_budget(backed_len);
+    let mut backed = Vec::new();
 
     for (chunk_idx, chunk) in chunks.iter().enumerate() {
         if chunk.chunk_type == NdifChunkType::Terminator {
             break;
         }
 
-        let num_blocks = if chunk_idx + 1 < chunks.len() {
-            chunks[chunk_idx + 1].logical_offset - chunk.logical_offset
-        } else {
-            header.num_blocks - chunk.logical_offset
-        };
-        let chunk_bytes = (num_blocks as usize) * NDIF_BLOCK_SIZE;
+        let next_offset = chunks
+            .get(chunk_idx + 1)
+            .map_or(header.num_blocks, |next| next.logical_offset);
         let output_offset = (chunk.logical_offset as usize) * NDIF_BLOCK_SIZE;
+        // Chunks that are out of order or reach past the image are skipped.
+        let Some(chunk_bytes) = next_offset
+            .checked_sub(chunk.logical_offset)
+            .and_then(|blocks| (blocks as usize).checked_mul(NDIF_BLOCK_SIZE))
+            .filter(|&bytes| bytes <= output.len().saturating_sub(output_offset))
+        else {
+            continue;
+        };
 
-        if output_offset + chunk_bytes > output.len() {
+        if chunk.chunk_type == NdifChunkType::Zero {
+            // Already zero-filled
             continue;
         }
 
+        let src_offset = u64::from(header.backing_offset) + u64::from(chunk.backing_offset);
+        let Some(src) = usize::try_from(src_offset)
+            .ok()
+            .and_then(|start| data_fork.get(start..))
+            .and_then(|rest| rest.get(..chunk.backing_size as usize))
+        else {
+            continue;
+        };
+
         match chunk.chunk_type {
-            NdifChunkType::Zero => {
-                // Already zero-filled
-            }
             NdifChunkType::Raw => {
-                let src_offset = (header.backing_offset + chunk.backing_offset) as usize;
-                let src_end = src_offset + chunk.backing_size as usize;
-
-                if src_end <= data_fork.len() {
-                    let copy_len = chunk_bytes.min(chunk.backing_size as usize);
-                    output[output_offset..output_offset + copy_len]
-                        .copy_from_slice(&data_fork[src_offset..src_offset + copy_len]);
+                charge_chunk(&mut budget, chunk_bytes, "NDIF")?;
+                backed.push(output_offset..output_offset + chunk_bytes);
+                let copy_len = chunk_bytes.min(src.len());
+                output[output_offset..output_offset + copy_len].copy_from_slice(&src[..copy_len]);
+            }
+            NdifChunkType::Adc | NdifChunkType::KenCode => {
+                // The header's maximum chunk size sized `chunk_buf`.
+                let Some(buf) = chunk_buf.get_mut(..chunk_bytes) else {
+                    continue;
+                };
+                charge_chunk(&mut budget, chunk_bytes, "NDIF")?;
+                backed.push(output_offset..output_offset + chunk_bytes);
+                let decompressed = if chunk.chunk_type == NdifChunkType::Adc {
+                    adc_decompress(src, buf)
+                } else {
+                    kencode_decompress(src, buf)
+                };
+                if let Ok(decompressed) = decompressed {
+                    output[output_offset..output_offset + decompressed]
+                        .copy_from_slice(&buf[..decompressed]);
                 }
             }
-            NdifChunkType::Adc => {
-                let src_offset = (header.backing_offset + chunk.backing_offset) as usize;
-                let src_end = src_offset + chunk.backing_size as usize;
-
-                if src_end <= data_fork.len() {
-                    let src = &data_fork[src_offset..src_end];
-                    if let Ok(decompressed) = adc_decompress(src, &mut chunk_buf[..chunk_bytes]) {
-                        output[output_offset..output_offset + decompressed]
-                            .copy_from_slice(&chunk_buf[..decompressed]);
-                    }
-                }
-            }
-            NdifChunkType::KenCode => {
-                let src_offset = (header.backing_offset + chunk.backing_offset) as usize;
-                let src_end = src_offset + chunk.backing_size as usize;
-
-                if src_end <= data_fork.len() {
-                    let src = &data_fork[src_offset..src_end];
-                    if let Ok(decompressed) = kencode_decompress(src, &mut chunk_buf[..chunk_bytes])
-                    {
-                        output[output_offset..output_offset + decompressed]
-                            .copy_from_slice(&chunk_buf[..decompressed]);
-                    }
-                }
-            }
-            NdifChunkType::Terminator => unreachable!(),
+            NdifChunkType::Zero | NdifChunkType::Terminator => {}
         }
     }
 
-    Ok(output)
+    merge_ranges(&mut backed);
+    Ok((output, backed))
 }
 
 // =============================================================================
@@ -1004,7 +1138,7 @@ struct MishBlock {
     compressed_length: u64,
 }
 
-fn is_udif(data: &[u8]) -> bool {
+pub(crate) fn is_udif(data: &[u8]) -> bool {
     if data.len() < 512 {
         return false;
     }
@@ -1058,43 +1192,31 @@ fn parse_koly_trailer(data: &[u8]) -> Result<KolyTrailer> {
 }
 
 fn parse_blkx_from_xml(xml: &str) -> Result<Vec<MishBlock>> {
+    const BLKX_KEY: &str = "<key>blkx</key>";
+    const DATA_OPEN: &str = "<data>";
+    const DATA_CLOSE: &str = "</data>";
+
     let mut blocks = Vec::new();
-    let mut in_blkx = false;
-    let mut pos = 0;
+    let Some(key) = xml.find(BLKX_KEY) else {
+        return Ok(blocks);
+    };
 
-    while pos < xml.len() {
-        if !in_blkx {
-            if let Some(idx) = xml[pos..].find("<key>blkx</key>") {
-                in_blkx = true;
-                pos += idx + 15;
-                continue;
-            }
+    // Each search resumes right after the tag matched last: the scan is linear
+    // and `rest` is only ever cut at an ASCII tag, never inside a character.
+    let mut rest = &xml[key + BLKX_KEY.len()..];
+    while let Some(open) = rest.find(DATA_OPEN) {
+        let body = &rest[open + DATA_OPEN.len()..];
+        let Some(close) = body.find(DATA_CLOSE) else {
             break;
-        }
+        };
 
-        if let Some(data_start) = xml[pos..].find("<data>") {
-            let data_begin = pos + data_start + 6;
-            if let Some(data_end) = xml[data_begin..].find("</data>") {
-                let base64_data = xml[data_begin..data_begin + data_end].trim();
-
-                if let Ok(mish_data) = decode_base64(base64_data) {
-                    if let Ok(mut mish_blocks) = parse_mish_data(&mish_data) {
-                        blocks.append(&mut mish_blocks);
-                    }
-                }
-
-                pos = data_begin + data_end + 7;
-                continue;
+        if let Ok(mish_data) = decode_base64(body[..close].trim()) {
+            if let Ok(mut mish_blocks) = parse_mish_data(&mish_data) {
+                blocks.append(&mut mish_blocks);
             }
         }
 
-        if let Some(idx) = xml[pos..].find("</array>") {
-            if idx < xml[pos..].find("<data>").unwrap_or(usize::MAX) {
-                break;
-            }
-        }
-
-        pos += 1;
+        rest = &body[close + DATA_CLOSE.len()..];
     }
 
     Ok(blocks)
@@ -1192,7 +1314,9 @@ fn parse_mish_data(data: &[u8]) -> Result<Vec<MishBlock>> {
             data[pos + 29],
             data[pos + 30],
             data[pos + 31],
-        ]) + data_offset;
+        ])
+        .checked_add(data_offset)
+        .ok_or_else(|| Error::invalid_format("UDIF: block offset overflows"))?;
         let compressed_length = u64::from_be_bytes([
             data[pos + 32],
             data[pos + 33],
@@ -1218,17 +1342,54 @@ fn parse_mish_data(data: &[u8]) -> Result<Vec<MishBlock>> {
     Ok(blocks)
 }
 
-fn udif_decompress(data: &[u8]) -> Result<Vec<u8>> {
-    let koly = parse_koly_trailer(data)?;
-
-    let xml_start = koly.xml_offset as usize;
-    let xml_end = xml_start + koly.xml_length as usize;
-
-    if xml_end > data.len() {
-        return Err(Error::invalid_format("UDIF: XML plist extends beyond file"));
+// Image size in bytes implied by the block table. Sector fields are raw
+// 64-bit values from the plist, so every step is checked.
+fn udif_total_size(blocks: &[MishBlock]) -> Result<usize> {
+    let mut total_sectors = 0u64;
+    for block in blocks {
+        if block.block_type == UdifBlockType::Terminator {
+            continue;
+        }
+        let end = block
+            .sector_number
+            .checked_add(block.sector_count)
+            .ok_or_else(|| Error::invalid_format("UDIF: block sector range overflows"))?;
+        total_sectors = total_sectors.max(end);
     }
 
-    let xml = core::str::from_utf8(&data[xml_start..xml_end])
+    if total_sectors == 0 {
+        return Err(Error::invalid_format("UDIF: no data sectors in image"));
+    }
+
+    let total_bytes = total_sectors
+        .checked_mul(NDIF_BLOCK_SIZE as u64)
+        .ok_or_else(|| Error::invalid_format("UDIF: image size overflows"))?;
+    crate::limits::checked_output_size(total_bytes, "UDIF")
+}
+
+// `data[offset..offset + len]` for 64-bit header fields.
+fn udif_range<'a>(data: &'a [u8], offset: u64, len: u64, error: &'static str) -> Result<&'a [u8]> {
+    let start = usize::try_from(offset).ok();
+    let end = offset
+        .checked_add(len)
+        .and_then(|end| usize::try_from(end).ok());
+    start
+        .zip(end)
+        .and_then(|(start, end)| data.get(start..end))
+        .ok_or_else(|| Error::invalid_format(error))
+}
+
+// Returns the image and the ranges its chunks decoded into (see `ForkBudget`).
+fn udif_decompress(data: &[u8]) -> Result<(Vec<u8>, Vec<Range<usize>>)> {
+    let koly = parse_koly_trailer(data)?;
+
+    let xml = udif_range(
+        data,
+        koly.xml_offset,
+        koly.xml_length,
+        "UDIF: XML plist extends beyond file",
+    )?;
+    let xml = core::str::from_utf8(xml)
         .map_err(|_| Error::invalid_format("UDIF: XML plist is not valid UTF-8"))?;
 
     let blocks = parse_blkx_from_xml(xml)?;
@@ -1237,25 +1398,17 @@ fn udif_decompress(data: &[u8]) -> Result<Vec<u8>> {
         return Err(Error::invalid_format("UDIF: no blocks found in plist"));
     }
 
-    // Calculate total sectors from blocks
-    let total_sectors = blocks
-        .iter()
-        .filter(|b| b.block_type != UdifBlockType::Terminator)
-        .map(|b| b.sector_number + b.sector_count)
-        .max()
-        .unwrap_or(0) as usize;
-
-    if total_sectors == 0 {
-        return Err(Error::invalid_format("UDIF: no data sectors in image"));
-    }
-
-    let mut output = vec![0u8; total_sectors * NDIF_BLOCK_SIZE];
+    let total_size = udif_total_size(&blocks)?;
+    let mut output = crate::limits::zeroed_buffer(total_size, "UDIF")?;
+    let mut budget = chunk_budget(data.len());
+    let mut backed = Vec::new();
 
     for block in &blocks {
         if block.block_type == UdifBlockType::Terminator {
             continue;
         }
 
+        // `udif_total_size` checked that every block ends within `total_size`.
         let out_offset = (block.sector_number as usize) * NDIF_BLOCK_SIZE;
         let out_size = (block.sector_count as usize) * NDIF_BLOCK_SIZE;
 
@@ -1266,58 +1419,60 @@ fn udif_decompress(data: &[u8]) -> Result<Vec<u8>> {
         match block.block_type {
             UdifBlockType::Zero | UdifBlockType::Ignore | UdifBlockType::Comment => {}
             UdifBlockType::Raw => {
-                let src_start = block.compressed_offset as usize;
-                let src_len = block.compressed_length as usize;
+                let src = udif_range(
+                    data,
+                    block.compressed_offset,
+                    block.compressed_length,
+                    "UDIF: raw block extends beyond file",
+                )?;
+                charge_chunk(&mut budget, out_size, "UDIF")?;
+                backed.push(out_offset..out_offset + out_size);
 
-                if src_start + src_len > data.len() {
-                    return Err(Error::invalid_format("UDIF: raw block extends beyond file"));
-                }
-
-                let copy_len = out_size.min(src_len);
-                output[out_offset..out_offset + copy_len]
-                    .copy_from_slice(&data[src_start..src_start + copy_len]);
+                let copy_len = out_size.min(src.len());
+                output[out_offset..out_offset + copy_len].copy_from_slice(&src[..copy_len]);
             }
             UdifBlockType::Adc => {
-                let src_start = block.compressed_offset as usize;
-                let src_len = block.compressed_length as usize;
-
-                if src_start + src_len > data.len() {
-                    return Err(Error::invalid_format("UDIF: ADC block extends beyond file"));
-                }
-
-                let src = &data[src_start..src_start + src_len];
+                let src = udif_range(
+                    data,
+                    block.compressed_offset,
+                    block.compressed_length,
+                    "UDIF: ADC block extends beyond file",
+                )?;
+                charge_chunk(&mut budget, out_size, "UDIF")?;
+                backed.push(out_offset..out_offset + out_size);
                 adc_decompress(src, &mut output[out_offset..out_offset + out_size])?;
             }
             UdifBlockType::Zlib => {
-                #[cfg(all(feature = "common", feature = "__backend_common"))]
-                {
-                    use flate2::read::ZlibDecoder;
-                    use std::io::Read;
+                use crate::formats::common::zlib::zlib_decode_exact;
 
-                    let src_start = block.compressed_offset as usize;
-                    let src_len = block.compressed_length as usize;
-
-                    if src_start + src_len > data.len() {
-                        return Err(Error::invalid_format(
-                            "UDIF: ZLIB block extends beyond file",
-                        ));
-                    }
-
-                    let src = &data[src_start..src_start + src_len];
-                    let mut decoder = ZlibDecoder::new(src);
-                    decoder
-                        .read_exact(&mut output[out_offset..out_offset + out_size])
-                        .map_err(|_| Error::invalid_format("UDIF: ZLIB block truncated"))?;
-                }
-                #[cfg(not(all(feature = "common", feature = "__backend_common")))]
-                {
-                    return Err(Error::invalid_format(
-                        "UDIF: ZLIB compression requires common backend support",
-                    ));
-                }
+                let src = udif_range(
+                    data,
+                    block.compressed_offset,
+                    block.compressed_length,
+                    "UDIF: ZLIB block extends beyond file",
+                )?;
+                charge_chunk(&mut budget, out_size, "UDIF")?;
+                backed.push(out_offset..out_offset + out_size);
+                zlib_decode_exact(src, &mut output[out_offset..out_offset + out_size])
+                    .map_err(|_| Error::invalid_format("UDIF: ZLIB block truncated"))?;
             }
             UdifBlockType::Bz2 => {
-                return Err(Error::invalid_format("UDIF: BZ2 compression not supported"));
+                use crate::formats::common::bzip2::bunzip2;
+
+                let src = udif_range(
+                    data,
+                    block.compressed_offset,
+                    block.compressed_length,
+                    "UDIF: BZ2 block extends beyond file",
+                )?;
+                charge_chunk(&mut budget, out_size, "UDIF")?;
+                backed.push(out_offset..out_offset + out_size);
+                let decoded = bunzip2(src, out_size as u64, out_size as u64)
+                    .map_err(|_| Error::invalid_format("UDIF: BZ2 block corrupt"))?;
+                if decoded.data.len() != out_size {
+                    return Err(Error::invalid_format("UDIF: BZ2 block truncated"));
+                }
+                output[out_offset..out_offset + out_size].copy_from_slice(&decoded.data);
             }
             UdifBlockType::Lzfse => {
                 return Err(Error::invalid_format(
@@ -1328,7 +1483,8 @@ fn udif_decompress(data: &[u8]) -> Result<Vec<u8>> {
         }
     }
 
-    Ok(output)
+    merge_ranges(&mut backed);
+    Ok((output, backed))
 }
 
 fn extract_bcem_resource(resource_fork: &[u8]) -> Option<Vec<u8>> {
@@ -1355,37 +1511,53 @@ pub(crate) fn is_ndif_resource_fork(resource_fork: &[u8]) -> bool {
 // HFS Volume Parsing
 // =============================================================================
 
-struct HfsVolume {
-    data: Vec<u8>,
+struct HfsVolume<'a> {
+    // The volume is `data[start..]`.
+    data: Cow<'a, [u8]>,
+    start: usize,
     mdb: MasterDirectoryBlock,
-    extents_overflow: Vec<ExtentOverflowRecord>,
+    extents_overflow: ExtentOverflow,
     files: Vec<HfsFileEntry>,
     directories: FastMap<u32, HfsDirEntry>,
+    // Shared by every extent copy out of `data`.
+    budget: ForkBudget,
 }
 
-impl HfsVolume {
-    fn parse_with_resource_fork(data: Vec<u8>, resource_fork: Option<&[u8]>) -> Result<Self> {
+impl<'a> HfsVolume<'a> {
+    fn parse_with_resource_fork(data: &'a [u8], resource_fork: Option<&[u8]>) -> Result<Self> {
+        let whole = 0..data.len();
+        let mut backed = vec![whole];
+
         // Check for UDIF first (modern DMG format)
-        let mut hfs_data = if is_udif(&data) {
-            udif_decompress(&data)?
+        let mut image = if is_udif(data) {
+            let (image, ranges) = udif_decompress(data)?;
+            backed = ranges;
+            Cow::Owned(image)
         } else {
-            data
+            Cow::Borrowed(data)
         };
 
-        if let Some(cooked) = cdrom_user_data(&hfs_data) {
-            hfs_data = cooked;
+        if let Some(cooked) = cdrom_user_data(&image, &mut backed) {
+            image = Cow::Owned(cooked);
         }
 
-        // Check for DiskCopy 4.2 header and strip if present
-        let hfs_offset = get_hfs_data_offset(&hfs_data);
-        if hfs_offset > 0 {
-            hfs_data = hfs_data[hfs_offset..].to_vec();
-        }
+        // Headers are skipped by offset: copying the rest of a sparse image
+        // would commit all of its zero-fill.
+        // Check for DiskCopy 4.2 header
+        let mut start = get_hfs_data_offset(&image);
 
         // Check for Apple Partition Map (APM) - used by .toast and CD images
-        if let Some(apm_offset) = find_apm_hfs_partition(&hfs_data) {
-            hfs_data = hfs_data[apm_offset..].to_vec();
+        if let Some(apm_offset) = find_apm_hfs_partition(&image[start..]) {
+            start = start
+                .checked_add(apm_offset)
+                .filter(|&start| start <= image.len())
+                .ok_or_else(|| Error::invalid_format("APM: HFS partition starts beyond image"))?;
         }
+        backed.retain_mut(|range| {
+            range.start = range.start.max(start) - start;
+            range.end = range.end.saturating_sub(start);
+            range.start < range.end
+        });
 
         // Check if we have an NDIF resource fork - this takes priority
         // because NDIF data can accidentally look like HFS when it's not
@@ -1393,28 +1565,52 @@ impl HfsVolume {
             if let Some(bcem) = extract_bcem_resource(rsrc) {
                 if is_valid_bcem(&bcem) {
                     // Decompress NDIF to get raw HFS
-                    hfs_data = ndif_decompress(&hfs_data, &bcem)?;
+                    let (decoded, ranges) =
+                        ndif_decompress(&image[start..], &bcem, ranges_len(&backed))?;
+                    image = Cow::Owned(decoded);
+                    backed = ranges;
+                    start = 0;
                 }
             }
         }
 
+        let hfs_data = &image[start..];
         if hfs_data.len() < MDB_OFFSET + 162 {
             return Err(Error::invalid_format("HFS image too small"));
         }
 
         // Parse MDB
         let mdb = MasterDirectoryBlock::parse(&hfs_data[MDB_OFFSET..])?;
+        let mut budget = ForkBudget::new(hfs_data.len(), backed);
 
-        let extents_overflow_data =
-            mdb.read_extents(&hfs_data, &mdb.extents_file_extents, mdb.extents_file_size);
+        let extents_overflow_data = mdb.read_extents(
+            hfs_data,
+            &mdb.extents_file_extents,
+            mdb.extents_file_size,
+            &mut budget,
+        )?;
         let extents_overflow = if extents_overflow_data.len() >= 512 {
             Self::parse_extents_overflow(&extents_overflow_data).unwrap_or_default()
         } else {
-            Vec::new()
+            ExtentOverflow::new()
         };
 
-        // Try to read catalog file
-        let catalog_data = mdb.read_extents(&hfs_data, &mdb.catalog_extents, mdb.catalog_file_size);
+        // The MDB holds only the catalog's first three extents; on fragmented
+        // volumes the rest are in the extents overflow file.
+        let catalog_extents = resolve_extents(
+            &extents_overflow,
+            mdb.alloc_block_size,
+            CATALOG_FILE_ID,
+            ForkType::Data,
+            &mdb.catalog_extents,
+            mdb.catalog_file_size,
+        );
+        let catalog_data = mdb.read_extents(
+            hfs_data,
+            &catalog_extents,
+            mdb.catalog_file_size,
+            &mut budget,
+        )?;
 
         // Try parsing the catalog B*-tree
         let (files, directories) = if catalog_data.len() >= 512 {
@@ -1424,11 +1620,13 @@ impl HfsVolume {
         };
 
         Ok(Self {
-            data: hfs_data,
+            data: image,
+            start,
             mdb,
             extents_overflow,
             files,
             directories,
+            budget,
         })
     }
 
@@ -1454,19 +1652,28 @@ impl HfsVolume {
         let mut files = Vec::new();
         let mut directories = FastMap::new();
         let node_size = btree_header.node_size as usize;
-        if node_size == 0 {
+        // HFS B-tree nodes are 512 bytes; smaller sizes cannot hold a node
+        // descriptor.
+        if node_size < 512 {
             return Ok((files, directories));
         }
 
         let mut current_node = btree_header.first_leaf_node;
+        // Bounded so an `fLink` cycle cannot loop forever.
+        let mut remaining_nodes = catalog_data.len() / node_size;
+        let mut visited_nodes = BTreeSet::new();
+        // Record offsets in a leaf can alias one file record many times.
+        let mut seen_files = BTreeSet::new();
 
-        while current_node != 0 {
-            let node_offset = current_node as usize * node_size;
-            if node_offset + node_size > catalog_data.len() {
+        while current_node != 0 && remaining_nodes > 0 && visited_nodes.insert(current_node) {
+            remaining_nodes -= 1;
+            let Some(node_data) = (current_node as usize)
+                .checked_mul(node_size)
+                .and_then(|node_offset| catalog_data.get(node_offset..))
+                .and_then(|rest| rest.get(..node_size))
+            else {
                 break;
-            }
-
-            let node_data = &catalog_data[node_offset..node_offset + node_size];
+            };
             let node_desc = NodeDescriptor::parse(node_data);
 
             // Only process leaf nodes (type = 0xFF or -1)
@@ -1477,6 +1684,7 @@ impl HfsVolume {
                     node_desc.num_records,
                     &mut files,
                     &mut directories,
+                    &mut seen_files,
                 );
             }
 
@@ -1487,7 +1695,7 @@ impl HfsVolume {
         Ok((files, directories))
     }
 
-    fn parse_extents_overflow(data: &[u8]) -> Result<Vec<ExtentOverflowRecord>> {
+    fn parse_extents_overflow(data: &[u8]) -> Result<ExtentOverflow> {
         let header_node = &data[0..512.min(data.len())];
         if header_node.len() < 512 {
             return Err(Error::invalid_format("Extents header node too small"));
@@ -1502,20 +1710,24 @@ impl HfsVolume {
 
         let btree_header = BTreeHeader::parse(&header_node[first_record_offset..]);
         let node_size = btree_header.node_size as usize;
-        if node_size == 0 {
-            return Ok(Vec::new());
+        if node_size < 512 {
+            return Ok(ExtentOverflow::new());
         }
 
-        let mut records = Vec::new();
+        let mut records = ExtentOverflow::new();
         let mut current_node = btree_header.first_leaf_node;
+        let mut remaining_nodes = data.len() / node_size;
+        let mut visited_nodes = BTreeSet::new();
 
-        while current_node != 0 {
-            let node_offset = current_node as usize * node_size;
-            if node_offset + node_size > data.len() {
+        while current_node != 0 && remaining_nodes > 0 && visited_nodes.insert(current_node) {
+            remaining_nodes -= 1;
+            let Some(node_data) = (current_node as usize)
+                .checked_mul(node_size)
+                .and_then(|node_offset| data.get(node_offset..))
+                .and_then(|rest| rest.get(..node_size))
+            else {
                 break;
-            }
-
-            let node_data = &data[node_offset..node_offset + node_size];
+            };
             let node_desc = NodeDescriptor::parse(node_data);
             if node_desc.node_type == -1 {
                 Self::parse_extents_leaf_node(node_data, node_desc.num_records, &mut records);
@@ -1527,11 +1739,7 @@ impl HfsVolume {
         Ok(records)
     }
 
-    fn parse_extents_leaf_node(
-        node_data: &[u8],
-        num_records: u16,
-        records: &mut Vec<ExtentOverflowRecord>,
-    ) {
+    fn parse_extents_leaf_node(node_data: &[u8], num_records: u16, records: &mut ExtentOverflow) {
         let node_size = node_data.len();
 
         for i in 0..num_records {
@@ -1565,16 +1773,16 @@ impl HfsVolume {
                 continue;
             }
 
-            records.push(ExtentOverflowRecord {
-                fork_type,
-                file_id,
-                start_block,
-                extents: [
-                    ExtentDescriptor::read(&record[data_offset..]),
-                    ExtentDescriptor::read(&record[data_offset + 4..]),
-                    ExtentDescriptor::read(&record[data_offset + 8..]),
-                ],
-            });
+            // First record for a key wins, as in an in-order scan.
+            records
+                .entry((file_id, fork_type, start_block))
+                .or_insert_with(|| {
+                    [
+                        ExtentDescriptor::read(&record[data_offset..]),
+                        ExtentDescriptor::read(&record[data_offset + 4..]),
+                        ExtentDescriptor::read(&record[data_offset + 8..]),
+                    ]
+                });
         }
     }
 
@@ -1583,6 +1791,7 @@ impl HfsVolume {
         num_records: u16,
         files: &mut Vec<HfsFileEntry>,
         directories: &mut FastMap<u32, HfsDirEntry>,
+        seen_files: &mut BTreeSet<u32>,
     ) {
         let node_size = node_data.len();
 
@@ -1665,6 +1874,9 @@ impl HfsVolume {
                     record_data[22],
                     record_data[23],
                 ]);
+                if !seen_files.insert(file_id) {
+                    continue;
+                }
 
                 let data_fork_size = u32::from_be_bytes([
                     record_data[26],
@@ -1710,8 +1922,11 @@ impl HfsVolume {
         let mut components = vec![file.name.clone()];
         let mut current_parent = file.parent_id;
 
-        // HFS root directory CNID is 2, root parent is 1
-        while current_parent > 2 {
+        // HFS root directory CNID is 2, root parent is 1. A path cannot be
+        // deeper than the directory count; more steps mean a parent cycle.
+        let mut remaining_steps = self.directories.len();
+        while current_parent > 2 && remaining_steps > 0 {
+            remaining_steps -= 1;
             if let Some(dir) = self.directories.get(&current_parent) {
                 components.push(dir.name.clone());
                 current_parent = dir.parent_id;
@@ -1725,7 +1940,7 @@ impl HfsVolume {
         components.join(":")
     }
 
-    fn read_data_fork(&self, file: &HfsFileEntry) -> Vec<u8> {
+    fn read_data_fork(&mut self, file: &HfsFileEntry) -> Result<Vec<u8>> {
         self.read_file_fork(
             file.file_id,
             ForkType::Data,
@@ -1734,7 +1949,7 @@ impl HfsVolume {
         )
     }
 
-    fn read_resource_fork(&self, file: &HfsFileEntry) -> Vec<u8> {
+    fn read_resource_fork(&mut self, file: &HfsFileEntry) -> Result<Vec<u8>> {
         self.read_file_fork(
             file.file_id,
             ForkType::Resource,
@@ -1744,14 +1959,15 @@ impl HfsVolume {
     }
 
     fn read_file_fork(
-        &self,
+        &mut self,
         file_id: u32,
         fork_type: ForkType,
         inline_extents: &[ExtentDescriptor; 3],
         size: u32,
-    ) -> Vec<u8> {
+    ) -> Result<Vec<u8>> {
         let extents = self.resolve_extents(file_id, fork_type, inline_extents, size);
-        self.mdb.read_extents(&self.data, &extents, size)
+        self.mdb
+            .read_extents(&self.data[self.start..], &extents, size, &mut self.budget)
     }
 
     fn resolve_extents(
@@ -1761,48 +1977,69 @@ impl HfsVolume {
         inline_extents: &[ExtentDescriptor; 3],
         size: u32,
     ) -> Vec<ExtentDescriptor> {
-        let mut extents: Vec<ExtentDescriptor> = inline_extents
-            .iter()
-            .copied()
-            .filter(|extent| extent.block_count != 0)
-            .collect();
-
-        if size == 0 || self.mdb.alloc_block_size == 0 {
-            return extents;
-        }
-
-        let blocks_needed = (size as u64).div_ceil(u64::from(self.mdb.alloc_block_size)) as u32;
-        let mut next_logical_block = extents
-            .iter()
-            .map(|extent| u32::from(extent.block_count))
-            .fold(0u32, u32::saturating_add);
-
-        while next_logical_block < blocks_needed {
-            let Some(record) = self.extents_overflow.iter().find(|record| {
-                record.file_id == file_id
-                    && record.fork_type == fork_type
-                    && u32::from(record.start_block) == next_logical_block
-            }) else {
-                break;
-            };
-
-            let mut added = 0u32;
-            for extent in record.extents {
-                if extent.block_count == 0 {
-                    continue;
-                }
-                added = added.saturating_add(u32::from(extent.block_count));
-                extents.push(extent);
-            }
-
-            if added == 0 {
-                break;
-            }
-            next_logical_block = next_logical_block.saturating_add(added);
-        }
-
-        extents
+        resolve_extents(
+            &self.extents_overflow,
+            self.mdb.alloc_block_size,
+            file_id,
+            fork_type,
+            inline_extents,
+            size,
+        )
     }
+}
+
+fn resolve_extents(
+    overflow: &ExtentOverflow,
+    alloc_block_size: u32,
+    file_id: u32,
+    fork_type: ForkType,
+    inline_extents: &[ExtentDescriptor; 3],
+    size: u32,
+) -> Vec<ExtentDescriptor> {
+    let mut extents: Vec<ExtentDescriptor> = inline_extents
+        .iter()
+        .copied()
+        .filter(|extent| extent.block_count != 0)
+        .collect();
+
+    if size == 0 || alloc_block_size == 0 {
+        return extents;
+    }
+
+    let blocks_needed = u64::from(size).div_ceil(u64::from(alloc_block_size)) as u32;
+    let mut next_logical_block = extents
+        .iter()
+        .map(|extent| u32::from(extent.block_count))
+        .fold(0u32, u32::saturating_add);
+
+    // Every step consumes a different overflow record.
+    for _ in 0..overflow.len() {
+        if next_logical_block >= blocks_needed {
+            break;
+        }
+        let Some(record) = u16::try_from(next_logical_block)
+            .ok()
+            .and_then(|start_block| overflow.get(&(file_id, fork_type, start_block)))
+        else {
+            break;
+        };
+
+        let mut added = 0u32;
+        for &extent in record {
+            if extent.block_count == 0 {
+                continue;
+            }
+            added = added.saturating_add(u32::from(extent.block_count));
+            extents.push(extent);
+        }
+
+        if added == 0 {
+            break;
+        }
+        next_logical_block = next_logical_block.saturating_add(added);
+    }
+
+    extents
 }
 
 fn get_hfs_data_offset(data: &[u8]) -> usize {
@@ -1840,6 +2077,11 @@ impl MfsVolume {
 
         // Parse MDB
         let mdb = MfsMasterDirectoryBlock::parse(&mfs_data[MDB_OFFSET..])?;
+        if mdb.allocation_block_size == 0 {
+            return Err(Error::invalid_format("MFS allocation block size is zero"));
+        }
+        // Directory entries can share one allocation chain.
+        let mut budget = OutputBudget::for_input(mfs_data.len(), FORK_BUDGET_RATIO);
 
         // Read all directory blocks
         let dir_start = mdb.directory_start_block as usize * 512;
@@ -1978,6 +2220,8 @@ impl MfsVolume {
             } else {
                 Vec::new()
             };
+            budget.charge(data_fork.len(), "MFS")?;
+            budget.charge(resource_fork.len(), "MFS")?;
 
             files.push(MfsFileEntry {
                 name,
@@ -2014,26 +2258,38 @@ impl MfsVolume {
         const MFS_FIRST_ALLOCATION_BLOCK: u16 = 2;
         const MFS_LAST_ALLOCATION_BLOCK: u16 = 1;
 
-        let mut result = Vec::with_capacity(length as usize);
-        let mut remaining = length as usize;
+        // A fork cannot be longer than the volume holding it; clamping also
+        // bounds the output when the allocation chain loops.
+        let length = (length as usize).min(volume_data.len());
+        let mut result = Vec::with_capacity(crate::limits::prealloc_hint(length as u64));
+        let mut remaining = length;
         let mut current_block = first_block;
+        // A chain visits each allocation block at most once.
+        let mut remaining_steps = alloc_count;
 
         // VABM starts immediately after MDB (64 bytes)
         let vabm_offset = 64;
 
-        while remaining > 0 && current_block >= MFS_FIRST_ALLOCATION_BLOCK {
+        while remaining > 0 && current_block >= MFS_FIRST_ALLOCATION_BLOCK && remaining_steps > 0 {
+            remaining_steps -= 1;
             // Calculate offset in volume
-            let block_offset = alloc_start as usize
-                + ((current_block - MFS_FIRST_ALLOCATION_BLOCK) as usize * alloc_size as usize);
+            let block_offset = u64::from(current_block - MFS_FIRST_ALLOCATION_BLOCK)
+                .saturating_mul(alloc_size)
+                .saturating_add(alloc_start);
 
             // Read up to one allocation block
-            let read_size = (alloc_size as usize).min(remaining);
-            if block_offset + read_size <= volume_data.len() {
-                result.extend_from_slice(&volume_data[block_offset..block_offset + read_size]);
-                remaining -= read_size;
-            } else {
+            let read_size = usize::try_from(alloc_size)
+                .unwrap_or(usize::MAX)
+                .min(remaining);
+            let Some(block) = usize::try_from(block_offset)
+                .ok()
+                .and_then(|block_offset| volume_data.get(block_offset..))
+                .and_then(|rest| rest.get(..read_size))
+            else {
                 break;
-            }
+            };
+            result.extend_from_slice(block);
+            remaining -= read_size;
 
             // Get next block from VABM (12-bit packed entries)
             // VABM is indexed by (block - 2), so block 2 is entry 0
@@ -2071,7 +2327,7 @@ impl MfsVolume {
         }
 
         // Truncate to exact length
-        result.truncate(length as usize);
+        result.truncate(length);
         result
     }
 }
@@ -2186,28 +2442,29 @@ impl HfsContainer {
         let resource_fork = get_sibling(RESOURCE_FORK_SUFFIX);
 
         // Parse the HFS volume
-        let volume = HfsVolume::parse_with_resource_fork(data.to_vec(), resource_fork.as_deref())?;
+        let mut volume = HfsVolume::parse_with_resource_fork(data, resource_fork.as_deref())?;
 
         // Extract all file entries
-        let entries: Vec<HfsEntry> = volume
-            .files
-            .iter()
-            .map(|file| {
-                // Build full path by walking up directory tree
-                let full_path = volume.build_full_path(file);
-                HfsEntry {
-                    path: format!("{}/{}", prefix, sanitize_hfs_path(&full_path)),
-                    data: volume.read_data_fork(file),
-                    resource_fork: volume.read_resource_fork(file),
-                    file_type: file.file_type,
-                    creator: file.creator,
-                }
-            })
-            .filter(|entry| {
-                // Only keep entries with actual data
-                !entry.data.is_empty() || !entry.resource_fork.is_empty()
-            })
-            .collect();
+        let files = core::mem::take(&mut volume.files);
+        let mut entries = Vec::new();
+        for file in &files {
+            let data = volume.read_data_fork(file)?;
+            let resource_fork = volume.read_resource_fork(file)?;
+            // Only keep entries with actual data
+            if data.is_empty() && resource_fork.is_empty() {
+                continue;
+            }
+
+            // Build full path by walking up directory tree
+            let full_path = volume.build_full_path(file);
+            entries.push(HfsEntry {
+                path: format!("{}/{}", prefix, sanitize_hfs_path(&full_path)),
+                data,
+                resource_fork,
+                file_type: file.file_type,
+                creator: file.creator,
+            });
+        }
 
         Ok(Self {
             prefix,
@@ -2312,6 +2569,60 @@ mod tests {
     }
 
     #[test]
+    fn test_apm_map_in_device_blocks() {
+        // Map found at block 1 of a 2048-byte device: entries and start
+        // blocks are in 2048-byte units. HFS is in the second entry.
+        let block = 2048usize;
+        let hfs_start_block = 4usize;
+        let hfs_offset = hfs_start_block * block;
+        let mut data = vec![0u8; hfs_offset + 2048];
+        data[0..2].copy_from_slice(&APM_DRIVER_MAP_SIGNATURE.to_be_bytes());
+        data[2..4].copy_from_slice(&(block as u16).to_be_bytes());
+        for (i, (kind, start)) in [(&b"Apple_partition_map\0"[..], 1), (b"Apple_HFS\0", 4)]
+            .into_iter()
+            .enumerate()
+        {
+            let entry = block * (i + 1);
+            data[entry..entry + 2].copy_from_slice(&APM_PARTITION_SIGNATURE.to_be_bytes());
+            data[entry + 4..entry + 8].copy_from_slice(&2u32.to_be_bytes());
+            data[entry + 8..entry + 12].copy_from_slice(&(start as u32).to_be_bytes());
+            data[entry + 48..entry + 48 + kind.len()].copy_from_slice(kind);
+        }
+        data[hfs_offset + MDB_OFFSET..hfs_offset + MDB_OFFSET + 2]
+            .copy_from_slice(&HFS_SIGNATURE.to_be_bytes());
+        assert_eq!(find_apm_hfs_partition(&data), Some(hfs_offset));
+        assert!(is_hfs_image(&data));
+    }
+
+    // Header node (node 0) with the B-tree header record at offset 14.
+    fn btree_with_header(node_size: u16, first_leaf: u32, nodes: usize) -> Vec<u8> {
+        let mut data = vec![0u8; 512 * nodes];
+        data[510..512].copy_from_slice(&14u16.to_be_bytes());
+        data[14 + 10..14 + 14].copy_from_slice(&first_leaf.to_be_bytes());
+        data[14 + 18..14 + 20].copy_from_slice(&node_size.to_be_bytes());
+        data
+    }
+
+    #[test]
+    fn test_btree_rejects_tiny_node_size() {
+        let data = btree_with_header(4, 1, 2);
+        let (files, dirs) = HfsVolume::parse_catalog(&data).unwrap();
+        assert!(files.is_empty() && dirs.is_empty());
+        assert!(HfsVolume::parse_extents_overflow(&data).unwrap().is_empty());
+    }
+
+    #[test]
+    fn test_btree_leaf_cycle_terminates() {
+        let mut data = btree_with_header(512, 1, 2);
+        // Leaf node 1 links to itself.
+        data[512..516].copy_from_slice(&1u32.to_be_bytes());
+        data[512 + 8] = 0xFF;
+        let (files, _) = HfsVolume::parse_catalog(&data).unwrap();
+        assert!(files.is_empty());
+        assert!(HfsVolume::parse_extents_overflow(&data).unwrap().is_empty());
+    }
+
+    #[test]
     fn test_raw_cd_sector_hfs_detection() {
         const RAW_SECTOR_SIZE: usize = 2352;
         const USER_DATA_OFFSET: usize = 16;
@@ -2375,10 +2686,169 @@ mod tests {
         assert_eq!(parsed.first_alloc_block, 5);
     }
 
+    const TEST_ALLOC_START: usize = 4 * 512;
+
+    fn put_extents(dst: &mut [u8], extents: &[(u16, u16)]) {
+        for (i, (start, count)) in extents.iter().enumerate() {
+            dst[i * 4..i * 4 + 2].copy_from_slice(&start.to_be_bytes());
+            dst[i * 4 + 2..i * 4 + 4].copy_from_slice(&count.to_be_bytes());
+        }
+    }
+
+    fn leaf_node(f_link: u32, records: &[Vec<u8>]) -> Vec<u8> {
+        let mut node = vec![0u8; 512];
+        node[0..4].copy_from_slice(&f_link.to_be_bytes());
+        node[8] = 0xFF;
+        node[10..12].copy_from_slice(&(records.len() as u16).to_be_bytes());
+        let mut offset = 14;
+        for (i, record) in records.iter().enumerate() {
+            node[offset..offset + record.len()].copy_from_slice(record);
+            let pos = 512 - 2 * (i + 1);
+            node[pos..pos + 2].copy_from_slice(&(offset as u16).to_be_bytes());
+            offset += record.len();
+        }
+        node
+    }
+
+    fn catalog_file_record(name: &str, file_id: u32, size: u32, block: u16) -> Vec<u8> {
+        let mut record = vec![0u8; 7 + name.len() + (name.len() + 1) % 2 + 102];
+        record[0] = 6 + name.len() as u8;
+        record[2..6].copy_from_slice(&2u32.to_be_bytes());
+        record[6] = name.len() as u8;
+        record[7..7 + name.len()].copy_from_slice(name.as_bytes());
+        let data = record.len() - 102;
+        record[data] = 2;
+        record[data + 4..data + 8].copy_from_slice(b"TEXT");
+        record[data + 20..data + 24].copy_from_slice(&file_id.to_be_bytes());
+        record[data + 26..data + 30].copy_from_slice(&size.to_be_bytes());
+        put_extents(&mut record[data + 74..], &[(block, 1)]);
+        record
+    }
+
+    fn extent_overflow_record(file_id: u32, start_block: u16, extents: &[(u16, u16)]) -> Vec<u8> {
+        let mut record = vec![0u8; 20];
+        record[0] = 7;
+        record[2..6].copy_from_slice(&file_id.to_be_bytes());
+        record[6..8].copy_from_slice(&start_block.to_be_bytes());
+        put_extents(&mut record[8..], extents);
+        record
+    }
+
+    // Volume whose catalog has one header node and `leaves` leaf nodes, each
+    // in its own one-block extent (catalog node i at allocation block 2 + 2i)
+    // and each holding one file "F<i>" whose data sits in the following block.
+    // Extents past the three in the MDB go to the extents overflow file
+    // (allocation blocks 0-1), `chunk` extents per overflow record.
+    fn fragmented_catalog_volume(leaves: usize, chunk: usize) -> Vec<u8> {
+        let nodes = leaves + 1;
+        let catalog_block = |node: usize| (2 + 2 * node) as u16;
+        let mut image = vec![0u8; TEST_ALLOC_START + (2 + 2 * nodes) * 512];
+        let mut put_block = |block: u16, bytes: &[u8]| {
+            let offset = TEST_ALLOC_START + usize::from(block) * 512;
+            image[offset..offset + bytes.len()].copy_from_slice(bytes);
+        };
+
+        put_block(0, &btree_with_header(512, 1, 1));
+        let overflow_nodes: Vec<usize> = (3..nodes).collect();
+        let overflow_records: Vec<Vec<u8>> = overflow_nodes
+            .chunks(chunk)
+            .map(|group| {
+                let extents: Vec<(u16, u16)> =
+                    group.iter().map(|&node| (catalog_block(node), 1)).collect();
+                extent_overflow_record(CATALOG_FILE_ID, group[0] as u16, &extents)
+            })
+            .collect();
+        put_block(1, &leaf_node(0, &overflow_records));
+
+        put_block(catalog_block(0), &btree_with_header(512, 1, 1));
+        for node in 1..nodes {
+            let data_block = catalog_block(node) + 1;
+            let content = format!("content {node}");
+            let f_link = if node + 1 < nodes { node as u32 + 1 } else { 0 };
+            let record = catalog_file_record(
+                &format!("F{node}"),
+                16 + node as u32,
+                content.len() as u32,
+                data_block,
+            );
+            put_block(catalog_block(node), &leaf_node(f_link, &[record]));
+            put_block(data_block, content.as_bytes());
+        }
+
+        let mdb = &mut image[MDB_OFFSET..MDB_OFFSET + 162];
+        mdb[0..2].copy_from_slice(&HFS_SIGNATURE.to_be_bytes());
+        mdb[18..20].copy_from_slice(&((2 + 2 * nodes) as u16).to_be_bytes());
+        mdb[20..24].copy_from_slice(&512u32.to_be_bytes());
+        mdb[28..30].copy_from_slice(&4u16.to_be_bytes());
+        mdb[130..134].copy_from_slice(&1024u32.to_be_bytes());
+        put_extents(&mut mdb[134..], &[(0, 2)]);
+        mdb[146..150].copy_from_slice(&((nodes * 512) as u32).to_be_bytes());
+        let inline: Vec<(u16, u16)> = (0..nodes.min(3)).map(|n| (catalog_block(n), 1)).collect();
+        put_extents(&mut mdb[150..], &inline);
+        image
+    }
+
+    fn container_files(image: &[u8]) -> Vec<(String, Vec<u8>)> {
+        let container = HfsContainer::from_bytes(image, "vol".to_string(), 8).unwrap();
+        container
+            .entries
+            .iter()
+            .map(|entry| (entry.path.clone(), entry.data.clone()))
+            .collect()
+    }
+
+    fn expected_files(leaves: usize) -> Vec<(String, Vec<u8>)> {
+        (1..=leaves)
+            .map(|n| (format!("vol/F{n}"), format!("content {n}").into_bytes()))
+            .collect()
+    }
+
+    #[test]
+    fn test_catalog_within_mdb_extents() {
+        assert_eq!(
+            container_files(&fragmented_catalog_volume(2, 3)),
+            expected_files(2)
+        );
+    }
+
+    #[test]
+    fn test_catalog_extents_continue_in_overflow_file() {
+        // Catalog nodes 3-5 are only reachable through one overflow record.
+        assert_eq!(
+            container_files(&fragmented_catalog_volume(5, 3)),
+            expected_files(5)
+        );
+    }
+
+    #[test]
+    fn test_catalog_extents_span_multiple_overflow_records() {
+        // Nodes 3-9 need three chained overflow records (3 + 3 + 1 extents).
+        assert_eq!(
+            container_files(&fragmented_catalog_volume(9, 3)),
+            expected_files(9)
+        );
+        // Partially filled records chain by logical start block too.
+        assert_eq!(
+            container_files(&fragmented_catalog_volume(6, 1)),
+            expected_files(6)
+        );
+    }
+
+    #[test]
+    fn test_catalog_overflow_ignores_other_files_records() {
+        // Same layout, but the overflow records belong to a regular file with
+        // the catalog's logical start blocks: the catalog must not use them.
+        let mut image = fragmented_catalog_volume(5, 3);
+        let record = TEST_ALLOC_START + 512 + 14;
+        image[record + 2..record + 6].copy_from_slice(&99u32.to_be_bytes());
+        assert_eq!(container_files(&image), expected_files(2));
+    }
+
     #[test]
     fn test_resolve_extents_uses_overflow_for_both_forks() {
         let volume = HfsVolume {
-            data: Vec::new(),
+            data: Cow::Borrowed(&[]),
+            start: 0,
             mdb: MasterDirectoryBlock {
                 _num_alloc_blocks: 0,
                 alloc_block_size: 512,
@@ -2388,36 +2858,20 @@ mod tests {
                 catalog_file_size: 0,
                 catalog_extents: [ExtentDescriptor::default(); 3],
             },
-            extents_overflow: vec![
-                ExtentOverflowRecord {
-                    fork_type: ForkType::Data,
-                    file_id: 42,
-                    start_block: 1,
-                    extents: [
-                        ExtentDescriptor {
-                            start_block: 20,
-                            block_count: 2,
-                        },
-                        ExtentDescriptor::default(),
-                        ExtentDescriptor::default(),
-                    ],
-                },
-                ExtentOverflowRecord {
-                    fork_type: ForkType::Resource,
-                    file_id: 42,
-                    start_block: 1,
-                    extents: [
-                        ExtentDescriptor {
-                            start_block: 30,
-                            block_count: 2,
-                        },
-                        ExtentDescriptor::default(),
-                        ExtentDescriptor::default(),
-                    ],
-                },
-            ],
+            extents_overflow: [(ForkType::Data, 20), (ForkType::Resource, 30)]
+                .into_iter()
+                .map(|(fork_type, start_block)| {
+                    let mut extents = [ExtentDescriptor::default(); 3];
+                    extents[0] = ExtentDescriptor {
+                        start_block,
+                        block_count: 2,
+                    };
+                    ((42, fork_type, 1), extents)
+                })
+                .collect(),
             files: Vec::new(),
             directories: FastMap::new(),
+            budget: ForkBudget::new(0, Vec::new()),
         };
         let inline = [
             ExtentDescriptor {
@@ -2435,5 +2889,931 @@ mod tests {
         let rsrc_extents = volume.resolve_extents(42, ForkType::Resource, &inline, 1536);
         assert_eq!(rsrc_extents.len(), 2);
         assert_eq!(rsrc_extents[1].start_block, 30);
+    }
+
+    fn mish_block(block_type: UdifBlockType, sector_number: u64, sector_count: u64) -> MishBlock {
+        MishBlock {
+            block_type,
+            sector_number,
+            sector_count,
+            compressed_offset: 0,
+            compressed_length: 0,
+        }
+    }
+
+    #[test]
+    fn udif_total_size_spans_last_data_block() {
+        let blocks = [
+            mish_block(UdifBlockType::Raw, 0, 8),
+            mish_block(UdifBlockType::Zero, 8, 8),
+            mish_block(UdifBlockType::Terminator, 1 << 40, 0),
+        ];
+        assert_eq!(udif_total_size(&blocks).unwrap(), 16 * NDIF_BLOCK_SIZE);
+    }
+
+    #[test]
+    fn udif_total_size_rejects_oversized_and_overflowing_tables() {
+        let over_limit = crate::MAX_DECOMPRESSED_SIZE / NDIF_BLOCK_SIZE as u64 + 1;
+        for (sector_number, sector_count) in [
+            (0, over_limit),     // past MAX_DECOMPRESSED_SIZE
+            (0, u64::MAX / 256), // byte count overflows u64
+            (u64::MAX, 2),       // sector range overflows u64
+        ] {
+            let blocks = [mish_block(UdifBlockType::Zero, sector_number, sector_count)];
+            assert!(
+                udif_total_size(&blocks).is_err(),
+                "{sector_number}+{sector_count}"
+            );
+        }
+        // Only a terminator: no data sectors at all.
+        assert!(udif_total_size(&[mish_block(UdifBlockType::Terminator, 0, 0)]).is_err());
+    }
+
+    // 4 allocation blocks of 512 bytes chained 2 -> 3 -> 4 -> 5 -> end.
+    fn mfs_chain() -> (Vec<u8>, Vec<u8>) {
+        let volume: Vec<u8> = (0..4 * 512).map(|i| (i / 512) as u8 + 1).collect();
+        let mut mdb_and_vabm = vec![0u8; 64 + 6];
+        // 12-bit entries: 003 004 | 005 001
+        mdb_and_vabm[64..70].copy_from_slice(&[0x00, 0x30, 0x04, 0x00, 0x50, 0x01]);
+        (volume, mdb_and_vabm)
+    }
+
+    #[test]
+    fn mfs_read_fork_follows_allocation_chain() {
+        let (volume, vabm) = mfs_chain();
+        let fork = MfsVolume::read_fork(&volume, &vabm, 2, 1500, 0, 512, 4);
+        assert_eq!(fork.len(), 1500);
+        assert_eq!(fork, &volume[..1500]);
+    }
+
+    #[test]
+    fn mfs_read_fork_huge_declared_length_does_not_drive_allocation() {
+        let (volume, vabm) = mfs_chain();
+        let fork = MfsVolume::read_fork(&volume, &vabm, 2, u32::MAX, 0, 512, 4);
+        assert_eq!(fork, volume);
+        assert!(fork.capacity() <= volume.len().max(crate::limits::PREALLOC_LIMIT));
+    }
+
+    #[test]
+    fn mfs_read_fork_looping_chain_is_bounded_by_volume() {
+        let (volume, mut vabm) = mfs_chain();
+        // Point block 3 back at block 2.
+        vabm[64..67].copy_from_slice(&[0x00, 0x30, 0x02]);
+        let fork = MfsVolume::read_fork(&volume, &vabm, 2, u32::MAX, 0, 512, 4);
+        assert!(fork.len() <= volume.len());
+    }
+
+    // Volume with an extents overflow file made of `overflow_leaves` (after
+    // its header node), a one-leaf catalog holding `catalog`, and
+    // `data_blocks` further allocation blocks. Returns the image and the
+    // first data allocation block.
+    fn crafted_volume(
+        overflow_leaves: &[Vec<u8>],
+        catalog: &[Vec<u8>],
+        data_blocks: usize,
+    ) -> (Vec<u8>, u16) {
+        let overflow_nodes = overflow_leaves.len() + 1;
+        let blocks = overflow_nodes + 2 + data_blocks;
+        let mut image = vec![0u8; TEST_ALLOC_START + blocks * 512];
+        let mut put_block = |block: usize, bytes: &[u8]| {
+            let offset = TEST_ALLOC_START + block * 512;
+            image[offset..offset + bytes.len()].copy_from_slice(bytes);
+        };
+        put_block(0, &btree_with_header(512, 1, 1));
+        for (i, leaf) in overflow_leaves.iter().enumerate() {
+            put_block(1 + i, leaf);
+        }
+        put_block(overflow_nodes, &btree_with_header(512, 1, 1));
+        put_block(overflow_nodes + 1, &leaf_node(0, catalog));
+
+        let mdb = &mut image[MDB_OFFSET..MDB_OFFSET + 162];
+        mdb[0..2].copy_from_slice(&HFS_SIGNATURE.to_be_bytes());
+        mdb[18..20].copy_from_slice(&(blocks as u16).to_be_bytes());
+        mdb[20..24].copy_from_slice(&512u32.to_be_bytes());
+        mdb[28..30].copy_from_slice(&4u16.to_be_bytes());
+        mdb[130..134].copy_from_slice(&((overflow_nodes * 512) as u32).to_be_bytes());
+        put_extents(&mut mdb[134..], &[(0, overflow_nodes as u16)]);
+        mdb[146..150].copy_from_slice(&1024u32.to_be_bytes());
+        put_extents(&mut mdb[150..], &[(overflow_nodes as u16, 2)]);
+        (image, (overflow_nodes + 2) as u16)
+    }
+
+    fn catalog_dir_record(name: &str, parent: u32, cnid: u32) -> Vec<u8> {
+        let mut record = vec![0u8; 7 + name.len() + (name.len() + 1) % 2 + 70];
+        record[0] = 6 + name.len() as u8;
+        record[2..6].copy_from_slice(&parent.to_be_bytes());
+        record[6] = name.len() as u8;
+        record[7..7 + name.len()].copy_from_slice(name.as_bytes());
+        let data = record.len() - 70;
+        record[data] = 1;
+        record[data + 6..data + 10].copy_from_slice(&cnid.to_be_bytes());
+        record
+    }
+
+    fn parse_fails(image: &[u8]) -> bool {
+        HfsContainer::from_bytes(image, "vol".to_string(), 8).is_err()
+    }
+
+    #[test]
+    fn directory_parent_cycle_terminates() {
+        // Directory 16 is its own parent; the file lives in it.
+        let (_, data_block) = crafted_volume(&[], &[], 1);
+        let mut file = catalog_file_record("F1", 17, 9, data_block);
+        file[2..6].copy_from_slice(&16u32.to_be_bytes());
+        let (mut image, _) = crafted_volume(&[], &[catalog_dir_record("D", 16, 16), file], 1);
+        let offset = TEST_ALLOC_START + usize::from(data_block) * 512;
+        image[offset..offset + 9].copy_from_slice(b"content 1");
+
+        let files = container_files(&image);
+        assert_eq!(files.len(), 1);
+        assert!(files[0].0.ends_with("F1"), "{}", files[0].0);
+        assert_eq!(files[0].1, b"content 1");
+    }
+
+    // One file whose data fork starts at block 2 of an MFS volume with a
+    // single allocation block that the block map chains to itself.
+    fn mfs_image(alloc_block_size: u32, image_len: usize, files: usize, fork_len: u32) -> Vec<u8> {
+        let mut image = vec![0u8; image_len];
+        let mdb = &mut image[MDB_OFFSET..];
+        mdb[0..2].copy_from_slice(&MFS_SIGNATURE.to_be_bytes());
+        mdb[14..16].copy_from_slice(&4u16.to_be_bytes());
+        mdb[16..18].copy_from_slice(&2u16.to_be_bytes());
+        mdb[18..20].copy_from_slice(&4u16.to_be_bytes());
+        mdb[20..24].copy_from_slice(&alloc_block_size.to_be_bytes());
+        mdb[28..30].copy_from_slice(&6u16.to_be_bytes());
+        // 12-bit block map entry 0 (block 2) -> block 2.
+        mdb[64..66].copy_from_slice(&[0x00, 0x20]);
+        for i in 0..files {
+            let record = &mut image[4 * 512 + i * 52..][..52];
+            record[0] = 0x80;
+            record[22..24].copy_from_slice(&2u16.to_be_bytes());
+            record[24..28].copy_from_slice(&fork_len.to_be_bytes());
+            record[32..34].copy_from_slice(&2u16.to_be_bytes());
+            record[34..38].copy_from_slice(&fork_len.to_be_bytes());
+            record[50] = 1;
+            record[51] = b'A' + i as u8;
+        }
+        image
+    }
+
+    #[test]
+    fn mfs_zero_allocation_block_size_is_rejected() {
+        let valid = HfsContainer::from_bytes(&mfs_image(512, 8 * 512, 1, 100), "v".into(), 8);
+        assert_eq!(valid.unwrap().entries[0].data.len(), 100);
+        assert!(parse_fails(&mfs_image(0, 8 * 512, 1, 100)));
+    }
+
+    #[test]
+    fn mfs_read_fork_zero_block_size_chain_terminates() {
+        let (volume, mut vabm) = mfs_chain();
+        vabm[64..66].copy_from_slice(&[0x00, 0x20]);
+        let fork = MfsVolume::read_fork(&volume, &vabm, 2, 100, 0, 0, 4);
+        assert!(fork.is_empty());
+    }
+
+    #[test]
+    fn mfs_aliased_forks_are_charged_to_volume_budget() {
+        // 10 files x 2 forks all reading the same 900 KiB allocation block.
+        let block = 900 * 1024;
+        assert!(parse_fails(&mfs_image(block, 1024 * 1024, 10, block)));
+        // A single file stays within budget.
+        assert!(!parse_fails(&mfs_image(block, 1024 * 1024, 1, block)));
+    }
+
+    #[test]
+    fn apm_partition_beyond_image_is_an_error() {
+        let mut data = vec![0u8; 4096];
+        data[0..2].copy_from_slice(&APM_DRIVER_MAP_SIGNATURE.to_be_bytes());
+        data[2..4].copy_from_slice(&512u16.to_be_bytes());
+        let entry = 512;
+        data[entry..entry + 2].copy_from_slice(&APM_PARTITION_SIGNATURE.to_be_bytes());
+        data[entry + 4..entry + 8].copy_from_slice(&1u32.to_be_bytes());
+        data[entry + 8..entry + 12].copy_from_slice(&0x00FF_FFFFu32.to_be_bytes());
+        data[entry + 48..entry + 58].copy_from_slice(b"Apple_HFS\0");
+        assert!(!is_hfs_image(&data));
+        assert!(parse_fails(&data));
+    }
+
+    fn koly(xml_offset: u64, xml_length: u64) -> Vec<u8> {
+        let mut trailer = vec![0u8; 512];
+        trailer[0..4].copy_from_slice(UDIF_SIGNATURE);
+        trailer[216..224].copy_from_slice(&xml_offset.to_be_bytes());
+        trailer[224..232].copy_from_slice(&xml_length.to_be_bytes());
+        trailer
+    }
+
+    // (type, sector, sector count, backing offset, backing length)
+    type TestMishBlock = (u32, u64, u64, u64, u64);
+
+    fn mish(data_offset: u64, blocks: &[TestMishBlock]) -> Vec<u8> {
+        let mut data = vec![0u8; 204];
+        data[0..4].copy_from_slice(b"mish");
+        data[24..32].copy_from_slice(&data_offset.to_be_bytes());
+        data[36..40].copy_from_slice(&(blocks.len() as u32).to_be_bytes());
+        for (kind, sector, count, offset, length) in blocks {
+            data.extend_from_slice(&kind.to_be_bytes());
+            data.extend_from_slice(&[0u8; 4]);
+            for field in [sector, count, offset, length] {
+                data.extend_from_slice(&field.to_be_bytes());
+            }
+        }
+        data
+    }
+
+    fn encode_base64(input: &[u8]) -> String {
+        const ALPHABET: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+        let mut out = String::new();
+        for chunk in input.chunks(3) {
+            let mut word = [0u8; 3];
+            word[..chunk.len()].copy_from_slice(chunk);
+            let bits = u32::from_be_bytes([0, word[0], word[1], word[2]]);
+            for i in 0..=chunk.len() {
+                out.push(ALPHABET[(bits >> (18 - 6 * i)) as usize & 63] as char);
+            }
+        }
+        out
+    }
+
+    // `payload` at offset 0, then the plist, then the koly trailer.
+    fn udif_image(payload: &[u8], blocks: &[TestMishBlock]) -> Vec<u8> {
+        let xml = format!(
+            "<key>blkx</key><array><data>{}</data></array>",
+            encode_base64(&mish(0, blocks))
+        );
+        let mut image = payload.to_vec();
+        image.extend_from_slice(xml.as_bytes());
+        image.extend_from_slice(&koly(payload.len() as u64, xml.len() as u64));
+        image
+    }
+
+    #[test]
+    fn udif_plist_range_overflow_is_an_error() {
+        assert!(udif_decompress(&koly(0xFFFF_FFFF_FFFF_FFF0, 0x20)).is_err());
+        assert!(udif_decompress(&koly(u64::MAX, u64::MAX)).is_err());
+    }
+
+    #[test]
+    fn udif_block_range_overflow_is_an_error() {
+        let payload = [7u8; 512];
+        let image = udif_image(&payload, &[(1, 0, 1, 0, 512)]);
+        assert_eq!(udif_decompress(&image).unwrap().0, payload);
+
+        for kind in [1, 0x8000_0004, 0x8000_0005] {
+            let image = udif_image(&payload, &[(kind, 0, 1, u64::MAX - 1, 16)]);
+            assert!(udif_decompress(&image).is_err(), "{kind:#x}");
+        }
+    }
+
+    #[test]
+    fn udif_mish_data_offset_overflow_is_an_error() {
+        assert!(parse_mish_data(&mish(u64::MAX, &[(1, 0, 1, 2, 16)])).is_err());
+    }
+
+    #[test]
+    fn udif_stored_chunks_are_bounded_by_backing_size() {
+        // Two raw chunks of 20 MiB each backed by the same 16 bytes.
+        let sectors = 40_000;
+        let blocks = [(1, 0, sectors, 0, 16), (1, sectors, sectors, 0, 16)];
+        assert!(udif_decompress(&udif_image(&[7u8; 16], &blocks)).is_err());
+
+        // Zero-fill chunks are exempt: a sparse image of the same size is fine.
+        let blocks = [(1, 0, 1, 0, 512), (0, 1, 2 * sectors, 0, 0)];
+        let (sparse, backed) = udif_decompress(&udif_image(&[7u8; 512], &blocks)).unwrap();
+        assert_eq!(sparse.len(), (2 * sectors as usize + 1) * 512);
+        assert_eq!(ranges_len(&backed), 512);
+    }
+
+    // python3 bz2.compress of 1024 bytes of 0x07.
+    const BZ2_TWO_SECTORS: &[u8] =
+        b"\x42\x5a\x68\x39\x31\x41\x59\x26\x53\x59\x21\x45\x90\x4f\x00\x00\x04\x40\x00\xc0\
+        \x80\x00\x08\x20\x00\x30\xcc\x05\x53\x6a\x62\x28\x3c\x5d\xc9\x14\xe1\x42\x40\x85\
+        \x16\x41\x3c";
+
+    // `hdiutil create -srcfolder <dir with README.TXT> -format UDBZ -layout NONE`:
+    // a 1 901 568 byte HFS+ volume in bzip2 blocks.
+    const UDBZ_IMAGE: &[u8] =
+        b"\x42\x5a\x68\x39\x31\x41\x59\x26\x53\x59\x9c\x1a\x2f\x9c\x00\x28\x08\xff\xff\xff\
+        \xff\xfe\x5b\xc0\x09\xd6\x00\xff\x42\x5c\x50\x6a\x37\xd5\x71\x63\x01\x20\x70\x04\
+        \x00\x10\x24\x40\x01\xc0\x28\x00\x82\x02\x4c\xc0\x01\xea\x9c\x21\xa1\x28\x88\x4d\
+        \x35\x34\xf5\x34\xd1\x90\x69\xa0\xc1\x0d\x01\x88\xd0\x00\x01\xb5\x00\x0c\x81\xbd\
+        \x50\x22\x49\x54\xfd\x29\xbd\x14\xda\x43\x40\x00\x7a\x9e\xa0\x0d\x00\x03\x40\x3d\
+        \x43\xd4\x06\x86\x80\x34\xd3\xd4\x38\x32\x0d\x1a\x00\xc9\xa6\x21\xa6\x83\x20\xc4\
+        \x30\x81\xa0\x34\x62\x62\x34\x00\x00\x25\x4d\x54\xfd\x32\x4f\x53\x53\x40\x7a\x81\
+        \xea\x0d\x00\x00\xc9\x88\xc8\x34\x0f\x6a\x40\x1a\x79\x40\x00\x2b\x2b\xd5\x20\x61\
+        \xd4\xd9\xf0\xce\x9d\x2c\xa5\x25\x02\x48\xc9\x45\x11\xe1\x86\x02\x28\xe0\x77\xc4\
+        \xc2\x0f\xd5\x47\xd6\x54\xf1\x82\xa9\xdf\x80\x1b\x9f\x85\x06\x18\x0a\xda\x64\x8a\
+        \x02\x06\xea\x02\xa2\x03\x32\x3a\x3d\xaf\xc2\x52\xc3\x8c\xc9\x84\x46\x2a\x2d\x57\
+        \xde\x6c\xda\xfa\xf8\xf0\x84\x51\x50\xaf\x9c\xfa\x18\x4a\x27\xca\x93\x2a\xb0\x55\
+        \x73\x18\xe8\x9a\x9d\x1a\x97\xe0\xdb\x30\x0e\x9c\x79\xb0\x11\x11\x5c\x31\x18\xc4\
+        \x4c\x70\x07\x87\x2f\x8c\x89\xbc\x80\x00\x8a\xf1\xa6\x6c\xb4\x3d\x68\xa5\xf1\xba\
+        \x37\xc5\x6d\x15\x35\xab\x16\x08\x81\x10\x8a\x80\xba\xa7\xcc\xd1\x80\x0d\x11\x48\
+        \x24\x64\xc2\x16\x01\xe1\x60\xe4\x34\x06\x10\xab\x08\xc1\x94\x69\x04\x85\xb3\x10\
+        \x54\xa3\xca\x03\xc3\x88\x94\x68\x53\x23\x1e\x14\x8b\x91\xa2\x74\x0e\x22\x2e\x1e\
+        \xd3\x07\x78\xc2\xf8\x27\x05\x9a\x26\x41\xda\x42\x17\x49\xc8\x49\x1c\x2c\x27\x27\
+        \x1c\x6a\x14\x4a\x23\x46\x90\x14\x89\x8a\x61\x00\xe1\x80\x50\x18\x0b\x22\xfd\x53\
+        \x8f\x55\xaa\x44\xf0\x45\x17\x31\x55\x41\x5e\xef\xf7\xe9\xf9\xd1\x71\xad\x54\xbb\
+        \x04\x5c\x91\xb4\xc4\x5d\x7d\x59\xb4\x24\x8c\x1d\x83\x6f\xe7\x64\xe3\xc4\xcb\x1f\
+        \x96\xbd\x17\xed\x50\x7d\xa3\x6c\x5a\xf6\x06\xa2\x6c\x93\x1f\xea\x88\xc2\x10\x88\
+        \x49\xac\x52\x78\xf0\x51\x74\x95\x4d\x44\xa2\x06\x72\x1a\x53\x40\x04\x38\x13\x3e\
+        \x0a\x14\xf8\x9b\x56\xb3\xbe\xd4\xb1\x66\x45\xa8\x21\x33\x14\x1a\xa4\x01\xd3\x80\
+        \xa5\xf0\x0c\x46\x1f\x6a\x08\x23\xce\xc0\x35\x1c\xa2\x96\x5d\x66\x4f\xe2\x04\x9b\
+        \x2c\x57\x0d\xc5\x5e\x53\xdf\xcf\xc5\xcd\x2a\x06\xae\xce\x95\x8c\xf8\x8c\x98\x9c\
+        \xb8\x4a\x44\x50\x57\xa7\xc4\x26\x88\x5f\xff\x17\x72\x45\x38\x50\x90\x9c\x1a\x2f\
+        \x9c\x42\x5a\x68\x31\x31\x41\x59\x26\x53\x59\x59\x8a\xa6\x94\x00\x00\x58\xfd\xef\
+        \xfc\x01\xcd\x09\x24\x09\x70\x21\x40\x40\x02\x10\x00\x40\x44\x01\x40\x00\x00\x80\
+        \x00\x01\x40\x08\x00\x80\x10\x00\x20\x00\x6a\x18\xa4\xf4\x44\x61\x03\x26\x23\x26\
+        \xd0\xf5\x41\x22\xa0\x46\x08\xd3\x01\x18\x04\xca\x7e\x8a\xbc\xb4\x47\xba\x68\x14\
+        \x0b\x0c\x04\x0a\xad\x0e\x96\x46\x2c\x1a\x4f\x73\x19\x23\x90\x46\x0a\x08\x1e\x37\
+        \x81\x2f\x0d\x20\xe5\xaa\x98\x8c\x1a\x0a\x1a\x45\x6c\x0c\x93\x41\xa8\xcf\x31\xc0\
+        \x0d\x97\x33\xbb\x89\xe3\xfb\x6a\xb9\x47\x7a\xcf\x2f\x33\x11\x34\xf2\x74\x1d\x9d\
+        \x0f\xe2\xee\x48\xa7\x0a\x12\x0b\x31\x54\xd2\x80\x42\x5a\x68\x31\x31\x41\x59\x26\
+        \x53\x59\xc4\x23\x4a\xe8\x00\x00\x29\x5f\x81\xc0\x10\x40\x00\x10\x00\x05\x20\x02\
+        \x00\x33\xe6\xd0\x10\x00\x02\x00\x08\x20\x00\x31\x40\x06\x23\x4d\x34\x68\x34\x9e\
+        \xa4\x32\x63\x49\x88\xde\xa8\x99\x98\x90\x00\x6a\xf3\x9a\xea\x9e\xbb\xbb\x89\xc3\
+        \x19\x34\x45\x5f\x77\xd9\x45\x2f\x80\x03\xf1\x77\x24\x53\x85\x09\x0c\x42\x34\xae\
+        \x80\x42\x5a\x68\x31\x31\x41\x59\x26\x53\x59\x88\x00\x38\xe3\x00\x00\x08\x40\x00\
+        \xc0\x04\x00\x08\x20\x00\x30\xcc\x05\x53\x6a\x41\x47\x0f\x17\x72\x45\x38\x50\x90\
+        \x88\x00\x38\xe3\x42\x5a\x68\x31\x31\x41\x59\x26\x53\x59\x59\x8a\xa6\x94\x00\x00\
+        \x58\xfd\xef\xfc\x01\xcd\x09\x24\x09\x70\x21\x40\x40\x02\x10\x00\x40\x44\x01\x40\
+        \x00\x00\x80\x00\x01\x40\x08\x00\x80\x10\x00\x20\x00\x6a\x18\xa4\xf4\x44\x61\x03\
+        \x26\x23\x26\xd0\xf5\x41\x22\xa0\x46\x08\xd3\x01\x18\x04\xca\x7e\x8a\xbc\xb4\x47\
+        \xba\x68\x14\x0b\x0c\x04\x0a\xad\x0e\x96\x46\x2c\x1a\x4f\x73\x19\x23\x90\x46\x0a\
+        \x08\x1e\x37\x81\x2f\x0d\x20\xe5\xaa\x98\x8c\x1a\x0a\x1a\x45\x6c\x0c\x93\x41\xa8\
+        \xcf\x31\xc0\x0d\x97\x33\xbb\x89\xe3\xfb\x6a\xb9\x47\x7a\xcf\x2f\x33\x11\x34\xf2\
+        \x74\x1d\x9d\x0f\xe2\xee\x48\xa7\x0a\x12\x0b\x31\x54\xd2\x80\x3c\x3f\x78\x6d\x6c\
+        \x20\x76\x65\x72\x73\x69\x6f\x6e\x3d\x22\x31\x2e\x30\x22\x20\x65\x6e\x63\x6f\x64\
+        \x69\x6e\x67\x3d\x22\x55\x54\x46\x2d\x38\x22\x3f\x3e\x0a\x3c\x21\x44\x4f\x43\x54\
+        \x59\x50\x45\x20\x70\x6c\x69\x73\x74\x20\x50\x55\x42\x4c\x49\x43\x20\x22\x2d\x2f\
+        \x2f\x41\x70\x70\x6c\x65\x2f\x2f\x44\x54\x44\x20\x50\x4c\x49\x53\x54\x20\x31\x2e\
+        \x30\x2f\x2f\x45\x4e\x22\x20\x22\x68\x74\x74\x70\x3a\x2f\x2f\x77\x77\x77\x2e\x61\
+        \x70\x70\x6c\x65\x2e\x63\x6f\x6d\x2f\x44\x54\x44\x73\x2f\x50\x72\x6f\x70\x65\x72\
+        \x74\x79\x4c\x69\x73\x74\x2d\x31\x2e\x30\x2e\x64\x74\x64\x22\x3e\x0a\x3c\x70\x6c\
+        \x69\x73\x74\x20\x76\x65\x72\x73\x69\x6f\x6e\x3d\x22\x31\x2e\x30\x22\x3e\x0a\x3c\
+        \x64\x69\x63\x74\x3e\x0a\x09\x3c\x6b\x65\x79\x3e\x72\x65\x73\x6f\x75\x72\x63\x65\
+        \x2d\x66\x6f\x72\x6b\x3c\x2f\x6b\x65\x79\x3e\x0a\x09\x3c\x64\x69\x63\x74\x3e\x0a\
+        \x09\x09\x3c\x6b\x65\x79\x3e\x62\x6c\x6b\x78\x3c\x2f\x6b\x65\x79\x3e\x0a\x09\x09\
+        \x3c\x61\x72\x72\x61\x79\x3e\x0a\x09\x09\x09\x3c\x64\x69\x63\x74\x3e\x0a\x09\x09\
+        \x09\x09\x3c\x6b\x65\x79\x3e\x41\x74\x74\x72\x69\x62\x75\x74\x65\x73\x3c\x2f\x6b\
+        \x65\x79\x3e\x0a\x09\x09\x09\x09\x3c\x73\x74\x72\x69\x6e\x67\x3e\x30\x78\x30\x30\
+        \x35\x30\x3c\x2f\x73\x74\x72\x69\x6e\x67\x3e\x0a\x09\x09\x09\x09\x3c\x6b\x65\x79\
+        \x3e\x43\x46\x4e\x61\x6d\x65\x3c\x2f\x6b\x65\x79\x3e\x0a\x09\x09\x09\x09\x3c\x73\
+        \x74\x72\x69\x6e\x67\x3e\x68\x65\x6c\x20\x73\x6b\x69\x76\x61\x20\x28\x41\x70\x70\
+        \x6c\x65\x5f\x48\x46\x53\x20\x3a\x20\x30\x29\x3c\x2f\x73\x74\x72\x69\x6e\x67\x3e\
+        \x0a\x09\x09\x09\x09\x3c\x6b\x65\x79\x3e\x44\x61\x74\x61\x3c\x2f\x6b\x65\x79\x3e\
+        \x0a\x09\x09\x09\x09\x3c\x64\x61\x74\x61\x3e\x0a\x09\x09\x09\x09\x62\x57\x6c\x7a\
+        \x61\x41\x41\x41\x41\x41\x45\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\
+        \x41\x41\x41\x41\x41\x41\x36\x43\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\
+        \x0a\x09\x09\x09\x09\x41\x41\x65\x61\x2f\x2f\x2f\x2f\x2f\x67\x41\x41\x41\x41\x41\
+        \x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\
+        \x41\x41\x41\x41\x41\x41\x41\x41\x41\x0a\x09\x09\x09\x09\x41\x41\x49\x41\x41\x41\
+        \x41\x67\x69\x67\x74\x31\x6a\x51\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\
+        \x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x0a\x09\
+        \x09\x09\x09\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\
+        \x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\
+        \x41\x41\x41\x41\x41\x41\x41\x0a\x09\x09\x09\x09\x41\x41\x41\x41\x41\x41\x41\x41\
+        \x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\
+        \x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x0a\x09\x09\x09\
+        \x09\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\
+        \x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\
+        \x41\x41\x41\x41\x41\x0a\x09\x09\x09\x09\x41\x41\x41\x41\x41\x41\x41\x4c\x41\x41\
+        \x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\
+        \x41\x41\x41\x41\x41\x41\x41\x41\x41\x43\x41\x41\x41\x41\x0a\x09\x09\x09\x09\x41\
+        \x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x49\x41\x41\x41\
+        \x41\x59\x41\x41\x41\x41\x4c\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x49\x41\x41\
+        \x41\x41\x41\x0a\x09\x09\x09\x09\x41\x41\x41\x41\x41\x51\x41\x41\x41\x41\x41\x41\
+        \x41\x41\x49\x64\x41\x41\x41\x41\x41\x41\x41\x41\x41\x4a\x63\x41\x41\x41\x41\x41\
+        \x41\x41\x41\x41\x42\x51\x41\x41\x41\x41\x41\x41\x0a\x09\x09\x09\x09\x41\x41\x41\
+        \x44\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x55\x41\x41\x41\x41\x41\x41\x41\x41\
+        \x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x67\x41\x41\x41\x42\x67\x41\
+        \x41\x0a\x09\x09\x09\x09\x41\x42\x38\x41\x41\x41\x41\x41\x41\x41\x41\x41\x43\x41\
+        \x41\x41\x41\x41\x41\x41\x41\x41\x65\x59\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\
+        \x41\x41\x41\x41\x41\x41\x41\x41\x41\x43\x0a\x09\x09\x09\x09\x48\x51\x41\x41\x41\
+        \x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x42\x36\x41\x41\x41\
+        \x41\x41\x41\x41\x41\x41\x41\x59\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x0a\
+        \x09\x09\x09\x09\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\
+        \x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x67\x41\x41\x41\x41\x41\
+        \x41\x41\x41\x41\x42\x6e\x41\x41\x0a\x09\x09\x09\x09\x41\x41\x41\x41\x41\x41\x41\
+        \x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x67\x41\x41\x41\x42\x67\x41\
+        \x41\x41\x41\x55\x41\x41\x41\x41\x41\x41\x41\x41\x4f\x63\x41\x41\x41\x0a\x09\x09\
+        \x09\x09\x41\x41\x41\x41\x41\x41\x41\x49\x41\x41\x41\x41\x41\x41\x41\x41\x41\x72\
+        \x51\x41\x41\x41\x41\x41\x41\x41\x41\x41\x57\x51\x41\x41\x41\x41\x49\x41\x41\x41\
+        \x41\x46\x41\x41\x41\x41\x0a\x09\x09\x09\x09\x41\x41\x41\x41\x44\x6e\x67\x41\x41\
+        \x41\x41\x41\x41\x41\x41\x41\x43\x41\x41\x41\x41\x41\x41\x41\x41\x41\x4d\x4e\x41\
+        \x41\x41\x41\x41\x41\x41\x41\x41\x41\x43\x41\x41\x41\x41\x47\x0a\x09\x09\x09\x09\
+        \x41\x41\x41\x41\x42\x51\x41\x41\x41\x41\x41\x41\x41\x41\x36\x41\x41\x41\x41\x41\
+        \x41\x41\x41\x41\x41\x41\x45\x41\x41\x41\x41\x41\x41\x41\x41\x44\x4f\x41\x41\x41\
+        \x41\x41\x41\x41\x0a\x09\x09\x09\x09\x41\x41\x43\x58\x41\x41\x41\x41\x41\x67\x41\
+        \x41\x41\x41\x49\x41\x41\x41\x41\x41\x41\x41\x41\x4f\x67\x51\x41\x41\x41\x41\x41\
+        \x41\x41\x41\x41\x42\x41\x41\x41\x41\x41\x41\x41\x41\x0a\x09\x09\x09\x09\x41\x41\
+        \x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x50\x2f\x2f\x2f\x2f\x38\x41\x41\x41\
+        \x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x44\x6f\x49\x41\x41\x41\x41\x41\x41\x41\
+        \x41\x41\x0a\x09\x09\x09\x09\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\
+        \x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x3d\x0a\x09\x09\x09\x09\x3c\x2f\x64\x61\
+        \x74\x61\x3e\x0a\x09\x09\x09\x09\x3c\x6b\x65\x79\x3e\x49\x44\x3c\x2f\x6b\x65\x79\
+        \x3e\x0a\x09\x09\x09\x09\x3c\x73\x74\x72\x69\x6e\x67\x3e\x30\x3c\x2f\x73\x74\x72\
+        \x69\x6e\x67\x3e\x0a\x09\x09\x09\x09\x3c\x6b\x65\x79\x3e\x4e\x61\x6d\x65\x3c\x2f\
+        \x6b\x65\x79\x3e\x0a\x09\x09\x09\x09\x3c\x73\x74\x72\x69\x6e\x67\x3e\x68\x65\x6c\
+        \x20\x73\x6b\x69\x76\x61\x20\x28\x41\x70\x70\x6c\x65\x5f\x48\x46\x53\x20\x3a\x20\
+        \x30\x29\x3c\x2f\x73\x74\x72\x69\x6e\x67\x3e\x0a\x09\x09\x09\x3c\x2f\x64\x69\x63\
+        \x74\x3e\x0a\x09\x09\x3c\x2f\x61\x72\x72\x61\x79\x3e\x0a\x09\x09\x3c\x6b\x65\x79\
+        \x3e\x70\x6c\x73\x74\x3c\x2f\x6b\x65\x79\x3e\x0a\x09\x09\x3c\x61\x72\x72\x61\x79\
+        \x3e\x0a\x09\x09\x09\x3c\x64\x69\x63\x74\x3e\x0a\x09\x09\x09\x09\x3c\x6b\x65\x79\
+        \x3e\x41\x74\x74\x72\x69\x62\x75\x74\x65\x73\x3c\x2f\x6b\x65\x79\x3e\x0a\x09\x09\
+        \x09\x09\x3c\x73\x74\x72\x69\x6e\x67\x3e\x30\x78\x30\x30\x35\x30\x3c\x2f\x73\x74\
+        \x72\x69\x6e\x67\x3e\x0a\x09\x09\x09\x09\x3c\x6b\x65\x79\x3e\x44\x61\x74\x61\x3c\
+        \x2f\x6b\x65\x79\x3e\x0a\x09\x09\x09\x09\x3c\x64\x61\x74\x61\x3e\x0a\x09\x09\x09\
+        \x09\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\
+        \x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\
+        \x41\x41\x41\x41\x41\x0a\x09\x09\x09\x09\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\
+        \x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\
+        \x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x0a\x09\x09\x09\x09\x41\
+        \x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\
+        \x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\
+        \x41\x41\x41\x0a\x09\x09\x09\x09\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\
+        \x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\
+        \x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x0a\x09\x09\x09\x09\x41\x41\x41\
+        \x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\
+        \x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\
+        \x41\x0a\x09\x09\x09\x09\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\
+        \x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\
+        \x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x0a\x09\x09\x09\x09\x41\x41\x41\x41\x41\
+        \x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\
+        \x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x0a\
+        \x09\x09\x09\x09\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\
+        \x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\
+        \x41\x41\x41\x41\x41\x41\x41\x41\x0a\x09\x09\x09\x09\x41\x41\x41\x41\x41\x41\x41\
+        \x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\
+        \x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x0a\x09\x09\
+        \x09\x09\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\
+        \x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\
+        \x41\x41\x41\x41\x41\x41\x0a\x09\x09\x09\x09\x41\x41\x41\x41\x41\x41\x41\x41\x41\
+        \x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\
+        \x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x0a\x09\x09\x09\x09\
+        \x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\
+        \x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\
+        \x41\x41\x41\x41\x0a\x09\x09\x09\x09\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\
+        \x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\
+        \x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x0a\x09\x09\x09\x09\x41\x41\
+        \x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\
+        \x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\
+        \x41\x41\x0a\x09\x09\x09\x09\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\
+        \x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\
+        \x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x0a\x09\x09\x09\x09\x41\x41\x41\x41\
+        \x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\
+        \x41\x41\x41\x41\x41\x41\x45\x41\x41\x51\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\
+        \x0a\x09\x09\x09\x09\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\
+        \x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\
+        \x41\x41\x41\x41\x41\x41\x41\x41\x41\x0a\x09\x09\x09\x09\x41\x41\x41\x41\x41\x41\
+        \x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\
+        \x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x0a\x09\
+        \x09\x09\x09\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\
+        \x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\
+        \x41\x41\x41\x41\x41\x41\x41\x0a\x09\x09\x09\x09\x41\x41\x41\x41\x41\x41\x41\x41\
+        \x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\
+        \x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x0a\x09\x09\x09\
+        \x09\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\
+        \x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\
+        \x41\x41\x41\x41\x41\x0a\x09\x09\x09\x09\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\
+        \x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\
+        \x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x0a\x09\x09\x09\x09\x41\
+        \x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\
+        \x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\
+        \x41\x41\x41\x0a\x09\x09\x09\x09\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\
+        \x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\
+        \x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x0a\x09\x09\x09\x09\x41\x41\x41\
+        \x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\
+        \x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\
+        \x41\x0a\x09\x09\x09\x09\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\
+        \x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\
+        \x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x0a\x09\x09\x09\x09\x41\x41\x41\x41\x41\
+        \x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\
+        \x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x0a\
+        \x09\x09\x09\x09\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\
+        \x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\
+        \x41\x41\x41\x41\x41\x41\x41\x41\x0a\x09\x09\x09\x09\x41\x41\x41\x41\x41\x41\x41\
+        \x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\
+        \x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x0a\x09\x09\
+        \x09\x09\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\
+        \x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\
+        \x41\x41\x41\x41\x41\x41\x0a\x09\x09\x09\x09\x41\x41\x41\x41\x41\x41\x41\x41\x41\
+        \x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\
+        \x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x0a\x09\x09\x09\x09\
+        \x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x41\x0a\x09\x09\x09\x09\x3c\x2f\x64\
+        \x61\x74\x61\x3e\x0a\x09\x09\x09\x09\x3c\x6b\x65\x79\x3e\x49\x44\x3c\x2f\x6b\x65\
+        \x79\x3e\x0a\x09\x09\x09\x09\x3c\x73\x74\x72\x69\x6e\x67\x3e\x30\x3c\x2f\x73\x74\
+        \x72\x69\x6e\x67\x3e\x0a\x09\x09\x09\x09\x3c\x6b\x65\x79\x3e\x4e\x61\x6d\x65\x3c\
+        \x2f\x6b\x65\x79\x3e\x0a\x09\x09\x09\x09\x3c\x73\x74\x72\x69\x6e\x67\x3e\x3c\x2f\
+        \x73\x74\x72\x69\x6e\x67\x3e\x0a\x09\x09\x09\x3c\x2f\x64\x69\x63\x74\x3e\x0a\x09\
+        \x09\x3c\x2f\x61\x72\x72\x61\x79\x3e\x0a\x09\x3c\x2f\x64\x69\x63\x74\x3e\x0a\x3c\
+        \x2f\x64\x69\x63\x74\x3e\x0a\x3c\x2f\x70\x6c\x69\x73\x74\x3e\x0a\x6b\x6f\x6c\x79\
+        \x00\x00\x00\x04\x00\x00\x02\x00\x00\x00\x00\x01\x00\x00\x00\x00\x00\x00\x00\x00\
+        \x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x03\xcf\x00\x00\x00\x00\
+        \x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\
+        \x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\
+        \x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\
+        \x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\
+        \x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\
+        \x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\
+        \x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\
+        \x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\
+        \x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x03\xcf\
+        \x00\x00\x00\x00\x00\x00\x0c\xe5\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\
+        \x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\
+        \x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\
+        \x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\
+        \x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\
+        \x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\
+        \x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x02\x00\x00\x00\x20\x6e\xb4\x14\x8c\
+        \x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\
+        \x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\
+        \x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\
+        \x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\
+        \x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\
+        \x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\
+        \x00\x00\x00\x00\x00\x00\x00\x02\x00\x00\x00\x00\x00\x00\x0e\x82\x00\x00\x00\x00\
+        \x00\x00\x00\x00\x00\x00\x00\x00";
+
+    const UDIF_BZ2: u32 = 0x8000_0006;
+
+    #[test]
+    fn udif_bz2_block_is_decoded() {
+        let len = BZ2_TWO_SECTORS.len() as u64;
+        // A raw sector, then the bzip2 block, then zero fill.
+        let mut payload = BZ2_TWO_SECTORS.to_vec();
+        payload.extend_from_slice(&[9u8; 512]);
+        let blocks = [
+            (1, 0, 1, len, 512),
+            (UDIF_BZ2, 1, 2, 0, len),
+            (0, 3, 1, 0, 0),
+        ];
+        let (image, backed) = udif_decompress(&udif_image(&payload, &blocks)).unwrap();
+        let expected = [&[9u8; 512][..], &[7u8; 1024], &[0u8; 512]].concat();
+        assert_eq!(image, expected);
+        assert_eq!((backed.len(), backed[0].clone()), (1, 0..1536));
+    }
+
+    #[test]
+    fn udif_bz2_block_must_decode_to_its_declared_size() {
+        let len = BZ2_TWO_SECTORS.len() as u64;
+        let decode = |payload: &[u8], sectors, offset, length| {
+            udif_decompress(&udif_image(
+                payload,
+                &[(UDIF_BZ2, 0, sectors, offset, length)],
+            ))
+        };
+        assert!(decode(BZ2_TWO_SECTORS, 2, 0, len).is_ok());
+        // Stream longer or shorter than the block.
+        assert!(decode(BZ2_TWO_SECTORS, 1, 0, len).is_err());
+        assert!(decode(BZ2_TWO_SECTORS, 3, 0, len).is_err());
+        // Truncated, empty and out-of-range backing data.
+        assert!(decode(BZ2_TWO_SECTORS, 2, 0, len - 5).is_err());
+        assert!(decode(BZ2_TWO_SECTORS, 2, 0, 0).is_err());
+        assert!(decode(BZ2_TWO_SECTORS, 2, 0, len + 100_000).is_err());
+        assert!(decode(BZ2_TWO_SECTORS, 2, u64::MAX - 1, 16).is_err());
+
+        for index in [3, 12, BZ2_TWO_SECTORS.len() / 2] {
+            let mut damaged = BZ2_TWO_SECTORS.to_vec();
+            damaged[index] ^= 0x20;
+            assert!(decode(&damaged, 2, 0, len).is_err(), "byte {index}");
+        }
+    }
+
+    #[test]
+    fn udif_bz2_chunks_are_bounded_by_backing_size() {
+        // Two 20 MiB blocks backed by the same few bytes: the budget stops
+        // them before anything is decoded.
+        let sectors = 40_000;
+        let len = BZ2_TWO_SECTORS.len() as u64;
+        let blocks = [
+            (UDIF_BZ2, 0, sectors, 0, len),
+            (UDIF_BZ2, sectors, sectors, 0, len),
+        ];
+        let error = udif_decompress(&udif_image(BZ2_TWO_SECTORS, &blocks)).unwrap_err();
+        assert!(!error.to_string().contains("BZ2"), "{error}");
+    }
+
+    #[test]
+    fn udif_bz2_image_from_hdiutil_is_decoded() {
+        let (image, backed) = udif_decompress(UDBZ_IMAGE).unwrap();
+        // Values taken from `hdiutil convert -format UDTO` of the same image.
+        assert_eq!(image.len(), 1_901_568);
+        assert_eq!(&image[1024..1026], b"H+");
+        assert_eq!(image.iter().filter(|&&byte| byte != 0).count(), 595);
+        let weighted = image.iter().zip(1u64..).fold(0u64, |sum, (&byte, at)| {
+            sum.wrapping_add(at * u64::from(byte))
+        });
+        assert_eq!(weighted, 35_161_867_899);
+        let text = b"hello from a bzip2 UDIF image\n";
+        assert_eq!(&image[1_892_352..1_892_352 + text.len()], text);
+        // Sectors 2, 8..1952, 3696..3704 and 3712 are bzip2 blocks.
+        assert_eq!(ranges_len(&backed), (1 + 1944 + 8 + 1) * 512);
+    }
+
+    // (logical block, type, backing offset, backing size)
+    fn bcem(
+        num_blocks: u32,
+        max_chunk_blocks: u32,
+        backing_offset: u32,
+        chunks: &[(u32, u8, u32, u32)],
+    ) -> Vec<u8> {
+        let mut data = vec![0u8; 128];
+        data[0..2].copy_from_slice(&10u16.to_be_bytes());
+        data[68..72].copy_from_slice(&num_blocks.to_be_bytes());
+        data[72..76].copy_from_slice(&max_chunk_blocks.to_be_bytes());
+        data[76..80].copy_from_slice(&backing_offset.to_be_bytes());
+        data[124..128].copy_from_slice(&(chunks.len() as u32).to_be_bytes());
+        for (logical, kind, offset, size) in chunks {
+            data.extend_from_slice(&logical.to_be_bytes()[1..]);
+            data.push(*kind);
+            data.extend_from_slice(&offset.to_be_bytes());
+            data.extend_from_slice(&size.to_be_bytes());
+        }
+        data
+    }
+
+    // ADC literal run of four bytes.
+    const ADC_LITERAL: [u8; 5] = [0x83, 1, 2, 3, 4];
+
+    fn ndif(table: &[u8]) -> Result<(Vec<u8>, Vec<Range<usize>>)> {
+        ndif_decompress(&ADC_LITERAL, table, ADC_LITERAL.len())
+    }
+
+    #[test]
+    fn ndif_chunk_larger_than_declared_maximum_is_skipped() {
+        for kind in [131, 128] {
+            let image = ndif(&bcem(8, 0, 0, &[(0, kind, 0, 5)])).unwrap().0;
+            assert_eq!(image, vec![0u8; 8 * 512], "{kind}");
+        }
+        // Sanity: the same chunk decodes when it fits.
+        let image = ndif(&bcem(8, 8, 0, &[(0, 131, 0, 5)])).unwrap().0;
+        assert_eq!(image[..5], [1, 2, 3, 4, 0]);
+    }
+
+    #[test]
+    fn ndif_backing_offset_overflow_is_skipped() {
+        for kind in [2, 131, 128] {
+            let table = bcem(8, 8, u32::MAX, &[(0, kind, 2, 5)]);
+            let image = ndif(&table).unwrap().0;
+            assert_eq!(image, vec![0u8; 8 * 512], "{kind}");
+        }
+    }
+
+    #[test]
+    fn ndif_out_of_order_chunks_are_skipped() {
+        let table = bcem(8, 8, 0, &[(4, 2, 0, 5), (0, 2, 0, 5), (8, 2, 0, 5)]);
+        let image = ndif(&table).unwrap().0;
+        assert_eq!(image[..5], ADC_LITERAL);
+        assert!(image[5..].iter().all(|&b| b == 0));
+    }
+
+    #[test]
+    fn ndif_stored_chunks_are_bounded_by_backing_size() {
+        // Two ADC chunks of 20 MiB each backed by the same 5 bytes.
+        let blocks = 40_000;
+        let chunks = [(0, 131, 0, 5), (blocks, 131, 0, 5)];
+        assert!(ndif(&bcem(2 * blocks, blocks, 0, &chunks)).is_err());
+
+        // Zero-fill chunks are exempt.
+        let chunks = [(0, 131, 0, 5), (1, 0, 0, 0)];
+        let (sparse, backed) = ndif(&bcem(2 * blocks, 1, 0, &chunks)).unwrap();
+        assert_eq!(sparse.len(), 2 * blocks as usize * 512);
+        assert_eq!(ranges_len(&backed), 512);
+    }
+
+    #[test]
+    fn aliased_overflow_extents_are_charged_to_volume_budget() {
+        // 22 overflow records x 3 extents over the same 1000 blocks: a
+        // 0.5 MiB volume would otherwise yield a 34 MiB fork.
+        let records: Vec<Vec<u8>> = (0..22u16)
+            .map(|i| extent_overflow_record(17, 1000 + 3000 * i, &[(0, 1000); 3]))
+            .collect();
+        let mut file = catalog_file_record("F1", 17, 67 * 1000 * 512, 0);
+        let extents = file.len() - 102 + 74;
+        put_extents(&mut file[extents..], &[(0, 1000)]);
+        let (image, _) = crafted_volume(&[leaf_node(0, &records)], &[file], 1000);
+        assert!(parse_fails(&image));
+    }
+
+    #[test]
+    fn aliased_catalog_records_yield_one_file() {
+        let mut data = btree_with_header(512, 1, 2);
+        let mut leaf = leaf_node(0, &[catalog_file_record("F1", 17, 9, 4)]);
+        // 150 record offsets all pointing at the one record.
+        leaf[10..12].copy_from_slice(&150u16.to_be_bytes());
+        for i in 0..150 {
+            let pos = 512 - 2 * (i + 1);
+            leaf[pos..pos + 2].copy_from_slice(&14u16.to_be_bytes());
+        }
+        data[512..].copy_from_slice(&leaf);
+        let (files, _) = HfsVolume::parse_catalog(&data).unwrap();
+        assert_eq!(files.len(), 1);
+    }
+
+    #[test]
+    fn btree_leaf_cycle_does_not_replay_nodes() {
+        // Leaves 1 -> 2 -> 1 in a 64-node tree.
+        let mut catalog = btree_with_header(512, 1, 64);
+        for (node, link) in [(1usize, 2u32), (2, 1)] {
+            let record = catalog_file_record(&format!("F{node}"), 16 + node as u32, 9, 4);
+            catalog[node * 512..(node + 1) * 512].copy_from_slice(&leaf_node(link, &[record]));
+        }
+        let (files, _) = HfsVolume::parse_catalog(&catalog).unwrap();
+        assert_eq!(files.len(), 2);
+
+        let mut overflow = btree_with_header(512, 1, 64);
+        let record = extent_overflow_record(17, 1, &[(0, 1)]);
+        overflow[512..1024].copy_from_slice(&leaf_node(1, &[record]));
+        assert_eq!(
+            HfsVolume::parse_extents_overflow(&overflow).unwrap().len(),
+            1
+        );
+    }
+
+    #[test]
+    fn long_overflow_chains_resolve_without_rescanning() {
+        // 4 files, each with 65535 single-block overflow records. The extents
+        // lie past the end of the volume, so resolving them is the only cost.
+        let records: Vec<Vec<u8>> = (0..4u32)
+            .flat_map(|file| {
+                (1..=u16::MAX)
+                    .map(move |start| extent_overflow_record(17 + file, start, &[(60_000, 1)]))
+            })
+            .collect();
+        let groups: Vec<&[Vec<u8>]> = records.chunks(22).collect();
+        let leaves: Vec<Vec<u8>> = groups
+            .iter()
+            .enumerate()
+            .map(|(i, group)| {
+                let f_link = if i + 1 < groups.len() {
+                    i as u32 + 2
+                } else {
+                    0
+                };
+                leaf_node(f_link, group)
+            })
+            .collect();
+        let catalog: Vec<Vec<u8>> = (0..4u32)
+            .map(|file| catalog_file_record(&format!("F{file}"), 17 + file, 65_536 * 512, 60_000))
+            .collect();
+        let (image, _) = crafted_volume(&leaves, &catalog, 0);
+
+        let container = HfsContainer::from_bytes(&image, "vol".to_string(), 8).unwrap();
+        assert!(container.entries.is_empty());
+    }
+
+    // `volume` stored as one raw chunk, followed by `zero_sectors` of zero-fill.
+    fn sparse_udif(volume: &[u8], zero_sectors: u64) -> Vec<u8> {
+        let sectors = (volume.len() / 512) as u64;
+        let blocks = [
+            (1, 0, sectors, 0, volume.len() as u64),
+            (0, sectors, zero_sectors, 0, 0),
+        ];
+        udif_image(volume, &blocks)
+    }
+
+    #[test]
+    fn sparse_udif_zero_fill_does_not_fund_fork_copies() {
+        // 4 forks x 3 extents over the same 2 MiB of stored data: 24 MiB of
+        // copies. The 64 MiB of zero-fill after it costs no input and must
+        // not raise the budget for them above the 16 MiB floor.
+        let blocks = 4096u16;
+        let (_, first) = crafted_volume(&[], &[], 0);
+        let catalog: Vec<Vec<u8>> = (0..4u32)
+            .map(|i| {
+                let size = 3 * u32::from(blocks) * 512;
+                let mut file = catalog_file_record(&format!("F{i}"), 17 + i, size, 0);
+                let extents = file.len() - 102 + 74;
+                put_extents(&mut file[extents..], &[(first, blocks); 3]);
+                file
+            })
+            .collect();
+        let (volume, _) = crafted_volume(&[], &catalog, usize::from(blocks));
+        assert!(parse_fails(&sparse_udif(&volume, 128 * 1024)));
+    }
+
+    #[test]
+    fn sparse_udif_file_in_zero_fill_is_read() {
+        // A 24 MiB file of zeros lies entirely in the zero-fill chunk, next
+        // to a stored file: more than the stored bytes alone would allow.
+        let zero_len = 24 * 1024 * 1024;
+        let (_, first) = crafted_volume(&[], &[], 0);
+        let mut zeros = catalog_file_record("Z", 18, zero_len as u32, 0);
+        let extents = zeros.len() - 102 + 74;
+        put_extents(&mut zeros[extents..], &[(8192, (zero_len / 512) as u16)]);
+        let stored = catalog_file_record("F1", 17, 9, first);
+        let (mut volume, _) = crafted_volume(&[], &[stored, zeros], 1);
+        let offset = TEST_ALLOC_START + usize::from(first) * 512;
+        volume[offset..offset + 9].copy_from_slice(b"content 1");
+
+        let image = sparse_udif(&volume, 128 * 1024);
+        let container = HfsContainer::from_bytes(&image, "vol".to_string(), 8).unwrap();
+        let [stored, zeros] = &container.entries[..] else {
+            panic!("{} entries", container.entries.len());
+        };
+        assert_eq!(stored.data, b"content 1");
+        assert_eq!(zeros.data.len(), zero_len);
+        assert!(zeros.data.iter().all(|&b| b == 0));
+    }
+
+    // Driver map and a one-entry partition map (512-byte blocks) placing an
+    // HFS partition at `start_block`.
+    fn put_apm(image: &mut [u8], start_block: u32) {
+        image[0..2].copy_from_slice(&APM_DRIVER_MAP_SIGNATURE.to_be_bytes());
+        image[2..4].copy_from_slice(&512u16.to_be_bytes());
+        let entry = &mut image[512..1024];
+        entry[0..2].copy_from_slice(&APM_PARTITION_SIGNATURE.to_be_bytes());
+        entry[4..8].copy_from_slice(&1u32.to_be_bytes());
+        entry[8..12].copy_from_slice(&start_block.to_be_bytes());
+        entry[48..58].copy_from_slice(b"Apple_HFS\0");
+    }
+
+    #[test]
+    fn diskcopy_and_apm_headers_are_skipped() {
+        let volume = fragmented_catalog_volume(2, 3);
+
+        let mut apm = vec![0u8; 4 * 512];
+        put_apm(&mut apm, 4);
+        apm.extend_from_slice(&volume);
+        assert_eq!(container_files(&apm), expected_files(2));
+
+        for inner in [&volume, &apm] {
+            let mut diskcopy = vec![0u8; 84];
+            diskcopy[0x52..0x54].copy_from_slice(&DISKCOPY_MAGIC.to_be_bytes());
+            diskcopy.extend_from_slice(inner);
+            assert_eq!(container_files(&diskcopy), expected_files(2));
+        }
+    }
+
+    #[test]
+    fn udif_plist_scan_stays_on_char_boundaries() {
+        for tail in ["é", "<data>é", "<data>AAAA</data>€uro"] {
+            let xml = format!("<key>blkx</key>{tail}");
+            assert!(parse_blkx_from_xml(&xml).unwrap().is_empty(), "{tail}");
+        }
+    }
+
+    #[test]
+    fn udif_plist_scan_is_linear() {
+        // Unterminated elements: nothing to decode, 600 KB to scan once.
+        let xml = format!("<key>blkx</key>{}", "<data>".repeat(100_000));
+        assert!(parse_blkx_from_xml(&xml).unwrap().is_empty());
+        let xml = format!("<key>blkx</key>{}", "x".repeat(600_000));
+        assert!(parse_blkx_from_xml(&xml).unwrap().is_empty());
+    }
+
+    #[test]
+    fn udif_plist_collects_every_data_element() {
+        let table = encode_base64(&mish(0, &[(1, 0, 1, 0, 512)]));
+        let xml = format!(
+            "<key>blkx</key><array><data>\n{table}\n</data><data>!</data>\
+             <data>{table}</data></array><key>plst</key><data>{table}</data>é<data>"
+        );
+        assert_eq!(parse_blkx_from_xml(&xml).unwrap().len(), 3);
+        assert!(parse_blkx_from_xml(&xml[15..]).unwrap().is_empty());
+    }
+
+    fn raw_cd(cooked: &[u8], mode: u8) -> Vec<u8> {
+        let user_data = if mode == 2 { 24 } else { 16 };
+        let mut raw = Vec::new();
+        for sector in cooked.chunks(2048) {
+            let start = raw.len();
+            raw.resize(start + 2352, 0);
+            raw[start + 1..start + 11].fill(0xFF);
+            raw[start + 15] = mode;
+            raw[start + user_data..][..sector.len()].copy_from_slice(sector);
+        }
+        raw
+    }
+
+    #[test]
+    fn raw_cd_detection_reads_only_the_sectors_it_needs() {
+        // HFS partition at sector 500 of 600, far past the partition map.
+        let mut cooked = vec![0u8; 600 * 2048];
+        put_apm(&mut cooked, 500 * 4);
+        cooked[500 * 2048 + MDB_OFFSET..][..2].copy_from_slice(&HFS_SIGNATURE.to_be_bytes());
+        let raw = raw_cd(&cooked, 1);
+        assert!(is_hfs_image(&raw));
+
+        let cd = RawCd::detect(&raw).unwrap();
+        let sectors_read = core::cell::Cell::new(0);
+        let found = raw_cd_has_volume(cd.sector_count(), |sector| {
+            sectors_read.set(sectors_read.get() + 1);
+            cd.user_data(sector)
+        });
+        assert!(found);
+        assert!(sectors_read.get() <= CD_PROBE_SECTORS + 2);
+
+        cooked[500 * 2048 + MDB_OFFSET] = 0;
+        assert!(!is_hfs_image(&raw_cd(&cooked, 1)));
+    }
+
+    #[test]
+    fn raw_cd_mode2_user_data_follows_subheader() {
+        let volume = fragmented_catalog_volume(2, 3);
+        for mode in [1, 2] {
+            let raw = raw_cd(&volume, mode);
+            assert!(is_hfs_image(&raw), "mode {mode}");
+            assert_eq!(container_files(&raw), expected_files(2), "mode {mode}");
+        }
     }
 }

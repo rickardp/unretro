@@ -57,9 +57,10 @@ impl LhaContainer {
                 // Get compression method from header
                 let metadata = lha_compression_metadata(header);
 
-                let max_size = crate::MAX_DECOMPRESSED_SIZE as usize;
-                let original_size = header.original_size as usize;
-                let mut file_data = Vec::with_capacity(original_size.min(max_size));
+                let max_size = crate::limits::max_decompressed_size();
+                // The header size is only a hint; real growth follows decoded data.
+                let mut file_data =
+                    Vec::with_capacity(crate::limits::prealloc_hint(header.original_size));
                 let mut read_buf = [0_u8; 65536];
                 loop {
                     // delharc 0.6 only re-exports its own `Read` trait when its
@@ -196,5 +197,80 @@ impl Container for LhaContainer {
         self.path_index
             .get(&lower)
             .map(|&idx| self.entries[idx].data.as_slice())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::limits::PREALLOC_LIMIT;
+
+    fn crc16_arc(data: &[u8]) -> u16 {
+        let mut crc = 0u16;
+        for &byte in data {
+            crc ^= u16::from(byte);
+            for _ in 0..8 {
+                crc = if crc & 1 != 0 {
+                    (crc >> 1) ^ 0xA001
+                } else {
+                    crc >> 1
+                };
+            }
+        }
+        crc
+    }
+
+    // Level-0 header for one stored (-lh0-) entry, then the end-of-archive byte.
+    fn stored_archive(name: &[u8], data: &[u8], declared_size: u32) -> Vec<u8> {
+        let mut header = Vec::new();
+        header.extend_from_slice(b"-lh0-");
+        header.extend_from_slice(&(data.len() as u32).to_le_bytes());
+        header.extend_from_slice(&declared_size.to_le_bytes());
+        header.extend_from_slice(&[0; 4]); // timestamp
+        header.push(0x20); // attribute
+        header.push(0); // header level
+        header.push(name.len() as u8);
+        header.extend_from_slice(name);
+        header.extend_from_slice(&crc16_arc(data).to_le_bytes());
+
+        let checksum = header.iter().fold(0u8, |sum, &b| sum.wrapping_add(b));
+        let mut archive = vec![header.len() as u8, checksum];
+        archive.extend_from_slice(&header);
+        archive.extend_from_slice(data);
+        archive.push(0);
+        archive
+    }
+
+    #[test]
+    fn extracts_stored_entry() {
+        let data = b"hello lha";
+        let archive = stored_archive(b"hello.txt", data, data.len() as u32);
+        let container = LhaContainer::from_bytes(&archive, "a.lha".into(), 0).unwrap();
+        assert_eq!(container.entries.len(), 1);
+        assert_eq!(container.entries[0].path, "hello.txt");
+        assert_eq!(container.entries[0].data, data);
+    }
+
+    #[test]
+    fn extracts_entry_larger_than_prealloc_limit() {
+        let data: Vec<u8> = (0..PREALLOC_LIMIT + 4096).map(|i| i as u8).collect();
+        let archive = stored_archive(b"big.bin", &data, data.len() as u32);
+        let container = LhaContainer::from_bytes(&archive, "a.lha".into(), 0).unwrap();
+        assert_eq!(container.entries[0].data, data);
+    }
+
+    #[test]
+    fn huge_declared_size_does_not_drive_allocation() {
+        // 4 GiB claimed, 4 bytes present.
+        let archive = stored_archive(b"bomb.bin", b"tiny", u32::MAX);
+        match LhaContainer::from_bytes(&archive, "a.lha".into(), 0) {
+            Ok(container) => {
+                for entry in &container.entries {
+                    assert!(entry.data.len() <= 4);
+                    assert!(entry.data.capacity() <= PREALLOC_LIMIT);
+                }
+            }
+            Err(err) => assert!(matches!(err, Error::DecompressionError { .. }), "{err}"),
+        }
     }
 }

@@ -262,7 +262,7 @@ mod tests {
 
     #[test]
     fn test_shared_entry_data_new() {
-        let data = vec![1u8, 2, 3, 4, 5];
+        let data = [1u8, 2, 3, 4, 5];
         let shared = SharedEntryData::new(data.as_ptr(), data.len());
 
         assert_eq!(shared.len(), 5);
@@ -272,7 +272,7 @@ mod tests {
 
     #[test]
     fn test_shared_entry_data_ensure_owned() {
-        let data = vec![1u8, 2, 3, 4, 5];
+        let data = [1u8, 2, 3, 4, 5];
         let mut shared = SharedEntryData::new(data.as_ptr(), data.len());
 
         shared.ensure_owned();
@@ -284,7 +284,7 @@ mod tests {
 
     #[test]
     fn test_shared_entry_data_ensure_owned_idempotent() {
-        let data = vec![1u8, 2, 3, 4, 5];
+        let data = [1u8, 2, 3, 4, 5];
         let mut shared = SharedEntryData::new(data.as_ptr(), data.len());
 
         shared.ensure_owned();
@@ -298,7 +298,7 @@ mod tests {
 
     #[test]
     fn test_shared_entry_data_release_with_copy() {
-        let data = vec![1u8, 2, 3, 4, 5];
+        let data = [1u8, 2, 3, 4, 5];
         let mut shared = SharedEntryData::new(data.as_ptr(), data.len());
 
         // Copy data first (simulates read() being called)
@@ -314,7 +314,7 @@ mod tests {
 
     #[test]
     fn test_shared_entry_data_release_without_copy() {
-        let data = vec![1u8, 2, 3, 4, 5];
+        let data = [1u8, 2, 3, 4, 5];
         let mut shared = SharedEntryData::new(data.as_ptr(), data.len());
 
         // Release without copying (simulates iterator advancing without read())
@@ -337,7 +337,7 @@ mod tests {
 
     #[test]
     fn test_shared_entry_data_has_data_states() {
-        let data = vec![1u8, 2, 3];
+        let data = [1u8, 2, 3];
         let mut shared = SharedEntryData::new(data.as_ptr(), data.len());
 
         // Initially has data (borrowed pointer valid)

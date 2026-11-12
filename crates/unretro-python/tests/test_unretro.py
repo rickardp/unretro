@@ -5,12 +5,14 @@ Tests cover:
 - Loader iteration
 - Entry IO interface
 - open(), walk(), listdir() functions
-- Inline test archives (ZIP, TAR, GZIP)
+- Inline test archives (ZIP, TAR, GZIP, BZIP2)
 - Real test files from testdata
 """
 
 import io
 import os
+import sys
+import bz2
 import gzip
 import tarfile
 import tempfile
@@ -153,6 +155,49 @@ class TestLoader:
         entries = list(loader)
         # Should still work with depth 1
         assert len(entries) >= 1
+
+    def test_loader_missing_path_raises(self, tmp_path):
+        """Iterating a missing root raises instead of yielding nothing."""
+        with pytest.raises(RuntimeError, match="missing.zip"):
+            list(unretro.Loader(path=str(tmp_path / "missing.zip")))
+
+    def test_loader_corrupt_root_raises(self, tmp_path):
+        """Iterating a corrupt root raises instead of yielding nothing."""
+        bad = tmp_path / "bad.zip"
+        bad.write_bytes(b"PK\x03\x04garbage")
+        with pytest.raises(RuntimeError, match="bad.zip"):
+            list(unretro.Loader(path=str(bad)))
+
+    def test_loader_unsupported_root_raises(self, tmp_path):
+        """Iterating a non-container root raises instead of yielding nothing."""
+        plain = tmp_path / "plain.txt"
+        plain.write_text("hello")
+        with pytest.raises(RuntimeError, match="plain.txt"):
+            list(unretro.Loader(path=str(plain)))
+
+    def test_loader_corrupt_bytes_raises(self):
+        """Iterating corrupt in-memory data raises instead of yielding nothing."""
+        loader = unretro.Loader(data=b"PK\x03\x04garbage", name="bad.zip")
+        with pytest.raises(RuntimeError, match="bad.zip"):
+            list(loader)
+
+    def test_loader_missing_path_raises_with_filter(self, tmp_path):
+        """A filter does not hide a root failure."""
+        loader = unretro.Loader(path=str(tmp_path / "missing.zip")).filter_extension(["txt"])
+        with pytest.raises(RuntimeError, match="missing.zip"):
+            list(loader)
+
+    def test_loader_filter_matching_nothing_does_not_raise(self, temp_zip_file):
+        """An empty result from a readable root is not a failure."""
+        loader = unretro.Loader(path=temp_zip_file).filter_extension(["no-such-ext"])
+        assert list(loader) == []
+
+    def test_loader_root_failure_raises_on_each_iteration(self, tmp_path):
+        """A Loader is re-iterable; the failure is reported every time."""
+        loader = unretro.Loader(path=str(tmp_path / "missing.zip"))
+        for _ in range(2):
+            with pytest.raises(RuntimeError):
+                list(loader)
 
     def test_loader_filter_extension(self, temp_zip_file):
         """Test extension filtering."""
@@ -326,6 +371,47 @@ class TestOpen:
         with pytest.raises(FileNotFoundError):
             unretro.open(str(tmp_path / "nonexistent.zip"))
 
+    def test_open_missing_entry_in_archive(self, temp_zip_file):
+        """Test opening a missing entry inside a readable archive."""
+        with pytest.raises(FileNotFoundError):
+            unretro.open(temp_zip_file + "/no-such-entry.bin")
+
+    def test_open_corrupt_root_raises_runtime_error(self, tmp_path):
+        """A root that exists but cannot be parsed is not reported as missing."""
+        bad = tmp_path / "bad.zip"
+        bad.write_bytes(b"PK\x03\x04garbage")
+        with pytest.raises(RuntimeError, match="bad.zip"):
+            unretro.open(str(bad))
+
+    def test_open_empty_archive(self, tmp_path):
+        """A readable archive with no entries has nothing to open."""
+        zip_path = tmp_path / "empty.zip"
+        with zipfile.ZipFile(zip_path, "w"):
+            pass
+        with pytest.raises(FileNotFoundError):
+            unretro.open(str(zip_path))
+
+    @pytest.mark.skipif(
+        sys.platform == "win32" or getattr(os, "geteuid", lambda: 1)() == 0,
+        reason="needs POSIX permissions and a non-root user",
+    )
+    def test_open_unreadable_root_raises_os_error(self, temp_zip_file):
+        """A root that exists but cannot be read is an OSError, not 'missing'."""
+        os.chmod(temp_zip_file, 0)
+        try:
+            with pytest.raises(OSError) as excinfo:
+                unretro.open(temp_zip_file)
+            assert not isinstance(excinfo.value, FileNotFoundError)
+        finally:
+            os.chmod(temp_zip_file, 0o600)
+
+    def test_open_unsupported_root_raises_runtime_error(self, tmp_path):
+        """A root that is not a container is not reported as missing."""
+        plain = tmp_path / "plain.txt"
+        plain.write_text("hello")
+        with pytest.raises(RuntimeError, match="plain.txt"):
+            unretro.open(str(plain))
+
     def test_open_max_depth(self, temp_zip_file):
         """Test open with max_depth parameter."""
         with unretro.open(temp_zip_file, max_depth=1) as f:
@@ -441,6 +527,36 @@ class TestDetectFormat:
         fmt = unretro.detect_format(temp_gzip_file)
         assert fmt is not None
         assert "Gzip" in fmt.name or "GZIP" in fmt.name
+
+    def test_detect_bzip2(self, tmp_path):
+        """Test detecting BZIP2 format from file content."""
+        path = tmp_path / "test.txt.bz2"
+        path.write_bytes(bz2.compress(b"Hello from bzip2!"))
+        fmt = unretro.detect_format(str(path))
+        assert fmt == unretro.ContainerFormat.Bzip2
+        assert fmt.name == "Bzip2 Compressed"
+        assert not fmt.is_multi_file
+
+    def test_bzip2_entry(self):
+        """A .bz2 file yields its decompressed payload as one entry."""
+        data = bz2.compress(b"Hello from bzip2!")
+        entries = [
+            (entry.name, entry.read())
+            for entry in unretro.Loader(data=data, name="test.txt.bz2")
+        ]
+        assert entries == [("test.txt", b"Hello from bzip2!")]
+
+    def test_detect_scumm_speech(self, tmp_path):
+        """MONSTER.SOU speech bundles map to their own format, not Unknown."""
+        voc = b"Creative Voice File\x1a" + (26).to_bytes(2, "little") + b"\x0a\x01\x29\x11"
+        voc += b"\x01\x01\x00\x00" + b"x" + b"\x00"
+        sou = b"SOU \x00\x00\x00\x00" + b"VCTL" + (8).to_bytes(4, "big") + voc
+        path = tmp_path / "MONSTER.SOU"
+        path.write_bytes(sou)
+        assert unretro.detect_format(str(path)) == unretro.ContainerFormat.ScummSpeech
+        assert [e.path for e in unretro.Loader(path=str(path))] == [
+            f"{path}/speech_0000.voc"
+        ]
 
     def test_detect_unknown(self, tmp_path):
         """Test detecting unknown format from file content."""
@@ -600,6 +716,43 @@ class TestAppleDoubleAndResourceForks:
         assert leaves["app"] == (b"data fork", "APPL", "test")
         assert leaves["sub/tool"] == (b"tool", "APPL", "test")
         assert leaves["app/..namedfork/rsrc/CODE/#1"][0] == b"\x4e\x75"
+
+    @pytest.mark.skipif(sys.platform != "darwin", reason="native resource forks are macOS-only")
+    def test_native_fork_on_non_container_file_is_not_a_root_failure(self, tmp_path):
+        """The data fork is not a container, but the file still yields its fork."""
+        app = tmp_path / "app"
+        app.write_bytes(b"data fork")
+        fork = _resource_fork(self.RESOURCES)
+        try:
+            (app / "..namedfork" / "rsrc").write_bytes(fork)
+        except OSError:
+            pytest.skip("filesystem without native resource forks")
+
+        # A single-file root yields the raw fork, then its resources.
+        loader = unretro.Loader(path=str(app)).with_numeric_identifiers()
+        got = {e.path[len(str(app)):]: e.read() for e in loader}
+        assert got == {
+            "/..namedfork/rsrc": fork,
+            "/..namedfork/rsrc/CODE/#1": b"\x4e\x75",
+            "/..namedfork/rsrc/CODE/#2": b"\x4e\x71",
+        }
+
+        with unretro.open(str(app)) as entry:
+            assert entry.path == str(app) + "/..namedfork/rsrc"
+            assert entry.read() == fork
+
+    def test_native_fork_on_non_container_file_walk_and_listdir(self, tmp_path):
+        """walk and listdir apply the same root-failure rule as Loader and open."""
+        app = tmp_path / "app"
+        app.write_bytes(b"data fork")
+        try:
+            (app / "..namedfork" / "rsrc").write_bytes(_resource_fork(self.RESOURCES))
+        except OSError:
+            pytest.skip("filesystem without native resource forks")
+
+        walked = {r.dirpath[len(str(app)):]: r.filenames for r in unretro.walk(str(app))}
+        assert walked == {"": ["rsrc"], "/..namedfork/rsrc": ["Main", "#2"]}
+        assert unretro.listdir(str(app)) == ["rsrc"]
 
     def test_standalone_apple_double(self, tmp_path):
         path = tmp_path / "app.rsrc"

@@ -38,18 +38,6 @@ pub fn decode_mac_roman(data: &[u8]) -> String {
     result
 }
 
-#[must_use]
-pub fn decode_mac_roman_cstring(data: &[u8]) -> String {
-    let mut result = String::with_capacity(data.len());
-    for &b in data {
-        if b == 0 {
-            break;
-        }
-        result.push(mac_roman_to_char(b));
-    }
-    result
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -58,12 +46,6 @@ mod tests {
     fn test_ascii_passthrough() {
         let data = b"Hello, World!";
         assert_eq!(decode_mac_roman(data), "Hello, World!");
-    }
-
-    #[test]
-    fn test_cstring_null_termination() {
-        let data = b"Hello\x00World";
-        assert_eq!(decode_mac_roman_cstring(data), "Hello");
     }
 
     #[test]
@@ -111,6 +93,5 @@ mod tests {
     #[test]
     fn test_empty_input() {
         assert_eq!(decode_mac_roman(&[]), "");
-        assert_eq!(decode_mac_roman_cstring(&[]), "");
     }
 }

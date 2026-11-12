@@ -14,6 +14,7 @@
 use crate::compat::{FastMap, String, ToString, Vec, format};
 use crate::error::{Error, Result};
 use crate::format::ContainerFormat;
+use crate::limits::OutputBudget;
 use crate::{Container, ContainerInfo, Entry};
 
 const MAGIC_LB83: &[u8; 4] = b"LB83";
@@ -24,6 +25,9 @@ const LB23_ENTRY_SIZE: usize = 32;
 const LB23_NAME_SIZE: usize = 24;
 const CHUNK_SIZE: usize = 0x2000;
 const COMP_BLOCK_ENTRY_SIZE: usize = 16;
+// compDecode emits at most 18 bytes per 18 input bits (8:1), so a bundle whose
+// blocks and tracks do not alias each other stays well below this.
+const MAX_BUNDLE_EXPANSION: u64 = 16;
 
 #[must_use]
 pub fn is_imuse_bundle(data: &[u8]) -> bool {
@@ -82,6 +86,7 @@ impl ImuseBundleContainer {
             )));
         }
 
+        let mut budget = OutputBudget::for_input(data.len(), MAX_BUNDLE_EXPANSION);
         let mut entries = Vec::with_capacity(num_files);
         for i in 0..num_files {
             let off = dir_offset + i * entry_size;
@@ -119,7 +124,7 @@ impl ImuseBundleContainer {
                 )));
             }
 
-            let entry_data = extract_track(data, track_off, track_size)?;
+            let entry_data = extract_track(data, track_off, track_size, &mut budget)?;
             let sanitized = crate::sanitize_path_component(&name);
             let path = format!("{prefix}/{sanitized}");
             entries.push(BundleEntry {
@@ -145,7 +150,12 @@ fn parse_cstr(bytes: &[u8]) -> String {
     String::from_utf8_lossy(&bytes[..end]).to_string()
 }
 
-fn extract_track(data: &[u8], off: usize, size: usize) -> Result<EntryData> {
+fn extract_track(
+    data: &[u8],
+    off: usize,
+    size: usize,
+    budget: &mut OutputBudget,
+) -> Result<EntryData> {
     let head = &data[off..off + 4.min(size)];
     // Raw iMUSE resource — stored as-is.
     if head == b"iMUS" {
@@ -199,11 +209,15 @@ fn extract_track(data: &[u8], off: usize, size: usize) -> Result<EntryData> {
         blocks.push((start, b_size, b_codec));
     }
 
-    let mut out = Vec::with_capacity(num_items * CHUNK_SIZE);
+    let mut out = Vec::with_capacity(crate::limits::prealloc_hint(
+        (num_items as u64).saturating_mul(CHUNK_SIZE as u64),
+    ));
     let mut scratch = [0u8; CHUNK_SIZE];
     for (start, b_size, codec) in blocks {
         let input = &data[start..start + b_size];
         let written = decompress_block(codec, input, &mut scratch)?;
+        // Blocks may overlap and directory entries may share a track.
+        budget.charge(written, "iMUSE bundle")?;
         out.extend_from_slice(&scratch[..written]);
     }
     Ok(EntryData::Owned(out))
@@ -521,5 +535,98 @@ mod tests {
         // First pass (z starts at 2): [1, 1, 2, 3]
         // Second pass (z starts at 1): [1, 2, 4, 7]
         assert_eq!(buf, [1, 2, 4, 7]);
+    }
+
+    fn test_budget() -> OutputBudget {
+        OutputBudget::for_input(0, MAX_BUNDLE_EXPANSION)
+    }
+
+    // COMP track of `num_items` stored (codec 0) blocks, each `block` bytes.
+    fn comp_track(num_items: u32, block: &[u8]) -> Vec<u8> {
+        let table_len = num_items as usize * COMP_BLOCK_ENTRY_SIZE;
+        let mut track = Vec::new();
+        track.extend_from_slice(b"COMP");
+        track.extend_from_slice(&num_items.to_be_bytes());
+        track.extend_from_slice(&[0; 8]);
+        for i in 0..num_items as usize {
+            let offset = (16 + table_len + i * block.len()) as u32;
+            track.extend_from_slice(&offset.to_be_bytes());
+            track.extend_from_slice(&(block.len() as u32).to_be_bytes());
+            track.extend_from_slice(&[0; 8]); // codec 0 + padding
+        }
+        for _ in 0..num_items {
+            track.extend_from_slice(block);
+        }
+        track
+    }
+
+    // COMP track whose `num_items` table entries all point at one stored block.
+    fn aliased_comp_track(num_items: u32, block: &[u8]) -> Vec<u8> {
+        let offset = (16 + num_items as usize * COMP_BLOCK_ENTRY_SIZE) as u32;
+        let mut track = Vec::new();
+        track.extend_from_slice(b"COMP");
+        track.extend_from_slice(&num_items.to_be_bytes());
+        track.extend_from_slice(&[0; 8]);
+        for _ in 0..num_items {
+            track.extend_from_slice(&offset.to_be_bytes());
+            track.extend_from_slice(&(block.len() as u32).to_be_bytes());
+            track.extend_from_slice(&[0; 8]);
+        }
+        track.extend_from_slice(block);
+        track
+    }
+
+    // LB83 bundle whose `num_files` directory entries all point at `track`.
+    fn aliased_bundle(num_files: u32, track: &[u8]) -> Vec<u8> {
+        let dir_off = HEADER_SIZE + track.len();
+        let mut blob = make_header(MAGIC_LB83, dir_off as u32, num_files);
+        blob.extend_from_slice(track);
+        for _ in 0..num_files {
+            blob.extend_from_slice(&lb83_entry(
+                b"t",
+                b"IMX",
+                HEADER_SIZE as u32,
+                track.len() as u32,
+            ));
+        }
+        blob
+    }
+
+    #[test]
+    fn overlapping_comp_blocks_cannot_multiply_output() {
+        // 2100 table entries sharing one 8 KiB block: ~17 MiB from ~42 KiB.
+        let track = aliased_comp_track(2100, &[0; CHUNK_SIZE]);
+        let blob = aliased_bundle(1, &track);
+        assert!(ImuseBundleContainer::from_bytes(&blob, "b.bun".to_string(), 32).is_err());
+    }
+
+    #[test]
+    fn aliased_directory_entries_cannot_multiply_output() {
+        // 300 directory entries sharing one 64 KiB track: ~19 MiB from ~72 KiB.
+        let track = comp_track(8, &[0; CHUNK_SIZE]);
+        let blob = aliased_bundle(300, &track);
+        assert!(ImuseBundleContainer::from_bytes(&blob, "b.bun".to_string(), 32).is_err());
+    }
+
+    #[test]
+    fn comp_track_reassembles_stored_blocks() {
+        let track = comp_track(3, b"abcd");
+        match extract_track(&track, 0, track.len(), &mut test_budget()).unwrap() {
+            EntryData::Owned(out) => assert_eq!(out, b"abcdabcdabcd"),
+            EntryData::Raw { .. } => panic!("expected decoded track"),
+        }
+    }
+
+    #[test]
+    fn comp_block_count_does_not_drive_allocation() {
+        // 4096 empty blocks would have reserved 32 MiB up front.
+        let track = comp_track(4096, b"");
+        match extract_track(&track, 0, track.len(), &mut test_budget()).unwrap() {
+            EntryData::Owned(out) => {
+                assert!(out.is_empty());
+                assert!(out.capacity() <= crate::limits::PREALLOC_LIMIT);
+            }
+            EntryData::Raw { .. } => panic!("expected decoded track"),
+        }
     }
 }

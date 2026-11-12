@@ -79,6 +79,32 @@ Regenerate expectation files:
 UNRETRO_SAMPLES=/path/to/data ./scripts/update-expect.sh
 ```
 
+## StuffIt Reader
+
+The StuffIt reader (`src/formats/macintosh/sit/`) is a clean-room implementation: it is
+written only from the prose specification in `docs/stuffit/`. Do not consult the source
+of other StuffIt implementations when changing it; if the specification is unclear or
+wrong against the test data, fix the specification first.
+
+- `testdata/stuffit/` holds synthetic archives with `manifest.tsv` (expected paths, fork
+  lengths and FNV-1a 64 hashes) and `forks.tsv`; `tests/stuffit_fixtures.rs` checks them
+  through the public API, and the unit tests under `sit/` check each decoder.
+- The same tests also check a local manifest of real archives when
+  `UNRETRO_STUFFIT_ORACLE` names its directory (never committed). When it is unset
+  they print `UNRETRO_STUFFIT_ORACLE not set, skipping ...` and pass, so a green
+  default run says nothing about real archives (all real method 13 and 15 forks are
+  only there):
+
+```bash
+UNRETRO_STUFFIT_ORACLE=/path/to/oracle cargo test --all-features --test stuffit_fixtures
+UNRETRO_STUFFIT_ORACLE=/path/to/oracle cargo test --all-features --lib sit::
+```
+
+- The reader builds for `no_std` + `alloc`, but its unit tests (like the rest of the
+  crate's) use `std`: `cargo test --no-default-features --features no_std,...` does
+  not compile. Run them with `std` enabled (`--all-features` is fine) and check the
+  `no_std` build with `cargo check --no-default-features --features no_std,macintosh`.
+
 ## Adding a New Format
 
 When adding a format implementation:

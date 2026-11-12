@@ -53,6 +53,7 @@ pub struct ScummSpeechContainer {
     source: Vec<u8>,
     entries: Vec<SpeechEntry>,
     path_index: FastMap<String, usize>,
+    trailing_error: Option<Error>,
 }
 
 impl ScummSpeechContainer {
@@ -66,42 +67,27 @@ impl ScummSpeechContainer {
 
         let mut entries = Vec::new();
         let mut pos = SOU_HEADER_SIZE;
-        let mut idx: usize = 0;
+        let mut trailing_error = None;
 
         while pos < data.len() {
-            // VCTL header: tag + BE size (size includes the 8-byte header).
-            if pos + 8 > data.len() {
-                return Err(Error::invalid_format(format!(
-                    "SCUMM speech: VCTL header truncated at offset {pos}"
-                )));
+            match parse_pair(data, pos) {
+                Ok((voc_off, voc_len)) => {
+                    let path = format!("{prefix}/speech_{:04}.voc", entries.len());
+                    entries.push(SpeechEntry {
+                        path,
+                        offset: voc_off,
+                        size: voc_len,
+                    });
+                    pos = voc_off + voc_len;
+                }
+                // Clips before a damaged tail are still usable; the error is
+                // reported from `visit` after they are yielded.
+                Err(err) if !entries.is_empty() => {
+                    trailing_error = Some(err);
+                    break;
+                }
+                Err(err) => return Err(err),
             }
-            if &data[pos..pos + 4] != VCTL_TAG {
-                return Err(Error::invalid_format(format!(
-                    "SCUMM speech: expected VCTL at offset {pos}"
-                )));
-            }
-            let vctl_size = u32::from_be_bytes(data[pos + 4..pos + 8].try_into().unwrap()) as usize;
-            if vctl_size < 8 {
-                return Err(Error::invalid_format("SCUMM speech: VCTL size < 8"));
-            }
-            let voc_off = pos
-                .checked_add(vctl_size)
-                .ok_or_else(|| Error::invalid_format("SCUMM speech: VCTL size overflow"))?;
-            if voc_off > data.len() {
-                return Err(Error::invalid_format(
-                    "SCUMM speech: VCTL extends past end of file",
-                ));
-            }
-
-            let voc_len = parse_voc_length(&data[voc_off..])?;
-            let path = format!("{prefix}/speech_{idx:04}.voc");
-            entries.push(SpeechEntry {
-                path,
-                offset: voc_off,
-                size: voc_len,
-            });
-            idx += 1;
-            pos = voc_off + voc_len;
         }
 
         let path_index =
@@ -112,8 +98,38 @@ impl ScummSpeechContainer {
             source: data.to_vec(),
             entries,
             path_index,
+            trailing_error,
         })
     }
+}
+
+// Parses the `(VCTL, VOC)` pair at `pos`, returning the VOC offset and length.
+fn parse_pair(data: &[u8], pos: usize) -> Result<(usize, usize)> {
+    // VCTL header: tag + BE size (size includes the 8-byte header).
+    if pos + 8 > data.len() {
+        return Err(Error::invalid_format(format!(
+            "SCUMM speech: VCTL header truncated at offset {pos}"
+        )));
+    }
+    if &data[pos..pos + 4] != VCTL_TAG {
+        return Err(Error::invalid_format(format!(
+            "SCUMM speech: expected VCTL at offset {pos}"
+        )));
+    }
+    let vctl_size = u32::from_be_bytes(data[pos + 4..pos + 8].try_into().unwrap()) as usize;
+    if vctl_size < 8 {
+        return Err(Error::invalid_format("SCUMM speech: VCTL size < 8"));
+    }
+    let voc_off = pos
+        .checked_add(vctl_size)
+        .ok_or_else(|| Error::invalid_format("SCUMM speech: VCTL size overflow"))?;
+    if voc_off > data.len() {
+        return Err(Error::invalid_format(
+            "SCUMM speech: VCTL extends past end of file",
+        ));
+    }
+    let voc_len = parse_voc_length(&data[voc_off..])?;
+    Ok((voc_off, voc_len))
 }
 
 /// Walk a Creative Voice File starting at `buf[0]` and return its total
@@ -170,10 +186,17 @@ impl Container for ScummSpeechContainer {
             let bytes = &self.source[entry.offset..entry.offset + entry.size];
             let e = Entry::new(&entry.path, &self.prefix, bytes);
             if !visitor(&e)? {
-                break;
+                return Ok(());
             }
         }
-        Ok(())
+        match &self.trailing_error {
+            Some(err) => Err(Error::invalid_format(format!(
+                "{} (after {} clips)",
+                err.message().unwrap_or("damaged data"),
+                self.entries.len()
+            ))),
+            None => Ok(()),
+        }
     }
 
     fn info(&self) -> ContainerInfo {
@@ -229,6 +252,32 @@ mod tests {
             blob.extend_from_slice(&voc_blob(clip));
         }
         blob
+    }
+
+    #[test]
+    fn damaged_tail_keeps_earlier_clips() {
+        let mut blob = make_speech(&[b"a", b"b"]);
+        blob.extend_from_slice(&[0u8; 4]);
+        let c = ScummSpeechContainer::from_bytes(&blob, "monster.sou".to_string(), 32).unwrap();
+        let mut seen = Vec::new();
+        let err = c
+            .visit(&mut |e| {
+                seen.push(e.path.to_string());
+                Ok(true)
+            })
+            .unwrap_err();
+        assert_eq!(
+            seen,
+            ["monster.sou/speech_0000.voc", "monster.sou/speech_0001.voc"]
+        );
+        let msg = err.to_string();
+        assert!(msg.contains("VCTL header truncated"), "{msg}");
+        assert_eq!(msg.matches("Invalid format").count(), 1, "{msg}");
+
+        // With no valid clip at all the file is rejected.
+        let mut bad = make_speech(&[]);
+        bad.extend_from_slice(b"VCTL\x00\x00\x00\x02");
+        assert!(ScummSpeechContainer::from_bytes(&bad, "x.sou".to_string(), 32).is_err());
     }
 
     #[test]

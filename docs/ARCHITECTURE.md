@@ -67,7 +67,7 @@ Important internals:
 - For `from_path`, data access can be memory-mapped using `MmapStrategy`.
 - `from_virtual_path` uses `parse_virtual_path` to split filesystem archive path and internal path filter.
 - Macintosh special handling includes AppleDouble integration and optional native resource-fork traversal.
-- AppleDouble sidecar pairing runs in `visit_container_recursive` for every container, including `DirectoryContainer`. It looks siblings up through `Container::has_file`/`read_file` (relative to the container root); the default implementations wrap `get_file`, and `DirectoryContainer` reads from disk.
+- AppleDouble sidecar pairing runs in `visit_container_recursive` for every container, including `DirectoryContainer`. It looks siblings up through `Container::has_file`/`has_dir`/`read_file` (relative to the container root); the defaults wrap `get_file` (`has_dir` is false), and `DirectoryContainer` checks the disk. A sidecar is skipped when the container also has a native fork for the same file.
 
 ## Path Model
 
@@ -90,7 +90,8 @@ These paths are exposed consistently so CLI/Python/Rust consumers can reason abo
 Sources without a native fork use the same shape: a paired AppleDouble sidecar puts the
 resources under its data file, and a standalone AppleDouble or a bare resource-fork file
 puts them under `<file>/..namedfork/rsrc` (a content-detected `ResourceFork` container
-appends the suffix to its prefix when the path does not already end in it).
+whose path does not already end in the suffix yields that fork entry, and the loader
+descends into it).
 See [USAGE.md](USAGE.md#classic-mac-resource-forks).
 
 ## Path Sanitization Contracts
@@ -122,6 +123,7 @@ Root vs recoverable behavior:
 |---|---|
 | Root failures | `RootOpenFailed`, `RootUnsupportedFormat`, `RootTraversalFailed` |
 | Recoverable nested/resource issues | `NestedContainerOpenFailed`, `NestedContainerTraversalFailed`, `ResourceForkTraversalFailed` |
+| Recoverable at any depth, root included | `ContainerEntriesSkipped` (damaged or unsupported entries left out; the readable ones were visited) |
 
 ## Feature Layering
 
@@ -131,7 +133,23 @@ Public feature toggles in `Cargo.toml`:
 
 Internal implementation toggles (not API contract):
 
-- `__backend_common`, `__backend_xz`, `__backend_mac_stuffit`, `__backend_mac_binhex`, `__backend_dos_rar`.
+- `__backend_xz`, `__backend_dos_rar`.
+
+What the features add (the internal toggles are enabled by `std`):
+
+- `common` alone: ZIP, GZIP, BZIP2 and TAR, with native readers (`formats/common/zip.rs`,
+  `gzip.rs`, `bzip2_container.rs`, `tar.rs`) over native inflate and bzip2 decoders
+  (`formats/common/inflate.rs`, `bzip2.rs`) that have no dependencies and build for
+  `no_std` + `alloc`.
+- `common` or `macintosh`: the inflate decoder, the zlib wrapper
+  (`formats/common/zlib.rs`) and the bzip2 decoder, which UDIF disk images use for
+  zlib- and bzip2-compressed blocks.
+- `xz` + `__backend_xz`: XZ files, and LZMA/XZ-compressed ZIP entries (`xz2`).
+
+StuffIt has no backend toggle: its reader (`formats/macintosh/sit/`) has no dependencies,
+builds for `no_std` + `alloc` and is part of `macintosh`. Only its method 14 needs
+`common`, for the native inflate decoder. The public `stuffit` feature is a no-op kept
+for existing feature lists.
 
 Design intent:
 
@@ -142,11 +160,16 @@ Design intent:
 
 `src/formats/` is grouped by domain:
 
-- `common/`: directory, zip, gzip, tar, xz
+- `common/`: directory, zip, gzip, bzip2, tar, xz
 - `macintosh/`: hfs, stuffit, compactpro, binhex, macbinary, apple_double, resource_fork
-- `amiga/`: lha
+  - `stuffit.rs` is the container glue (paths, forks as entries, output budget,
+    skipped-entry diagnostics); `sit/` holds the classic and StuffIt 5 parsers and one
+    decoder per compression method. `sit/` is written only from the prose specification
+    in `docs/stuffit/` (clean-room; see its README).
+- `amiga/`: lha, adf
 - `game/`: scumm, wad, pak, wolf3d
-- `dos/`: fat, mbr, gpt, rar
+- `dos/`: fat, mbr, gpt, iso9660, rar
+- `cd_sector.rs`: raw 2352-byte CD sector access shared by hfs and iso9660
 
 Each implementation provides container open/visit behavior and metadata extraction matching core contracts.
 

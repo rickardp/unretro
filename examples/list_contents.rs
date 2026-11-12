@@ -14,6 +14,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         eprintln!("  - ZIP archives");
         eprintln!("  - LHA/LZH archives");
         eprintln!("  - GZIP compressed files");
+        eprintln!("  - BZIP2 compressed files");
         eprintln!("  - BinHex 4.0 encoded files (.hqx)");
         eprintln!("  - StuffIt archives (.sit)");
         eprintln!("  - MacBinary files (.bin)");

@@ -154,7 +154,9 @@ impl Rar29Decoder {
         let mut reader = BitReader::new(data);
 
         // Enable output accumulation for files (especially those larger than window)
-        self.lzss.enable_output(unpacked_size as usize);
+        // Hint only: the output grows as blocks are flushed.
+        self.lzss
+            .enable_output(crate::limits::prealloc_hint(unpacked_size));
 
         // Read tables if needed
         if !self.tables_read {

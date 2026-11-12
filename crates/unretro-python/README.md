@@ -113,7 +113,8 @@ Invalid combinations raise `ValueError`:
 - Traversal is forward-only and optimized for streaming.
 - `open(path)` returns the first matching leaf entry in traversal scope.
 - `Entry` supports file-like methods: `read`, `seek`, `tell`, `readable`, `seekable`.
-- `walk` and `listdir` propagate root failures as errors.
+- `Loader` iteration, `walk` and `listdir` raise `RuntimeError` when the root cannot be opened, is not a supported container, or fails during traversal.
+- `open` raises `FileNotFoundError` when the root path or the entry does not exist, `OSError` when the root exists but cannot be read, and `RuntimeError` when the root is unsupported or corrupt.
 - Recoverable nested traversal issues are emitted as Python warnings.
 
 ## ContainerFormat and Metadata
@@ -121,6 +122,15 @@ Invalid combinations raise `ValueError`:
 - `detect_format(path)` returns `ContainerFormat` or `None`.
 - `ContainerFormat.name` provides a human-readable name.
 - `ContainerFormat.is_multi_file` indicates whether format contains multiple files.
+- `ContainerFormat.Bzip2` covers `.bz2` files (and `.tar.bz2`/`.tbz2`, whose payload
+  opens as TAR); bzip2 entries in ZIP archives and bzip2 blocks in UDIF disk images are
+  read as well.
+- `ContainerFormat.Iso9660` covers ISO 9660 CD-ROM images (Joliet / Rock Ridge names, raw
+  2352-byte sector dumps); see the ISO 9660 section of the usage guide.
+- `ContainerFormat.StuffIt` covers classic and StuffIt 5 archives, decoded natively
+  (written from the specification in [docs/stuffit/](../../docs/stuffit/README.md)).
+  Files with an unreadable data fork (encrypted, corrupt, unsupported method) are left
+  out with a warning; see the StuffIt section of the usage guide.
 - `Entry.metadata` exposes optional structured metadata when available.
 - Classic Mac resources are yielded as `<owner>/..namedfork/rsrc/<TYPE>/<name or #id>`
   (`with_numeric_identifiers()` forces `#id`). AppleDouble sidecars in plain directories
