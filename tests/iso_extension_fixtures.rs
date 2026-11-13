@@ -395,14 +395,13 @@ fn hard_disk_image_is_sized_by_its_partition_table() {
 
 #[test]
 fn section_entries_are_numbered_after_the_default_entry() {
-    // Default entry: BIOS, no emulation, 4 sectors of a visible 4096-byte
-    // file, so the image is not that file. Section entry: UEFI, no
-    // emulation, 720 sectors, a FAT image in neither tree.
+    // Default entry: BIOS, no emulation, the first 4 sectors of a visible
+    // 4096-byte file, which is not an image of its own and keeps number 0.
+    // Section entry: UEFI, no emulation, 720 sectors, a FAT image in
+    // neither tree.
     let walk = assert_fixture("et-multi.iso");
-    assert_eq!(walk.boot_entries(), ["0.img", "1.img"]);
+    assert_eq!(walk.boot_entries(), ["1.img"]);
     assert_eq!(walk.entries["boot/bios.bin"].content.size, 4096);
-    assert_eq!(walk.entries["..eltorito/0.img"].content.size, 2048);
-    assert_eq!(walk.entries["..eltorito/0.img"].format, None);
     let efi = &walk.entries["..eltorito/1.img"];
     assert_eq!(efi.content.size, 720 * 512);
     assert_eq!(efi.format, Some(ContainerFormat::Fat));

@@ -95,7 +95,13 @@ use crate::formats::dos::iso9660::{Iso9660Container, has_readable_root, is_iso96
 #[cfg(feature = "dos")]
 use crate::formats::dos::mbr::{MbrContainer, is_mbr_image};
 
-#[cfg(all(feature = "dos", feature = "__backend_dos_rar"))]
+#[cfg(feature = "dos")]
+use crate::formats::dos::nrg::{NrgContainer, is_nrg_image};
+
+#[cfg(all(feature = "macintosh", feature = "dos"))]
+use crate::formats::hybrid::with_iso_side;
+
+#[cfg(feature = "dos")]
 use crate::formats::dos::rar::{self, RarContainer, is_rar_archive};
 
 #[cfg(feature = "dos")]
@@ -638,6 +644,16 @@ impl Loader {
                     {
                         let format = detect_format(&path_str, Some(source.as_slice()));
                         if matches!(format, Some(ContainerFormat::Hfs)) {
+                            if let Some(opened) = open_xa_framed(
+                                source.as_slice(),
+                                &path_str,
+                                &path_str,
+                                self.max_depth,
+                                options,
+                                format,
+                            ) {
+                                return Ok((Some(source), opened?));
+                            }
                             let rsrc_path = format!("{path_str}/..namedfork/rsrc");
                             let container = Box::new(HfsContainer::from_bytes_with_sibling_lookup(
                                 source.as_slice(),
@@ -651,6 +667,8 @@ impl Loader {
                                     }
                                 },
                             )?);
+                            let container =
+                                with_iso_side(container, source.as_slice(), self.max_depth);
                             return Ok((Some(source), container));
                         }
                     }
@@ -692,7 +710,7 @@ impl Loader {
                         return Ok((Some(source), container));
                     }
 
-                    #[cfg(all(feature = "dos", feature = "__backend_dos_rar"))]
+                    #[cfg(feature = "dos")]
                     if rar::volume_after(&path_str, 1).is_some()
                         && is_rar_archive(source.as_slice())
                     {
@@ -772,14 +790,14 @@ impl Loader {
         let mut report = VisitReport::new(root_path.clone());
 
         match self.open_container() {
-            Ok((_source, container)) => {
+            Ok((source, container)) => {
                 let info = container.info();
                 report.root_container_path = Some(info.path);
                 report.root_format = Some(info.format);
 
                 // A directory has no size of its own: each file in it is an
                 // input with its own budget.
-                let mut nesting = match (&_source, &self.source) {
+                let mut nesting = match (&source, &self.source) {
                     (Some(source), _) => Some(source.as_slice().len()),
                     (None, LoaderSource::Bytes { data, .. }) => Some(data.len()),
                     #[cfg(feature = "std")]
@@ -787,7 +805,9 @@ impl Loader {
                 }
                 .map(NestingBudget::for_input);
 
-                // Keep _source alive - container may borrow from it.
+                // Containers own what they list, so the file's bytes are not
+                // held (or kept mapped) while it is traversed.
+                drop(source);
                 visit_container_recursive(
                     container.as_ref(),
                     &self.path_filter,
@@ -872,6 +892,20 @@ impl Loader {
     }
 }
 
+// An audio track of a disc image holds samples, whatever they look like
+// (section 10.3 of docs/cue/cue.md and docs/nrg/nrg.md).
+#[cfg(feature = "dos")]
+fn is_audio_track(container: &dyn Container, prefix: &str, path: &str) -> bool {
+    extract_relative_path(path, prefix).is_some_and(|name| {
+        name.strip_prefix("track")
+            .and_then(|rest| rest.strip_suffix(".pcm"))
+            .is_some_and(|number| number.len() == 2 && number.bytes().all(|b| b.is_ascii_digit()))
+    }) && matches!(
+        container.info().format,
+        ContainerFormat::CueBin | ContainerFormat::Nrg
+    )
+}
+
 /// Recursively visit a container and its nested containers.
 ///
 /// This is the core recursion logic - containers just yield entries,
@@ -921,12 +955,22 @@ where
                 let earlier = arj::volume_number(&rel)
                     .filter(|&number| number > 0 && is_arj_archive(entry.data))
                     .and_then(|number| arj::volume_name(&rel, number - 1));
-                #[cfg(feature = "__backend_dos_rar")]
                 let earlier = earlier.or_else(|| {
                     // A reader that starts at an earlier volume passes over
                     // a few missing ones.
                     is_rar_archive(entry.data)
-                        .then(|| rar::volumes_before(&rel).find(|name| container.has_file(name)))
+                        .then(|| {
+                            rar::volumes_before(&rel)
+                                .find(|name| container.has_file(name))
+                                .or_else(|| {
+                                    rar::sfx_first_volumes(&rel).into_iter().find(|name| {
+                                        container.has_file(name)
+                                            && container
+                                                .read_file(name)
+                                                .is_some_and(|data| is_rar_archive(&data))
+                                    })
+                                })
+                        })
                         .flatten()
                 });
                 if earlier.is_some_and(|earlier| container.has_file(&earlier)) {
@@ -1024,10 +1068,18 @@ where
         // resource). Consult either the in-container sibling or the just-
         // parsed AppleDouble resource fork.
         let detected_format = {
-            let base = detect_format(entry.path, Some(entry.data));
+            #[cfg(feature = "dos")]
+            let opaque = is_audio_track(container, &prefix, entry.path);
+            #[cfg(not(feature = "dos"))]
+            let opaque = false;
+            let base = if opaque {
+                None
+            } else {
+                detect_format(entry.path, Some(entry.data))
+            };
             #[cfg(feature = "macintosh")]
             {
-                if base.is_none() {
+                if base.is_none() && !opaque {
                     let rsrc_path = format!("{}/..namedfork/rsrc", entry.path);
                     let sibling_bytes = container.get_file(&rsrc_path);
                     let has_ndif = sibling_bytes
@@ -1494,6 +1546,12 @@ fn open_container_internal(
         .map(Some)
         .unwrap_or_else(|| detect_format(path, Some(data)));
 
+    // A volume in 2056- or 2336-byte sectors is opened from its user data.
+    #[cfg(any(feature = "macintosh", feature = "dos"))]
+    if let Some(opened) = open_xa_framed(data, path, prefix, depth, options, format) {
+        return opened;
+    }
+
     match format {
         #[cfg(feature = "amiga")]
         Some(ContainerFormat::Lha) => Ok(Box::new(LhaContainer::from_bytes(
@@ -1507,7 +1565,7 @@ fn open_container_internal(
             prefix.to_string(),
             depth,
         )?)),
-        #[cfg(all(feature = "dos", feature = "__backend_dos_rar"))]
+        #[cfg(feature = "dos")]
         Some(ContainerFormat::Rar) => Ok(Box::new(RarContainer::from_bytes(
             data,
             prefix.to_string(),
@@ -1570,18 +1628,22 @@ fn open_container_internal(
             )?))
         }
         #[cfg(feature = "macintosh")]
-        Some(ContainerFormat::Hfs) => Ok(Box::new(HfsContainer::from_bytes(
+        Some(ContainerFormat::Hfs) => Ok(with_iso_side(
+            Box::new(HfsContainer::from_bytes(data, prefix.to_string(), depth)?),
             data,
-            prefix.to_string(),
             depth,
-        )?)),
+        )),
         #[cfg(feature = "macintosh")]
-        Some(ContainerFormat::Apm) => Ok(Box::new(ApmContainer::from_bytes(
+        Some(ContainerFormat::Apm) => Ok(with_iso_side(
+            Box::new(ApmContainer::from_bytes(
+                data,
+                prefix.to_string(),
+                depth,
+                options.numeric_identifiers,
+            )?),
             data,
-            prefix.to_string(),
             depth,
-            options.numeric_identifiers,
-        )?)),
+        )),
         #[cfg(feature = "macintosh")]
         Some(ContainerFormat::StuffIt) => Ok(Box::new(StuffItContainer::from_bytes(
             data,
@@ -1708,6 +1770,12 @@ fn open_container_internal(
             depth,
         )?)),
         #[cfg(feature = "dos")]
+        Some(ContainerFormat::Nrg) => Ok(Box::new(NrgContainer::from_bytes(
+            data,
+            prefix.to_string(),
+            depth,
+        )?)),
+        #[cfg(feature = "dos")]
         Some(ContainerFormat::Udf) => Ok(Box::new(UdfContainer::from_bytes(
             data,
             prefix.to_string(),
@@ -1778,9 +1846,12 @@ where
             .map(Some)
             .unwrap_or_else(|| detect_format(path, Some(data)));
         if matches!(format, Some(ContainerFormat::Hfs)) {
+            if let Some(opened) = open_xa_framed(data, path, prefix, depth, options, format) {
+                return opened;
+            }
             // Build the sibling resource fork path: data_fork_path + /..namedfork/rsrc
             let rsrc_sibling_path = format!("{path}/..namedfork/rsrc");
-            return Ok(Box::new(HfsContainer::from_bytes_with_sibling_lookup(
+            let container = Box::new(HfsContainer::from_bytes_with_sibling_lookup(
                 data,
                 prefix.to_string(),
                 depth,
@@ -1793,7 +1864,8 @@ where
                         None
                     }
                 },
-            )?));
+            )?);
+            return Ok(with_iso_side(container, data, depth));
         }
     }
 
@@ -1812,7 +1884,7 @@ where
         }
     }
 
-    #[cfg(all(feature = "dos", feature = "__backend_dos_rar"))]
+    #[cfg(feature = "dos")]
     if rar::volume_after(path, 1).is_some() {
         let format = pre_detected_format.or_else(|| detect_format(path, Some(data)));
         if matches!(format, Some(ContainerFormat::Rar)) {
@@ -1855,6 +1927,100 @@ fn optical_disc_format(data: &[u8]) -> Option<ContainerFormat> {
     } else {
         None
     }
+}
+
+// The volume a disc image holds, by the Macintosh and optical probes.
+#[cfg(any(feature = "macintosh", feature = "dos"))]
+fn disc_volume_format(data: &[u8]) -> Option<ContainerFormat> {
+    #[cfg(feature = "macintosh")]
+    {
+        if is_apm_image(data) {
+            return Some(ContainerFormat::Apm);
+        }
+        if is_hfs_image(data) {
+            return Some(ContainerFormat::Hfs);
+        }
+    }
+    #[cfg(feature = "dos")]
+    if let Some(format) = optical_disc_format(data) {
+        return Some(format);
+    }
+    None
+}
+
+// Whether the leading cooked sectors of an image of `total_len` cooked bytes
+// hold a volume.
+#[cfg(any(feature = "macintosh", feature = "dos"))]
+fn disc_head_has_volume(head: &[u8], total_len: usize) -> bool {
+    #[cfg(feature = "macintosh")]
+    if crate::formats::macintosh::apm::has_partition_map(head, total_len) || is_hfs_image(head) {
+        return true;
+    }
+    #[cfg(not(feature = "macintosh"))]
+    let _ = total_len;
+    #[cfg(feature = "dos")]
+    if optical_disc_format(head).is_some() {
+        return true;
+    }
+    false
+}
+
+// An image of CD-ROM XA sectors without sync and header (2056 or 2336 bytes
+// each): the volume its user data holds, and that user data. Such a file has
+// no signature of its own, so it is accepted only when no volume is found in
+// the bytes as they are and one is found in the cooked view. The whole image
+// is copied only once its leading sectors have shown a volume.
+#[cfg(any(feature = "macintosh", feature = "dos"))]
+fn xa_framed_volume(data: &[u8]) -> Option<(ContainerFormat, Vec<u8>)> {
+    use crate::formats::cd_sector::{
+        CD_USER_DATA_SIZE, XA_HEAD_SECTORS, XA_SECTOR_SIZES, cook_xa, has_xa_subheaders,
+    };
+
+    let mut plain = None;
+    for sector_size in XA_SECTOR_SIZES {
+        if !has_xa_subheaders(data, sector_size) {
+            continue;
+        }
+        if *plain.get_or_insert_with(|| disc_volume_format(data).is_some()) {
+            return None;
+        }
+        let sectors = data.len() / sector_size;
+        if sectors > XA_HEAD_SECTORS {
+            let head = cook_xa(&data[..XA_HEAD_SECTORS * sector_size], sector_size);
+            let total_len = sectors.saturating_mul(CD_USER_DATA_SIZE);
+            if !head.is_some_and(|head| disc_head_has_volume(&head, total_len)) {
+                continue;
+            }
+        }
+        let Some(cooked) = cook_xa(data, sector_size) else {
+            continue;
+        };
+        if let Some(format) = disc_volume_format(&cooked) {
+            return Some((format, cooked));
+        }
+    }
+    None
+}
+
+// The container of a volume stored in XA sectors, when `format` names it.
+#[cfg(any(feature = "macintosh", feature = "dos"))]
+fn open_xa_framed(
+    data: &[u8],
+    path: &str,
+    prefix: &str,
+    depth: u32,
+    options: LoaderOptions,
+    format: Option<ContainerFormat>,
+) -> Option<Result<Box<dyn Container>>> {
+    format?;
+    let (cooked_format, cooked) = xa_framed_volume(data)?;
+    (format == Some(cooked_format))
+        .then(|| open_container_internal(&cooked, path, prefix, depth, options, format))
+}
+
+#[cfg(all(feature = "macintosh", not(feature = "dos")))]
+fn with_iso_side(primary: Box<dyn Container>, _data: &[u8], _depth: u32) -> Box<dyn Container> {
+    primary
 }
 
 /// Detect the container format from a path hint and optional file bytes.
@@ -1900,7 +2066,8 @@ pub fn detect_format(path: &str, data: Option<&[u8]>) -> Option<ContainerFormat>
         feature = "macintosh",
         feature = "next",
         feature = "beos",
-        feature = "lisa"
+        feature = "lisa",
+        feature = "game"
     ))]
     macro_rules! try_format {
         ($check:expr, $format:expr) => {
@@ -1908,6 +2075,15 @@ pub fn detect_format(path: &str, data: Option<&[u8]>) -> Option<ContainerFormat>
                 return Some($format);
             }
         };
+    }
+
+    // An NRG image is told by its footer and chunk chain at the end of the
+    // file. Its start is whatever the first track holds, often a complete
+    // ISO 9660 volume, so it is probed before every format that is told by
+    // its start, whatever the extension hints at.
+    #[cfg(feature = "dos")]
+    if is_nrg_image(data) {
+        return Some(ContainerFormat::Nrg);
     }
 
     // If we have an extension hint, try that format first (optimistic probe)
@@ -1946,7 +2122,7 @@ pub fn detect_format(path: &str, data: Option<&[u8]>) -> Option<ContainerFormat>
             ContainerFormat::Lha => try_format!(is_lha_archive, ContainerFormat::Lha),
             #[cfg(feature = "amiga")]
             ContainerFormat::Adf => try_format!(is_adf_image, ContainerFormat::Adf),
-            #[cfg(all(feature = "dos", feature = "__backend_dos_rar"))]
+            #[cfg(feature = "dos")]
             ContainerFormat::Rar => try_format!(is_rar_archive, ContainerFormat::Rar),
             #[cfg(feature = "macintosh")]
             ContainerFormat::Hfs => {
@@ -2158,7 +2334,6 @@ pub fn detect_format(path: &str, data: Option<&[u8]>) -> Option<ContainerFormat>
         if let Some(format) = optical_disc_format(data) {
             return Some(format);
         }
-        #[cfg(feature = "__backend_dos_rar")]
         if is_rar_archive(data) {
             return Some(ContainerFormat::Rar);
         }
@@ -2186,6 +2361,12 @@ pub fn detect_format(path: &str, data: Option<&[u8]>) -> Option<ContainerFormat>
     #[cfg(feature = "common")]
     if is_embedded_zip_archive(data) {
         return Some(ContainerFormat::Zip);
+    }
+
+    // Last: only when nothing claims the bytes as they are.
+    #[cfg(any(feature = "macintosh", feature = "dos"))]
+    if let Some((format, _)) = xa_framed_volume(data) {
+        return Some(format);
     }
 
     None
@@ -2228,6 +2409,119 @@ fn path_matches_prefix(entry_path: &str, filter: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(all(feature = "std", feature = "dos", feature = "common"))]
+    fn toast_fixture(name: &str) -> Vec<u8> {
+        use std::io::Read;
+        let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("testdata/toast")
+            .join(name);
+        let mut data = Vec::new();
+        flate2::read::GzDecoder::new(fs::File::open(path).unwrap())
+            .read_to_end(&mut data)
+            .unwrap();
+        data
+    }
+
+    #[cfg(all(feature = "std", feature = "dos", feature = "common"))]
+    #[test]
+    fn xa_framed_volume_is_found_only_in_the_cooked_view() {
+        let plain = toast_fixture("iso-joliet.toast.gz");
+        assert!(xa_framed_volume(&plain).is_none());
+        for name in ["iso-joliet.xa2056.toast.gz", "iso-joliet.m2-2336.toast.gz"] {
+            let framed = toast_fixture(name);
+            assert_eq!(disc_volume_format(&framed), None, "{name}");
+            let (format, cooked) = xa_framed_volume(&framed).unwrap();
+            assert_eq!(format, ContainerFormat::Iso9660, "{name}");
+            assert!(cooked == plain, "{name}");
+            // Whatever the name hints at, and only after every other probe.
+            for path in ["a.toast", "a.iso", "a.zip", "a"] {
+                assert_eq!(
+                    detect_format(path, Some(&framed)),
+                    Some(ContainerFormat::Iso9660),
+                    "{name} as {path}"
+                );
+            }
+        }
+        // Raw 2352-byte sectors carry a sync pattern and are read as such.
+        let raw = toast_fixture("iso-joliet.m2.toast.gz");
+        assert_eq!(disc_volume_format(&raw), Some(ContainerFormat::Iso9660));
+        assert!(xa_framed_volume(&raw).is_none());
+    }
+
+    #[cfg(all(
+        feature = "std",
+        feature = "dos",
+        feature = "common",
+        feature = "macintosh"
+    ))]
+    #[test]
+    fn xa_framed_volume_beyond_the_probed_head_keeps_its_format() {
+        use crate::formats::cd_sector::{XA_HEAD_SECTORS, XA_SECTOR_SIZES};
+        for name in [
+            "apm-hfs.toast.gz",
+            "apm-hfsplus.toast.gz",
+            "apm-ddm2048.toast.gz",
+            "hfs-bare.toast.gz",
+            "hybrid-concat.toast.gz",
+            "hybrid-nomap.toast.gz",
+            "hybrid-shared.toast.gz",
+            "udf.toast.gz",
+            "udf-bridge.toast.gz",
+        ] {
+            let plain = toast_fixture(name);
+            assert!(plain.len() > XA_HEAD_SECTORS * 2048, "{name}");
+            let expected = disc_volume_format(&plain);
+            assert!(expected.is_some(), "{name}");
+            for size in XA_SECTOR_SIZES {
+                let mut framed = Vec::new();
+                for sector in plain.chunks_exact(2048) {
+                    framed.extend_from_slice(&[0, 0, 8, 0, 0, 0, 8, 0]);
+                    framed.extend_from_slice(sector);
+                    framed.resize(framed.len() + size - 2056, 0);
+                }
+                let (format, cooked) = xa_framed_volume(&framed).unwrap();
+                assert_eq!(Some(format), expected, "{name} in {size}");
+                assert!(cooked == plain, "{name} in {size}");
+
+                // A volume that only shows behind the head is not looked for.
+                let hidden = [vec![0; XA_HEAD_SECTORS * size], framed].concat();
+                assert!(xa_framed_volume(&hidden).is_none(), "{name} in {size}");
+            }
+        }
+    }
+
+    #[cfg(all(
+        feature = "std",
+        feature = "dos",
+        feature = "common",
+        feature = "macintosh"
+    ))]
+    #[test]
+    fn xa_framed_partition_map_opens_from_its_user_data() {
+        let options = LoaderOptions::default();
+        let names = |data: &[u8]| {
+            let container =
+                open_container_internal(data, "a.toast", "a", 8, options, None).unwrap();
+            assert_eq!(container.info().format, ContainerFormat::Apm);
+            let mut names = Vec::new();
+            container
+                .visit(&mut |entry| {
+                    names.push((entry.path.to_string(), entry.data.len()));
+                    Ok(true)
+                })
+                .unwrap();
+            names
+        };
+        let plain = names(&toast_fixture("apm-map2048.toast.gz"));
+        assert_eq!(plain, [("a/Mac_OS_X".to_string(), 47_104)]);
+        for name in [
+            "apm-map2048.xa2056.toast.gz",
+            "apm-map2048.m2-2336.toast.gz",
+        ] {
+            assert_eq!(names(&toast_fixture(name)), plain, "{name}");
+        }
+    }
 
     #[cfg(any(feature = "common", feature = "xz"))]
     #[test]

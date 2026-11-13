@@ -2415,3 +2415,43 @@ available, so no additional real-data check was made.
   say so.
 - 6.6 "Grow": how many units' worth of contents are moved is left
   implicit (the u units of the old block suffice).
+
+**From the end-to-end tests (container, PPMd, LZ and filter layers
+together).**
+
+- 13.2 says the 222-byte payload of V7 and V7b "defines a two-channel
+  delta filter". The filter layer recognises the program that this
+  payload defines as the standard **audio** program of
+  `rar29-filters.md` 9.1 (216 program bytes; the delta program has 29
+  and could not fill a payload of this size), run with two channels.
+  Both vectors give the stated final CRC-32 (`0x43195E29`,
+  `0xB1CF103F`), so only the word is wrong: it should say audio.
+- Three archives of the verification set that are variants of V7b are
+  rejected, although `unar` extracts them with the declared CRC-32
+  (two with U = 132 and `0xB1CF103F`, one with U = 64). In each the
+  second record reuses the audio program **without a register field**
+  (flags `0x00` or `0x01`), so R0, the channel count, is its default 0.
+  That is corrupt input by `rar29-filters.md` 9.2 and decision F11
+  (audio needs 1 to 254 channels). `unar` accepts a count of 0 and
+  returns what the previous run left in its memory (section 22 item 9
+  there), which here evidently is what the checksum expects. The
+  rejection was kept; see the note in `rar29-filters.md`. These
+  archives should not be listed as "must decode".
+
+**Speed (black-box comparison with the reader this one replaces).**
+
+- The first version decoded PPMd blocks 1.6 to 2.1 times slower. The
+  piecewise arena of section 14 item 1 was not the cause: with one
+  piece covering the whole arena the time changed by a few percent
+  only. What cost time was reading a context field by field and its
+  states one at a time, each read finding its piece again, and above
+  all the test "is this symbol masked" as a branch inside the two
+  passes of 8.4, which the processor cannot predict. The model now
+  reads a context's unit once, looks at the n states of a context as
+  one run of 6n bytes (copied out first in the rare case that the run
+  lies in two pieces), and counts a masked state as frequency 0
+  without branching. Results are unchanged for every vector and for
+  the PPMd archives of the corpus; the time is now within 1.25 times
+  that of the earlier reader. Section 6.8 already allows all of it; a
+  hint in 8.4 that the masked test is the hot spot would have saved
+  the detour.

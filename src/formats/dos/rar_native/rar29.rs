@@ -83,44 +83,76 @@ fn out_of_memory() -> Error {
 // Section 3: most significant bit first. `bit` is 0..=7.
 struct BitReader<'a> {
     data: &'a [u8],
-    byte: usize,
-    bit: u32,
+    // The next byte of `data` to enter `buf`.
+    next: usize,
+    // The `avail` unread bits before `data[next]`, from the top down. Bits
+    // below them are zero or a preview of the bytes from `next` on.
+    buf: u64,
+    avail: u32,
 }
 
 impl<'a> BitReader<'a> {
     fn new(data: &'a [u8]) -> Self {
         Self {
             data,
-            byte: 0,
-            bit: 0,
+            next: 0,
+            buf: 0,
+            avail: 0,
+        }
+    }
+
+    // Afterwards at least 56 bits are available, or all that are left.
+    #[inline]
+    fn refill(&mut self) {
+        let rest = self.data.get(self.next..).unwrap_or_default();
+        match rest.first_chunk::<8>() {
+            Some(chunk) if self.avail < 64 => {
+                self.buf |= u64::from_be_bytes(*chunk) >> self.avail;
+                let bytes = (63 - self.avail) >> 3;
+                self.next += bytes as usize;
+                self.avail += bytes * 8;
+            }
+            _ => self.refill_tail(),
+        }
+    }
+
+    #[cold]
+    fn refill_tail(&mut self) {
+        while self.avail <= 56 {
+            let Some(&byte) = self.data.get(self.next) else {
+                break;
+            };
+            self.buf |= u64::from(byte) << (56 - self.avail);
+            self.avail += 8;
+            self.next += 1;
         }
     }
 
     // The next 16 bits; bits beyond the data read as zero (section 3).
-    fn peek16(&self) -> u32 {
-        let value = match self.data.get(self.byte..) {
-            Some([a, b, c, ..]) => u32::from(*a) << 16 | u32::from(*b) << 8 | u32::from(*c),
-            Some([a, b]) => u32::from(*a) << 16 | u32::from(*b) << 8,
-            Some([a]) => u32::from(*a) << 16,
-            _ => 0,
-        };
-        (value >> (8 - self.bit)) & 0xFFFF
+    #[inline(always)]
+    fn peek16(&mut self) -> u32 {
+        if self.avail < 16 {
+            self.refill();
+        }
+        (self.buf >> 48) as u32
     }
 
     // `count` is at most 16. Only bits actually consumed can run past the
     // end of the data.
+    #[inline(always)]
     fn consume(&mut self, count: u32) -> Result<()> {
-        let bits = self.bit + count;
-        let byte = self.byte + (bits >> 3) as usize;
-        let bit = bits & 7;
-        if byte > self.data.len() || (byte == self.data.len() && bit != 0) {
-            return Err(truncated());
+        if count > self.avail {
+            self.refill();
+            if count > self.avail {
+                return Err(truncated());
+            }
         }
-        self.byte = byte;
-        self.bit = bit;
+        self.buf <<= count;
+        self.avail -= count;
         Ok(())
     }
 
+    #[inline]
     fn read(&mut self, count: u32) -> Result<u32> {
         if count == 0 {
             return Ok(0);
@@ -130,24 +162,30 @@ impl<'a> BitReader<'a> {
         Ok(value)
     }
 
-    // The bits consumed so far in a byte were read from it, so it exists.
+    // To the next byte boundary of the data.
     fn align(&mut self) {
-        if self.bit != 0 {
-            self.bit = 0;
-            self.byte += 1;
+        let skip = self.avail & 7;
+        self.buf <<= skip;
+        self.avail -= skip;
+    }
+
+    // The byte at the read position, which must be a byte boundary.
+    fn peek_byte(&mut self) -> Option<u8> {
+        if self.avail < 8 {
+            self.refill();
         }
+        (self.avail >= 8 && self.avail & 7 == 0).then_some((self.buf >> 56) as u8)
     }
 }
 
 // Whole bytes for the PPMd range decoder (section 9); only used at a byte
 // boundary.
 impl ByteSource for BitReader<'_> {
+    #[inline]
     fn next_byte(&mut self) -> Option<u8> {
-        if self.bit != 0 {
-            return None;
-        }
-        let byte = *self.data.get(self.byte)?;
-        self.byte += 1;
+        let byte = self.peek_byte()?;
+        self.buf <<= 8;
+        self.avail -= 8;
         Some(byte)
     }
 }
@@ -228,6 +266,7 @@ impl Code {
     }
 
     // 4.2: bits that match no assigned code are corrupt input.
+    #[inline(always)]
     fn decode(&self, reader: &mut BitReader<'_>) -> Result<usize> {
         let bits = reader.peek16();
         let entry = self.quick[(bits >> (16 - QUICK_BITS)) as usize];
@@ -235,6 +274,12 @@ impl Code {
             reader.consume(u32::from(entry & 15))?;
             return Ok(usize::from(entry >> 4));
         }
+        self.decode_long(bits, reader)
+    }
+
+    // Codes longer than QUICK_BITS.
+    #[inline(never)]
+    fn decode_long(&self, bits: u32, reader: &mut BitReader<'_>) -> Result<usize> {
         for len in QUICK_BITS as usize + 1..16 {
             let code = bits >> (16 - len);
             let Some(index) = code.checked_sub(self.first[len]) else {
@@ -438,7 +483,9 @@ impl Run<'_> {
         let mut first = true;
         loop {
             // 11.3: a filter failure is never part of a missing end marker.
-            self.run_ready()?;
+            if self.g.position >= self.next_ready {
+                self.run_ready()?;
+            }
             if self.g.position >= self.flush_at {
                 self.flush()?;
             }
@@ -564,6 +611,7 @@ impl Run<'_> {
         Ok(())
     }
 
+    #[inline]
     fn literal(&mut self, byte: u8) -> core::result::Result<(), Failure> {
         if self.g.position >= self.end {
             return Err(corrupt("RAR: data continues past the declared size").into());
@@ -628,7 +676,7 @@ impl Run<'_> {
     // 6.2
     fn block_header(&mut self) -> core::result::Result<(), Failure> {
         self.reader.align();
-        let Some(&first) = self.reader.data.get(self.reader.byte) else {
+        let Some(first) = self.reader.peek_byte() else {
             return Err(truncated().into());
         };
         if first & 0x80 != 0 {
@@ -760,9 +808,17 @@ impl Run<'_> {
         if !self.g.has_codes {
             return Err(corrupt("RAR: LZ data without code tables").into());
         }
-        let symbol = self.g.main.decode(&mut self.reader)?;
+        let mut symbol = self.g.main.decode(&mut self.reader)?;
+        // A run of literals goes back to the caller only for its checks
+        // between items.
+        while symbol < 256 {
+            self.literal(symbol as u8)?;
+            if self.g.position >= self.next_ready.min(self.flush_at) {
+                return Ok(Step::Continue);
+            }
+            symbol = self.g.main.decode(&mut self.reader)?;
+        }
         match symbol {
-            0..=255 => self.literal(symbol as u8)?,
             // 8.6
             256 => {
                 if self.reader.read(1)? == 1 {
@@ -1147,6 +1203,34 @@ mod tests {
         let mut reader = BitReader::new(&data);
         let symbols: Vec<usize> = (0..4).map(|_| code.decode(&mut reader).unwrap()).collect();
         assert_eq!(symbols, [19, 2, 1, 3]);
+    }
+
+    #[test]
+    fn bit_reader_positions() {
+        let data = [0xA5, 0x3C, 0x0F, 0x80, 1, 2, 3, 4, 5, 6, 7];
+        let mut reader = BitReader::new(&data);
+        assert_eq!(reader.read(3).unwrap(), 0b101);
+        // Not at a byte boundary: no whole bytes.
+        assert_eq!(reader.next_byte(), None);
+        assert_eq!(reader.peek16(), 0x29E0);
+        reader.align();
+        assert_eq!(reader.peek_byte(), Some(0x3C));
+        assert_eq!(reader.next_byte(), Some(0x3C));
+        assert_eq!(reader.read(16).unwrap(), 0x0F80);
+        for byte in 1..=7 {
+            assert_eq!(reader.next_byte(), Some(byte));
+        }
+        // Bits beyond the data read as zero but cannot be consumed.
+        assert_eq!(reader.peek16(), 0);
+        assert_eq!(reader.next_byte(), None);
+        assert!(reader.consume(1).is_err());
+
+        let mut reader = BitReader::new(&[0xFF, 0x80]);
+        assert_eq!(reader.read(9).unwrap(), 0x1FF);
+        assert_eq!(reader.peek16(), 0);
+        assert!(reader.read(8).is_err());
+        assert_eq!(reader.read(7).unwrap(), 0);
+        assert!(reader.read(1).is_err());
     }
 
     #[test]

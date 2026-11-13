@@ -132,11 +132,10 @@ Public feature toggles in `Cargo.toml`:
 - `std`, `common`, `xz`, `macintosh`, `amiga`, `game`, `dos`, `next`, `beos`, `lisa`,
   `full`, `all`, `wasm`.
 
-Internal implementation toggles (not API contract):
+There are no internal backend toggles: every reader is native and part of its public
+feature.
 
-- `__backend_dos_rar`.
-
-What the features add (the internal toggle is enabled by `std`):
+What the features add:
 
 - `common` alone: ZIP, GZIP, BZIP2 and TAR, with native readers (`formats/common/zip.rs`,
   `gzip.rs`, `bzip2_container.rs`, `tar.rs`) over native inflate and bzip2 decoders
@@ -164,8 +163,9 @@ builds for `no_std` + `alloc` and is part of `amiga`.
 backend toggle either: their readers have no dependencies and build for `no_std` +
 `alloc`. All three are part of `full` and `wasm`. The DART decoder lives in `lisa`
 (`formats/lisa/image.rs`); `macintosh` uses it for DART images of Macintosh disks only
-when `lisa` is enabled too. CUE/BIN (`formats/dos/cue.rs`) is part of `dos` and builds
-for `no_std` + `alloc` as well.
+when `lisa` is enabled too. CUE/BIN (`formats/dos/cue.rs`) and Nero NRG
+(`formats/dos/nrg.rs`) are part of `dos` and build for `no_std` + `alloc` as well, and
+so does RAR (`formats/dos/rar.rs`, `formats/dos/rar_native/`).
 
 Design intent:
 
@@ -200,7 +200,7 @@ Design intent:
     method family. `lzh/` is written only from the prose specification in `docs/lha/`
     (clean-room; see its README).
 - `game/`: scumm, wad, pak, wolf3d
-- `dos/`: fat, mbr, gpt, iso9660, udf, rar, arj, cue
+- `dos/`: fat, mbr, gpt, iso9660, udf, rar, arj, cue, nrg
   - `iso9660.rs` reads ISO 9660 and High Sierra volumes, picks the last session of a
     multi-session image and lists El Torito boot images under `..eltorito/`.
     `udf.rs` reads UDF volumes (ECMA-167 as profiled by OSTA UDF 1.02 to 2.60):
@@ -211,13 +211,16 @@ Design intent:
   - `rar.rs` is the container glue for all three RAR layouts (RAR 1.3/1.4, RAR 1.50 to
     4.x, RAR 5): volume joining, the choice of decoder by unpack version, solid-chain
     state, size and checksum verification, skipped-entry diagnostics, and the search
-    for the archive inside a self-extracting executable. `rar_stream/` holds the
-    header parsers and the decoders. `decompress/rar15.rs`, `rar20.rs`, `rar29.rs`
-    (RAR 2.9 blocks, window, members and solid groups) and `ppmd.rs` (the PPMd model
-    and range decoder of RAR 2.9), like the RAR 1.3/1.4 container, are written only
-    from the prose specifications in `docs/rar/` (clean-room; see its README). The
-    header parsers, the RAR 2.9 filter programs (`vm.rs`) and the RAR 5 decoder are
-    vendored.
+    for the archive inside a self-extracting executable. It reads the RAR 1.3/1.4
+    container itself and drives the modules of `rar_native/` for everything else:
+    `container4.rs` and `container5.rs` walk the RAR 1.50 to 4.x and RAR 5 containers
+    (members, their pieces in the volumes, classification, solid-chain plans,
+    BLAKE2sp), `rar15.rs`, `rar20.rs`, `rar29.rs` (with the PPMd model `ppmd.rs` and
+    the filter programs and virtual machine `filters.rs`) and `rar5.rs` are the
+    decoders, and `extract.rs` is a test-only end-to-end path with the regression
+    suite of the specifications' vectors. All of it is written only from the prose
+    specifications in `docs/rar/` (clean-room; see its README), has no dependencies
+    and builds for `no_std` + `alloc`; there is no vendored RAR code.
   - `cue.rs` parses a cue sheet and cuts the track files it names into one entry per
     track (data cooked to 2048-byte sectors, audio as little-endian PCM). It never opens
     a file itself: candidate names go to a lookup closure
@@ -227,6 +230,16 @@ Design intent:
     told from its name, so `visit_container_recursive` keeps a `cue::SheetIndex` per
     container that holds back and hides the track files of the sheets it opens. Written
     only from the prose specification in `docs/cue/` (clean-room; see its README).
+  - `nrg.rs` reads Nero NRG images: it validates the footer at the end of the file,
+    walks the chunk chain it points to and yields each track as the same kind of entry
+    as `cue.rs` (`trackNN.img`, `trackNN.pcm`), holding the cooked data of each
+    readable track and nothing else of the image. The loader does not run content
+    detection on a `trackNN.pcm` entry of either reader. The choice of the user-data offset in a raw
+    sector is shared through `formats/cd_sector.rs`. `detect_format` probes NRG before
+    every other format, extension hints included, because the image starts with
+    whatever its first track holds; the whole image is never given to the ISO 9660
+    reader. Written only from the prose specification in `docs/nrg/` (clean-room; see
+    its README).
 - `next/`: disklabel, ufs
   - `disklabel.rs` finds a checksummed NeXT disk label at one of its fixed offsets and
     yields each partition's bytes as a plain entry; it knows nothing about file systems,
@@ -250,7 +263,16 @@ Design intent:
   - The loader probes the NeXT label, UFS, BFS and Lisa (in that order) before HFS and
     the boot-sector formats (FAT, GPT, MBR), whose signatures their boot areas can
     imitate; a Lisa disk in a DiskCopy 4.2 wrapper is not an HFS image.
-- `cd_sector.rs`: raw 2352-byte CD sector access shared by hfs, iso9660 and udf
+- `cd_sector.rs`: raw 2352-byte CD sector access shared by hfs, iso9660 and udf, and
+  the test and cooking of CD-ROM XA sectors without sync and header (2056 and 2336
+  bytes). The loader applies the latter (`xa_framed_volume` in `loader.rs`): when no
+  probe matches a file as it is, the Macintosh and optical probes run on its user data,
+  and the container is then opened from that cooked copy.
+- `hybrid.rs` (`macintosh` and `dos` together): wraps the `Apm` or `Hfs` container of
+  a hybrid disc and lists the ISO 9660 volume of the same bytes after it as one more
+  partition entry, `iso9660.img` (the image with its system area blanked, so that it
+  opens as ISO 9660). The loader applies it wherever it opens those two formats; the
+  readers themselves do not know about each other.
 
 Each implementation provides container open/visit behavior and metadata extraction matching core contracts.
 

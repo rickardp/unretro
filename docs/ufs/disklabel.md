@@ -46,7 +46,8 @@ The document contains no program code and no pseudo-code.
   - **OS42-CD**: the first 8 MiB of the OPENSTEP 4.2 user CD-ROM (for
     NeXT, Intel, SPARC and PA-RISC machines).
 - No hard disk image, no magneto-optical disk image, and no label of
-  version `NeXT` or `dlV2` was examined (section 15).
+  version `NeXT` or `dlV2` was examined when this document was written;
+  section 15 lists what later specimens showed.
 
 ### 1.2 Evidence labels
 
@@ -678,7 +679,12 @@ Nothing in this section is to be imitated.
 
 ## 15. Open points
 
-1. **Intel hard disks** (section 8) are specified from sources only. A
+1. **Intel hard disks** (section 8) are specified from sources only.
+   Thirteen preinstalled virtual-machine disks found online (NEXTSTEP
+   3.3, OPENSTEP 4.2, Rhapsody DR1 and DR2) were examined and none has
+   a PC partition table entry: each uses the whole disk, with `55 aa`
+   at byte 510, an empty table and labels at bytes 7680, 15360 and
+   23040. A disk with a type 0xA7 partition has not been found. A
    real NEXTSTEP 3.3, OPENSTEP 4.x or Rhapsody hard disk image for Intel
    should be used to confirm: copies at partition bytes 7680, 15360 and
    23040; `label_blkno` absolute; `base` of `a` equal to the PC
@@ -692,9 +698,14 @@ Nothing in this section is to be imitated.
    with the rules as written, an unscaled `base` would place partition
    `a` at partition byte `front` × S + *relsect* × (S − 512) instead of
    `front` × S.
-2. **Versions 1 and 2** (`NeXT`, `dlV2`) were not seen. A NeXTSTEP 0.8
-   to 2.x disk or optical image should confirm the checksum position
-   (bytes 7238 to 7239) and range (bytes 0 to 7237).
+2. **Version 2** (`dlV2`) is CONFIRMED since this document was written:
+   the NeXTSTEP 0.8 hard disk image for the Previous emulator
+   (archive.org item `nextstep-0.8-hd-image-with-previous.-7z`) carries
+   `dlV2` labels at bytes 0, 7680, 15360 and 23040, and a reader written
+   from this document accepts their checksum (position 7238 to 7239,
+   range 0 to 7237) and reads the volume. **Version 1** (`NeXT`) was
+   not seen and probably exists on pre-release media only: the earliest
+   released system, 0.8, already writes `dlV2`.
 3. **Magneto-optical disks**: whether all four copies sit at multiples
    of 8192 bytes is unknown; copy 0 at byte 0 is expected.
 4. **Hard disks of NeXT machines with 512-byte sectors and S = 1024**

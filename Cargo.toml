@@ -68,7 +68,6 @@ std = [
     "dep:memmap2",
     "dep:xattr",
     "dep:libc",
-    "__backend_dos_rar",
 ]
 no_std = []
 
@@ -85,9 +84,6 @@ dos = []
 next = []
 beos = []
 lisa = []
-
-# Internal backend capability toggles (not part of public API contract).
-__backend_dos_rar = []
 
 # All features
 full = ["common", "xz", "macintosh", "amiga", "game", "dos", "next", "beos", "lisa"]

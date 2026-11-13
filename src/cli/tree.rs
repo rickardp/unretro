@@ -399,6 +399,8 @@ fn format_name(format: &ContainerFormat) -> &'static str {
         #[cfg(feature = "dos")]
         ContainerFormat::CueBin => "CUE/BIN",
         #[cfg(feature = "dos")]
+        ContainerFormat::Nrg => "NRG",
+        #[cfg(feature = "dos")]
         ContainerFormat::Udf => "UDF",
         #[cfg(feature = "next")]
         ContainerFormat::NextDisklabel => "NeXT Disklabel",

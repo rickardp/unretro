@@ -1,24 +1,14 @@
-use std::borrow::Cow;
-use std::sync::OnceLock;
+//! RAR archives: the `RE~^` container of RAR 1.3/1.4 read here, the `Rar!`
+//! containers and all decoders by the clean-room modules of `rar_native`
+//! (`docs/rar/`).
 
-use crate::formats::dos::arj::decode_cp437;
-use crate::formats::dos::rar_native;
-use crate::formats::dos::rar_stream::crc32::crc32;
-use crate::formats::dos::rar_stream::decompress::Rar29Decoder;
-use crate::formats::dos::rar_stream::decompress::rar5::Rar5Decoder;
-use crate::formats::dos::rar_stream::decompress::rar15::Rar15Decoder;
-use crate::formats::dos::rar_stream::decompress::rar20::Rar20Decoder;
-use crate::formats::dos::rar_stream::parsing::archive_header::ArchiveHeaderParser;
-use crate::formats::dos::rar_stream::parsing::file_header::{FileHeader, FileHeaderParser};
-use crate::formats::dos::rar_stream::parsing::rar5::archive_header::Rar5ArchiveHeaderParser;
-use crate::formats::dos::rar_stream::parsing::rar5::file_header::{
-    Rar5FileHeader, Rar5FileHeaderParser,
-};
-use crate::formats::dos::rar_stream::parsing::rar5::read_vint;
-
-use crate::compat::FastMap;
+use crate::compat::{Cow, FastMap, String, ToString, Vec, format, vec};
 use crate::error::{Error, Result};
 use crate::format::ContainerFormat;
+use crate::formats::dos::arj::decode_cp437;
+use crate::formats::dos::rar_native::rar15::Rar15Decoder;
+use crate::formats::dos::rar_native::rar20::Rar20Decoder;
+use crate::formats::dos::rar_native::{container4, container5, rar5, rar29};
 use crate::sanitize_archive_path;
 use crate::{Container, ContainerInfo, Entry, Metadata};
 
@@ -28,16 +18,6 @@ const RAR5_MAGIC: [u8; 8] = [0x52, 0x61, 0x72, 0x21, 0x1A, 0x07, 0x01, 0x00];
 
 // RAR 1.3/1.4 container, "RE~^" (docs/rar/old-container.md).
 const OLD_MAGIC: [u8; 4] = [0x52, 0x45, 0x7E, 0x5E];
-
-const RAR4_FILE_HEAD: u8 = 0x74;
-
-const RAR4_ENDARC_HEAD: u8 = 0x7B;
-
-const RAR4_METHOD_STORE: u8 = 0x30;
-
-const RAR5_FILE_HEADER: u64 = 2;
-
-const RAR5_END_HEADER: u64 = 5;
 
 /// Maximum allowed compression ratio (unpacked / packed).
 /// Legitimate data rarely exceeds ~20:1; zip-bomb-style payloads use
@@ -74,6 +54,43 @@ fn check_size_limit(unpacked_size: u64) -> core::result::Result<(), String> {
     Ok(())
 }
 
+// Packed and unpacked bytes of the current solid chain. A later member may
+// be tiny because it repeats earlier ones, so the ratio limit is applied to
+// the chain as a whole.
+#[derive(Default)]
+struct Ratio {
+    packed: u64,
+    unpacked: u64,
+}
+
+impl Ratio {
+    // The limits for a member of `packed` bytes declaring `size`; `fresh`:
+    // it starts a chain.
+    fn check(&mut self, fresh: bool, packed: u64, size: u64) -> core::result::Result<(), String> {
+        if fresh {
+            *self = Self::default();
+        }
+        let packed = self.packed.saturating_add(packed);
+        let unpacked = self.unpacked.saturating_add(size);
+        check_size_limit(size)?;
+        check_ratio_limit(packed, unpacked)?;
+        *self = Self { packed, unpacked };
+        Ok(())
+    }
+
+    // For a member of unknown size: the most it may decode to.
+    fn allowance(&mut self, fresh: bool, packed: u64) -> u64 {
+        if fresh {
+            *self = Self::default();
+        }
+        self.packed = self.packed.saturating_add(packed);
+        let base = self.packed.max(RATIO_CHECK_MIN_PACKED);
+        base.saturating_mul(MAX_COMPRESSION_RATIO)
+            .saturating_sub(self.unpacked)
+            .min(crate::MAX_DECOMPRESSED_SIZE)
+    }
+}
+
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum Layout {
     // RAR 1.3/1.4, "RE~^".
@@ -81,18 +98,6 @@ enum Layout {
     // RAR 1.50 to 4.x.
     Rar4,
     Rar5,
-}
-
-fn detect_layout(data: &[u8]) -> Option<Layout> {
-    if data.starts_with(&RAR5_MAGIC) {
-        Some(Layout::Rar5)
-    } else if data.starts_with(&RAR4_MAGIC) {
-        Some(Layout::Rar4)
-    } else if is_old_archive(data) {
-        Some(Layout::Old)
-    } else {
-        None
-    }
 }
 
 // A self-extracting archive is searched for this far into the executable.
@@ -117,79 +122,50 @@ fn is_executable(data: &[u8]) -> bool {
     MAGICS.iter().any(|magic| data.starts_with(magic))
 }
 
-// The archive header check of docs/rar/rar4-container.md section 3.2, for
-// a signature at the start of `data`.
-fn rar4_archive_header_ok(data: &[u8]) -> bool {
-    let Some(header) = data.get(7..20) else {
-        return false;
-    };
-    let size = usize::from(u16::from_le_bytes([header[5], header[6]]));
-    if header[2] != 0x73 || size < 13 || 7 + size > data.len() {
-        return false;
+fn old_signature_offset(data: &[u8]) -> Option<usize> {
+    let last = data.len().min(SFX_SEARCH);
+    let mut candidates = 0;
+    let mut at = 1;
+    while at < last && candidates < SFX_CANDIDATES {
+        at += data
+            .get(at..last)?
+            .iter()
+            .position(|&byte| byte == OLD_MAGIC[0])?;
+        let rest = data.get(at..)?;
+        if rest.starts_with(&OLD_MAGIC) {
+            candidates += 1;
+            if is_old_archive(rest) {
+                return Some(at);
+            }
+        }
+        at += 1;
     }
-    let stored = u16::from_le_bytes([header[0], header[1]]);
-    // The fixed part; a writer that covers the whole header is tolerated.
-    stored == crc32(&header[2..13]) as u16 || stored == crc32(&data[9..7 + size]) as u16
-}
-
-// The first block after a RAR5 signature at the start of `data` is sound
-// and is an archive or encryption header (docs/rar/rar5-container.md
-// section 4).
-fn rar5_first_block_ok(data: &[u8]) -> bool {
-    let Some(block) = data.get(8..) else {
-        return false;
-    };
-    let Some((size, size_len)) = block.get(4..).and_then(read_vint) else {
-        return false;
-    };
-    let Some(end) = usize::try_from(size)
-        .ok()
-        .and_then(|size| size.checked_add(4 + size_len))
-    else {
-        return false;
-    };
-    if size_len > 3 || size < 2 || end > block.len() {
-        return false;
-    }
-    let stored = u32::from_le_bytes([block[0], block[1], block[2], block[3]]);
-    stored == crc32(&block[4..end])
-        && matches!(read_vint(&block[4 + size_len..end]), Some((1 | 4, _)))
+    None
 }
 
 // Where the archive starts in `data`, and its layout: at the first byte,
 // or behind the module of a self-extracting archive.
 fn locate(data: &[u8]) -> Option<(usize, Layout)> {
-    if let Some(layout) = detect_layout(data) {
-        return Some((0, layout));
+    if data.starts_with(&RAR5_MAGIC) {
+        return Some((0, Layout::Rar5));
+    }
+    if data.starts_with(&RAR4_MAGIC) {
+        return Some((0, Layout::Rar4));
+    }
+    if is_old_archive(data) {
+        return Some((0, Layout::Old));
     }
     if !is_executable(data) {
         return None;
     }
-    let mut candidates = 0;
-    let last = data.len().min(SFX_SEARCH);
-    let mut at = 1;
-    while at < last && candidates < SFX_CANDIDATES {
-        // Both signatures start with 'R'.
-        at += data[at..last].iter().position(|&byte| byte == b'R')?;
-        let rest = &data[at..];
-        let found = if rest.starts_with(&RAR5_MAGIC) {
-            candidates += 1;
-            rar5_first_block_ok(rest).then_some(Layout::Rar5)
-        } else if rest.starts_with(&RAR4_MAGIC) {
-            candidates += 1;
-            rar4_archive_header_ok(rest).then_some(Layout::Rar4)
-        } else if rest.starts_with(&OLD_MAGIC) {
-            candidates += 1;
-            is_old_archive(rest).then_some(Layout::Old)
-        } else {
-            None
-        };
-        if let Some(layout) = found {
-            return Some((at, layout));
-        }
-        at += 1;
-    }
-    None
+    [
+        (container5::signature_offset(data), Layout::Rar5),
+        (container4::signature_offset(data), Layout::Rar4),
+        (old_signature_offset(data), Layout::Old),
+    ]
+    .into_iter()
+    .filter_map(|(offset, layout)| Some((offset?, layout)))
+    .min_by_key(|&(offset, _)| offset)
 }
 
 #[must_use]
@@ -206,8 +182,7 @@ struct RarEntry {
 pub struct RarContainer {
     prefix: String,
     entries: Vec<RarEntry>,
-    /// Lazily built on first `get_file()` call.
-    path_index: OnceLock<FastMap<String, usize>>,
+    path_index: FastMap<String, usize>,
     // Why some entries are missing, if any are.
     skipped: Option<String>,
 }
@@ -226,88 +201,126 @@ impl RarContainer {
         _depth: u32,
         next_volume: &dyn Fn(usize) -> Option<Vec<u8>>,
     ) -> Result<Self> {
-        let (start, layout) = locate(data)
+        let (_, layout) = locate(data)
             .ok_or_else(|| Error::invalid_format("Invalid RAR archive: no RAR signature"))?;
+        let mut first = probe(layout, data)?;
+        let mut first_parsed = Some(core::mem::replace(&mut first.parsed, Parsed::None));
 
-        let mut reader = SetReader::new(layout);
-        let mut more = reader.read_volume(&data[start..])?;
+        // Runs of consecutive volumes; a missing volume separates two.
+        let mut runs = vec![Run {
+            base: 0,
+            count: 1,
+            after: Vec::new(),
+        }];
+        let mut later: Vec<Vec<u8>> = Vec::new();
+        let mut last = first;
         let mut number = 0;
-        while !reader.stop && (more != Next::None || reader.pending.is_some()) {
+        while let Some(run) = runs.last_mut()
+            && !last.stop
+            && (last.next != Next::None || last.open)
+        {
             // A volume that may or may not be the last: a missing or foreign
             // next file just ends the set.
-            let optional = more == Next::Possible && reader.pending.is_none();
+            let optional = last.next == Next::Possible && !last.open;
             number += 1;
             let mut volume = (number <= MAX_VOLUMES)
                 .then(|| next_volume(number))
                 .flatten();
+            let mut gap = false;
             if volume.is_none() {
                 // One missing volume does not hide the ones after it: the
                 // files that lie entirely in them can still be read.
-                let later = (number + 1..=number + MISSING_VOLUME_LOOKAHEAD)
+                let found = (number + 1..=number + MISSING_VOLUME_LOOKAHEAD)
                     .filter(|&later| later <= MAX_VOLUMES)
                     .find_map(|later| Some((later, next_volume(later)?)))
                     .filter(|(_, volume)| locate(volume).is_some_and(|(_, found)| found == layout));
-                match reader.pending.take() {
-                    Some(pending) => {
-                        reader.skipped.note(format!(
-                            "'{}' continues in the next volume, which is not available",
-                            pending.name
-                        ));
-                        reader.dropped = Some(pending.name);
+                // A file waiting for the volume reports itself.
+                if !last.open {
+                    if found.is_some() {
+                        run.after
+                            .push(format!("volume {} of the set is not available", number + 1));
+                    } else if !optional {
+                        run.after
+                            .push("the next volume of the set is not available".to_string());
                     }
-                    None if later.is_some() => reader
-                        .skipped
-                        .note(format!("volume {} of the set is not available", number + 1)),
-                    None if optional => {}
-                    None => reader
-                        .skipped
-                        .note("the next volume of the set is not available".to_string()),
                 }
-                let Some((later, found)) = later else {
+                let Some((later, found)) = found else {
                     break;
                 };
-                // Members of a chain may have been in the missing volume.
-                reader.chain_broken = true;
                 number = later;
                 volume = Some(found);
+                gap = true;
             }
             let Some(volume) = volume else {
                 break;
             };
-            let Some((start, _)) = locate(&volume).filter(|&(_, found)| found == layout) else {
-                if !optional {
-                    reader.skipped.note(format!(
-                        "volume {} of the set is not a matching RAR archive",
-                        number + 1
-                    ));
-                }
-                break;
+            let probed = match locate(&volume) {
+                Some((_, found)) if found == layout => probe(layout, &volume),
+                _ => Err(Error::invalid_format("not a matching RAR archive")),
             };
-            more = match reader.read_volume(&volume[start..]) {
-                Ok(more) => more,
-                Err(err) => {
-                    reader
-                        .skipped
-                        .note(format!("volume {} of the set: {err}", number + 1));
+            match probed {
+                Ok(probed) => last = probed,
+                Err(_) => {
+                    if !optional {
+                        run.after.push(format!(
+                            "volume {} of the set is not a matching RAR archive",
+                            number + 1
+                        ));
+                    }
                     break;
                 }
-            };
-        }
-        if let Some(pending) = reader.pending.take() {
-            reader
-                .skipped
-                .note(format!("'{}' is incomplete", pending.name));
+            }
+            later.push(volume);
+            if gap {
+                runs.push(Run {
+                    base: number,
+                    count: 1,
+                    after: Vec::new(),
+                });
+            } else {
+                run.count += 1;
+            }
         }
 
-        let mut entries = reader.entries;
+        let mut volumes: Vec<&[u8]> = Vec::with_capacity(1 + later.len());
+        volumes.push(data);
+        volumes.extend(later.iter().map(Vec::as_slice));
+        let mut out = Output {
+            input_len: volumes.iter().map(|volume| volume.len() as u64).sum(),
+            ..Output::default()
+        };
+        let mut next = 0;
+        for (index, run) in runs.into_iter().enumerate() {
+            let Some(run_volumes) = volumes.get(next..next + run.count) else {
+                break;
+            };
+            next += run.count;
+            // The probe of a single volume is its reading.
+            let parsed = first_parsed
+                .take()
+                .filter(|_| run.count == 1)
+                .unwrap_or(Parsed::None);
+            match layout {
+                Layout::Old => read_old_run(&mut out, run_volumes, index > 0),
+                Layout::Rar4 => read_rar4_run(&mut out, run_volumes, run.base, parsed),
+                Layout::Rar5 => read_rar5_run(&mut out, run_volumes, parsed),
+            }
+            for message in run.after {
+                out.skipped.note(message);
+            }
+        }
+
+        let mut entries = out.entries;
         // Sort for consistent ordering
         entries.sort_by(|a, b| a.path.cmp(&b.path));
+        let path_index =
+            crate::formats::build_path_index(entries.iter().enumerate().map(|(i, e)| (i, &e.path)));
 
         Ok(Self {
             prefix,
             entries,
-            path_index: OnceLock::new(),
-            skipped: reader.skipped.into_message(),
+            path_index,
+            skipped: out.skipped.into_message(),
         })
     }
 
@@ -335,12 +348,22 @@ enum VolumeName<'a> {
     Old(&'a str, &'a str, usize),
 }
 
+// Extensions of a self-extracting first volume.
+const SFX_EXTENSIONS: [&str; 2] = ["exe", "sfx"];
+
+fn is_sfx_extension(extension: &str) -> bool {
+    SFX_EXTENSIONS
+        .iter()
+        .any(|sfx| extension.eq_ignore_ascii_case(sfx))
+}
+
 fn parse_volume_name(name: &str) -> Option<VolumeName<'_>> {
     let (stem, extension) = name.rsplit_once('.')?;
     if extension.contains('/') {
         return None;
     }
-    if extension.eq_ignore_ascii_case("rar") {
+    let sfx = is_sfx_extension(extension);
+    if sfx || extension.eq_ignore_ascii_case("rar") {
         let digits_at = stem
             .rfind(|c: char| !c.is_ascii_digit())
             .map_or(0, |at| at + 1);
@@ -349,8 +372,14 @@ fn parse_volume_name(name: &str) -> Option<VolumeName<'_>> {
             && head.len() >= 5
             && head.is_char_boundary(head.len() - 5)
             && head[head.len() - 5..].eq_ignore_ascii_case(".part");
+        // The volumes after a self-extracting one end in `.rar`.
+        let tail = match (sfx, extension.bytes().any(|byte| byte.is_ascii_lowercase())) {
+            (false, _) => &name[stem.len()..],
+            (true, true) => ".rar",
+            (true, false) => ".RAR",
+        };
         return Some(if is_part {
-            VolumeName::Part(head, &stem[digits_at..], &name[stem.len()..])
+            VolumeName::Part(head, &stem[digits_at..], tail)
         } else {
             VolumeName::Old(stem, extension, 0)
         });
@@ -426,9 +455,6 @@ pub fn volume_before(name: &str) -> Option<String> {
     shifted_volume_name(name, false)
 }
 
-// Problems spelled out in the summary; the rest are counted.
-const SKIPPED_SHOWN: usize = 3;
-
 /// Names of the volumes through which a reader that starts earlier in the
 /// set reaches the file `name`, nearest first: it passes over up to
 /// `MISSING_VOLUME_LOOKAHEAD` missing volumes.
@@ -436,6 +462,48 @@ pub fn volumes_before(name: &str) -> impl Iterator<Item = String> {
     core::iter::successors(volume_before(name), |name| volume_before(name))
         .take(MISSING_VOLUME_LOOKAHEAD + 1)
 }
+
+/// Names a self-extracting first volume of the set of the later volume
+/// `name` can have (`set.part1.exe`, `set.sfx`, ...). A file of such a name
+/// is only a volume if it holds a RAR archive.
+#[must_use]
+pub fn sfx_first_volumes(name: &str) -> Vec<String> {
+    let first = match parse_volume_name(name) {
+        Some(VolumeName::Part(head, digits, _)) => {
+            // Within reach of a reader that starts at the first volume.
+            let reach = 2..=MISSING_VOLUME_LOOKAHEAD + 2;
+            if !digits
+                .parse()
+                .is_ok_and(|number: usize| reach.contains(&number))
+            {
+                return Vec::new();
+            }
+            format!("{head}{:0width$}", 1, width = digits.len())
+        }
+        Some(VolumeName::Old(stem, _, index))
+            if (1..=MISSING_VOLUME_LOOKAHEAD + 1).contains(&index) =>
+        {
+            stem.to_string()
+        }
+        _ => return Vec::new(),
+    };
+    let upper = name
+        .rsplit_once('.')
+        .is_some_and(|(_, extension)| !extension.bytes().any(|byte| byte.is_ascii_lowercase()));
+    SFX_EXTENSIONS
+        .iter()
+        .map(|extension| {
+            if upper {
+                format!("{first}.{}", extension.to_ascii_uppercase())
+            } else {
+                format!("{first}.{extension}")
+            }
+        })
+        .collect()
+}
+
+// Problems spelled out in the summary; the rest are counted.
+const SKIPPED_SHOWN: usize = 3;
 
 // Entries left out of the listing.
 #[derive(Default)]
@@ -465,16 +533,6 @@ impl Skipped {
     }
 }
 
-// Packed data so far of a file that continues in the next volume. A split
-// file is one packed stream cut at the volume boundaries.
-struct Pending {
-    name: String,
-    unpacked_size: u64,
-    packed: Vec<u8>,
-    // Stored files take no part in a solid chain.
-    stored: bool,
-}
-
 // What a volume says about a following one.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Next {
@@ -484,21 +542,149 @@ enum Next {
     Expected,
 }
 
-// Decoder a packed file needs.
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum Method {
-    Rar15,
-    Rar20,
-    Rar29,
+// Consecutive volumes, read together.
+struct Run {
+    // Places after the opened file of its first volume.
+    base: usize,
+    count: usize,
+    // Problems found while looking for the volume after the run.
+    after: Vec<String>,
 }
 
-// docs/rar/old-container.md section 5.2: the unpack version alone decides.
-fn rar4_method(unpack_version: u8) -> Option<Method> {
-    match unpack_version {
-        13 | 15 => Some(Method::Rar15),
-        20 | 26 => Some(Method::Rar20),
-        29 | 36 => Some(Method::Rar29),
-        _ => None,
+enum Parsed {
+    None,
+    Rar4(container4::Archive),
+    Rar5(container5::Archive),
+    EncryptedHeaders,
+}
+
+// One volume on its own: whether the set goes on after it.
+struct Probe {
+    next: Next,
+    // A file that starts in this volume continues in the next.
+    open: bool,
+    // The walk ended at damage: no further volume is read.
+    stop: bool,
+    parsed: Parsed,
+}
+
+fn probe(layout: Layout, volume: &[u8]) -> Result<Probe> {
+    let mut probe = Probe {
+        next: Next::None,
+        open: false,
+        stop: false,
+        parsed: Parsed::None,
+    };
+    match layout {
+        Layout::Old => {
+            let (flags, open) = old_volume(volume)
+                .and_then(old_probe)
+                .ok_or_else(|| Error::invalid_format("Invalid RAR 1.3 archive header"))?;
+            if flags & OLD_ARCHIVE_VOLUME != 0 {
+                probe.next = Next::Possible;
+            }
+            probe.open = open;
+        }
+        Layout::Rar4 => match container4::read_archive(&[volume]) {
+            Ok(archive) => {
+                use container4::{Content, Note, SkipReason};
+                probe.stop = archive.findings.iter().any(|finding| {
+                    finding.offset.is_some()
+                        && matches!(finding.note, Note::CorruptHeader | Note::Truncated)
+                });
+                let info = archive.volumes.first();
+                if let Some(info) = info.filter(|info| {
+                    !probe.stop && info.archive_flags & container4::ARCHIVE_VOLUME != 0
+                }) {
+                    probe.next = match info.end_block {
+                        None => Next::Possible,
+                        Some(end) if end.flags & RAR4_END_NEXT_VOLUME != 0 => Next::Expected,
+                        Some(_) => Next::None,
+                    };
+                }
+                probe.open = probe.next != Next::None
+                    && archive.members.last().is_some_and(|member| {
+                        member.content == Content::Skipped(SkipReason::MissingVolumePart)
+                            && member.flags & RAR4_FILE_CONTINUES != 0
+                            && !member.head_missing
+                    });
+                probe.parsed = Parsed::Rar4(archive);
+            }
+            Err(Error::UnsupportedFormat { .. }) => probe.parsed = Parsed::EncryptedHeaders,
+            Err(_) => return Err(Error::invalid_format("corrupt RAR archive header")),
+        },
+        Layout::Rar5 => {
+            use container5::StopReason;
+            let archive = container5::read_archive(&[volume]);
+            match archive.stop.map(|stop| stop.reason) {
+                Some(StopReason::NotRar5) => {
+                    return Err(Error::invalid_format("corrupt RAR archive header"));
+                }
+                Some(StopReason::MissingVolume) => probe.next = Next::Expected,
+                Some(StopReason::EncryptedHeaders) | None => {}
+                Some(_) => probe.stop = true,
+            }
+            probe.open = probe.next != Next::None
+                && archive
+                    .members
+                    .last()
+                    .is_some_and(|member| member.tail_missing && !member.head_missing);
+            probe.parsed = Parsed::Rar5(archive);
+        }
+    }
+    Ok(probe)
+}
+
+// What the readers of all layouts add to.
+#[derive(Default)]
+struct Output {
+    entries: Vec<RarEntry>,
+    skipped: Skipped,
+    // Split file already reported; its later pieces are dropped quietly.
+    dropped: Option<String>,
+    // Bytes of all volumes, and bytes delivered as copies of other entries.
+    input_len: u64,
+    copied: u64,
+}
+
+impl Output {
+    fn deliver(
+        &mut self,
+        name: &str,
+        metadata: Option<Metadata>,
+        result: core::result::Result<Vec<u8>, String>,
+    ) -> Option<usize> {
+        match result {
+            Ok(data) => {
+                self.entries.push(RarEntry {
+                    path: name.to_string(),
+                    data,
+                    metadata,
+                });
+                Some(self.entries.len() - 1)
+            }
+            Err(reason) => {
+                self.skipped.note(format!("'{name}' {reason}"));
+                None
+            }
+        }
+    }
+
+    // A file some of whose pieces are in volumes that were not read;
+    // `at_end`: its last piece is in the last volume read.
+    fn incomplete(&mut self, name: &str, head_missing: bool, at_end: bool) {
+        if !head_missing {
+            self.skipped.note(if at_end {
+                format!("'{name}' continues in the next volume, which is not available")
+            } else {
+                format!("'{name}' is incomplete: its next piece is missing")
+            });
+        } else if self.dropped.as_deref() != Some(name) {
+            self.skipped.note(format!(
+                "'{name}' continues a file from an earlier volume, which is not available"
+            ));
+        }
+        self.dropped = Some(name.to_string());
     }
 }
 
@@ -506,7 +692,6 @@ enum Checksum {
     Crc32(u32),
     // RAR 1.3/1.4.
     Sum16(u16),
-    None,
 }
 
 // Add, then rotate left, per byte (docs/rar/old-container.md section 3).
@@ -520,7 +705,7 @@ impl Checksum {
     fn verify(&self, data: &[u8]) -> core::result::Result<(), String> {
         match *self {
             Self::Crc32(stored) => {
-                let actual = crc32(data);
+                let actual = container4::crc32(data);
                 if actual != stored {
                     return Err(format!(
                         "fails its checksum (CRC-32 {actual:08x}, header says {stored:08x})"
@@ -535,22 +720,9 @@ impl Checksum {
                     ));
                 }
             }
-            Self::None => {}
         }
         Ok(())
     }
-}
-
-// A complete file of an old or RAR4-format archive, ready to unpack.
-struct Member<'a> {
-    name: &'a str,
-    unpacked_size: u64,
-    checksum: Checksum,
-    // `None`: stored.
-    method: Option<Method>,
-    // Continues the decoder state left by the packed file before it.
-    solid: bool,
-    metadata: Option<Metadata>,
 }
 
 // An earlier member of the chain could not be decoded.
@@ -560,288 +732,35 @@ const BROKEN_CHAIN: &str = "depends on an unreadable earlier entry of the solid 
 // those of a volume that was not given.
 const NO_PREDECESSOR: &str = "has no solid predecessor: the files it continues are not available";
 
-// Reads the volumes of a set in order; decoder state carries across them.
-struct SetReader {
-    layout: Layout,
-    entries: Vec<RarEntry>,
-    skipped: Skipped,
-    pending: Option<Pending>,
-    // Split file already reported; its later pieces are dropped quietly.
-    dropped: Option<String>,
-    rar15: Option<Rar15Decoder>,
-    rar20: Option<Rar20Decoder>,
-    rar29: Option<Rar29Decoder>,
-    rar5: Option<Rar5Decoder>,
-    // Decoder holding the state of the current solid chain.
-    chain: Option<Method>,
-    // A packed member of the current chain could not be decoded, so the
-    // decoder state no longer matches the packer's.
-    chain_broken: bool,
-    // Packed and unpacked bytes of the current chain so far. A later member
-    // may be tiny because it repeats earlier ones, so the ratio limit is
-    // applied to the chain as a whole.
-    chain_packed: u64,
-    chain_unpacked: u64,
-    // The walk of a volume ended at damage: no further volume is read.
-    stop: bool,
-    // A piece arrived whose earlier pieces are in a volume that was not
-    // given: what precedes this volume is unknown.
-    orphaned: bool,
+const CORRUPT_PART: &str = "is corrupt: a part fails its checksum";
+
+const TRUNCATED: &str = "is truncated; the listing ends there";
+
+// The text of a decoder's error, without the error kind.
+fn reason(error: &Error) -> String {
+    let text = match error {
+        Error::DecompressionError { message } | Error::InvalidFormat { message } => message,
+        Error::UnsupportedFormat { format } => format,
+        other => return other.to_string(),
+    };
+    text.strip_prefix("RAR: ").unwrap_or(text).to_string()
 }
 
-impl SetReader {
-    fn new(layout: Layout) -> Self {
-        Self {
-            layout,
-            entries: Vec::new(),
-            skipped: Skipped::default(),
-            pending: None,
-            dropped: None,
-            rar15: None,
-            rar20: None,
-            rar29: None,
-            rar5: None,
-            chain: None,
-            chain_broken: false,
-            chain_packed: 0,
-            chain_unpacked: 0,
-            stop: false,
-            orphaned: false,
-        }
-    }
-
-    fn read_volume(&mut self, data: &[u8]) -> Result<Next> {
-        match self.layout {
-            Layout::Old => self.read_old(data),
-            Layout::Rar4 => self.read_rar4(data),
-            Layout::Rar5 => self.read_rar5(data),
-        }
-    }
-
-    // Packed data of the file whose piece `piece` is, joined with its earlier
-    // pieces; `None` when the piece cannot be used.
-    fn gather<'a>(
-        &mut self,
-        name: &str,
-        unpacked_size: u64,
-        piece: &'a [u8],
-        continues_from_previous: bool,
-    ) -> Option<Cow<'a, [u8]>> {
-        let earlier = match self.pending.take() {
-            Some(earlier)
-                if continues_from_previous
-                    && earlier.name == name
-                    && earlier.unpacked_size == unpacked_size =>
-            {
-                Some(earlier)
-            }
-            Some(earlier) => {
-                self.skipped.note(format!(
-                    "'{}' is incomplete: its next piece is missing",
-                    earlier.name
-                ));
-                // A packed file that was never decoded ends its chain.
-                self.chain_broken |= !earlier.stored;
-                self.dropped = Some(earlier.name);
-                None
-            }
-            None => None,
-        };
-        match earlier {
-            Some(mut earlier) => {
-                earlier.packed.extend_from_slice(piece);
-                Some(Cow::Owned(earlier.packed))
-            }
-            None if continues_from_previous => {
-                self.orphaned = true;
-                if self.dropped.as_deref() != Some(name) {
-                    self.skipped.note(format!(
-                        "'{name}' continues a file from an earlier volume, which is not available"
-                    ));
-                }
-                self.dropped = Some(name.to_string());
-                None
-            }
-            None => Some(Cow::Borrowed(piece)),
-        }
-    }
-
-    // Keeps the packed data of a file that continues in the next volume;
-    // false when it is given up instead.
-    fn hold(
-        &mut self,
-        name: &str,
-        unpacked_size: u64,
-        packed: Cow<'_, [u8]>,
-        stored: bool,
-    ) -> bool {
-        if packed.len() as u64 > crate::MAX_DECOMPRESSED_SIZE {
-            self.skipped
-                .note(format!("'{name}' is too large to join across volumes"));
-            self.dropped = Some(name.to_string());
-            return false;
-        }
-        self.pending = Some(Pending {
-            name: name.to_string(),
-            unpacked_size,
-            packed: packed.into_owned(),
-            stored,
-        });
-        true
-    }
-
-    // Leaves out a file that cannot be read at all; reported once, however
-    // many pieces it has.
-    fn refuse(&mut self, name: &str, continues_from_previous: bool, reason: &str) {
-        if !continues_from_previous || self.dropped.as_deref() != Some(name) {
-            self.skipped.note(format!("'{name}' {reason}"));
-        }
-        self.dropped = Some(name.to_string());
-    }
-
-    // The ratio limit for a member of `packed` bytes declaring `size`;
-    // `fresh`: it starts a chain.
-    fn check_ratio(
-        &mut self,
-        fresh: bool,
-        packed: u64,
-        size: u64,
-    ) -> core::result::Result<(), String> {
-        if fresh {
-            self.chain_packed = 0;
-            self.chain_unpacked = 0;
-        }
-        let packed = self.chain_packed.saturating_add(packed);
-        let unpacked = self.chain_unpacked.saturating_add(size);
-        check_size_limit(size)?;
-        check_ratio_limit(packed, unpacked)?;
-        self.chain_packed = packed;
-        self.chain_unpacked = unpacked;
-        Ok(())
-    }
-
-    // Unpacks and verifies one file; a failure leaves out this file only,
-    // plus the later members of its solid chain when the state is lost.
-    fn deliver(&mut self, member: Member<'_>, packed: Cow<'_, [u8]>) {
-        let result = self.unpack(&member, packed).and_then(|data| {
-            member.checksum.verify(&data)?;
-            Ok(data)
-        });
-        match result {
-            Ok(data) => self.entries.push(RarEntry {
-                path: member.name.to_string(),
-                data,
-                metadata: member.metadata,
-            }),
-            Err(reason) => self.skipped.note(format!("'{}' {reason}", member.name)),
-        }
-    }
-
-    fn unpack(
-        &mut self,
-        member: &Member<'_>,
-        packed: Cow<'_, [u8]>,
-    ) -> core::result::Result<Vec<u8>, String> {
-        let size = member.unpacked_size;
-        let Some(method) = member.method else {
-            // Stored files never touch a chain.
-            if packed.len() as u64 != size {
-                return Err(format!(
-                    "is corrupt: {} stored bytes for a declared size of {size}",
-                    packed.len()
-                ));
-            }
-            return Ok(packed.into_owned());
-        };
-
-        // An empty file leaves the chain untouched, damaged or not. The
-        // exceptions carry state in their packed bytes: the first member of
-        // a RAR 2.0 group (the tables of the group), and any RAR 2.9 member
-        // that has packed bytes (its end marker).
-        let untouched = match method {
-            Method::Rar15 => true,
-            Method::Rar20 => member.solid,
-            Method::Rar29 => member.solid && packed.is_empty(),
-        };
-        if size == 0 && untouched {
-            return Ok(Vec::new());
-        }
-
-        let mut fresh = !member.solid;
-        if member.solid {
-            if self.chain_broken {
-                let orphan = self.chain.is_none() && self.orphaned;
-                return Err(if orphan { NO_PREDECESSOR } else { BROKEN_CHAIN }.to_string());
-            }
-            match self.chain {
-                Some(current) if current == method => {}
-                // RAR 1.5 has no per-file flag: the first packed file of a
-                // solid archive starts the chain.
-                None if method == Method::Rar15 => fresh = true,
-                _ => {
-                    self.chain_broken = true;
-                    return Err(NO_PREDECESSOR.to_string());
-                }
-            }
-        }
-        if fresh {
-            self.chain = Some(method);
-        }
-        // Until this member is through, the state is not usable.
-        self.chain_broken = true;
-
-        let mut unusable = false;
-        let decoded = match method {
-            Method::Rar15 => {
-                check_size_limit(size)?;
-                let decoder = self.rar15.get_or_insert_with(Rar15Decoder::new);
-                if fresh {
-                    decoder.reset();
-                }
-                decoder
-                    .decompress(&packed, size)
-                    .map_err(|err| err.to_string())
-            }
-            Method::Rar20 => {
-                check_size_limit(size)?;
-                let decoder = self.rar20.get_or_insert_with(Rar20Decoder::new);
-                if fresh {
-                    decoder.reset();
-                }
-                decoder
-                    .decompress(&packed, size)
-                    .map_err(|err| err.to_string())
-            }
-            Method::Rar29 => {
-                self.check_ratio(fresh, packed.len() as u64, size)?;
-                let decoder = self.rar29.get_or_insert_with(Rar29Decoder::new);
-                if fresh {
-                    decoder.reset();
-                }
-                let decoded = decoder
-                    .decompress(&packed, size)
-                    .map_err(|err| err.to_string());
-                // A member without its end marker is delivered, but nothing
-                // can continue from it.
-                unusable = decoder.is_failed();
-                decoded
-            }
-        };
-        let data = decoded.map_err(|err| format!("cannot be decoded: {err}"))?;
-        if data.len() as u64 != size {
-            return Err(format!(
-                "decodes to {} bytes instead of the declared {size}",
-                data.len()
-            ));
-        }
-        // A checksum mismatch from here on does not stop the chain.
-        self.chain_broken = unusable;
-        Ok(data)
-    }
+fn method_metadata(level: u8) -> Option<Metadata> {
+    let method_name = match level {
+        0 => return None, // Stored
+        1 => "fastest",
+        2 => "fast",
+        3 => "normal",
+        4 => "good",
+        5 => "best",
+        _ => "unknown",
+    };
+    Some(Metadata::new().with_compression_method(method_name))
 }
 
 // ============================================================================
-// RAR 1.3/1.4 parsing (docs/rar/old-container.md, part A)
+// RAR 1.3/1.4 (docs/rar/old-container.md, part A)
 // ============================================================================
 
 const OLD_ARCHIVE_VOLUME: u8 = 0x01;
@@ -935,6 +854,32 @@ fn is_old_archive(data: &[u8]) -> bool {
     })
 }
 
+// The archive in a volume file: behind the module when self-extracting.
+fn old_volume(volume: &[u8]) -> Option<&[u8]> {
+    match locate(volume)? {
+        (start, Layout::Old) => volume.get(start..),
+        _ => None,
+    }
+}
+
+// Archive flags, and whether the last file continues in the next volume.
+fn old_probe(data: &[u8]) -> Option<(u8, bool)> {
+    let (flags, mut offset) = old_archive_header(data)?;
+    let mut open = false;
+    while let Some(file) = data.get(offset..).and_then(old_file_header) {
+        let Some(end) = offset
+            .checked_add(file.head_len)
+            .and_then(|start| start.checked_add(file.packed_size))
+            .filter(|&end| end <= data.len())
+        else {
+            break;
+        };
+        open = file.flags & OLD_FILE_SPLIT_AFTER != 0 && file.attributes & OLD_ATTR_DIRECTORY == 0;
+        offset = end;
+    }
+    Some((flags, open))
+}
+
 fn old_name(raw: &[u8]) -> String {
     let name = if raw.is_ascii() {
         String::from_utf8_lossy(raw).into_owned()
@@ -945,35 +890,222 @@ fn old_name(raw: &[u8]) -> String {
     name.replace('\\', "/")
 }
 
-fn method_metadata(level: u8) -> Option<Metadata> {
-    let method_name = match level {
-        0 => return None, // Stored
-        1 => "fastest",
-        2 => "fast",
-        3 => "normal",
-        4 => "good",
-        5 => "best",
-        _ => "unknown",
-    };
-    Some(Metadata::new().with_compression_method(method_name))
+// Packed data so far of a file that continues in the next volume. A split
+// file is one packed stream cut at the volume boundaries.
+struct Pending {
+    name: String,
+    unpacked_size: u64,
+    packed: Vec<u8>,
+    // Stored files take no part in a solid chain.
+    stored: bool,
 }
 
-impl SetReader {
-    fn read_old(&mut self, data: &[u8]) -> Result<Next> {
-        let (archive_flags, mut offset) = old_archive_header(data)
-            .ok_or_else(|| Error::invalid_format("Invalid RAR 1.3 archive header"))?;
+// A complete file of an old archive, ready to unpack.
+struct OldMember<'a> {
+    name: &'a str,
+    unpacked_size: u64,
+    checksum: u16,
+    stored: bool,
+    // Continues the decoder state left by the packed file before it.
+    solid: bool,
+    level: u8,
+}
+
+// Reads consecutive volumes in order; decoder state carries across them.
+struct OldReader<'o> {
+    out: &'o mut Output,
+    pending: Option<Pending>,
+    decoder: Rar15Decoder,
+    // A packed file of the solid chain was given to the decoder.
+    chain_started: bool,
+    // A packed member of the chain could not be decoded, so the decoder
+    // state no longer matches the packer's.
+    chain_broken: bool,
+    // A piece arrived whose earlier pieces are in a volume that was not
+    // given: what precedes this volume is unknown.
+    orphaned: bool,
+}
+
+fn read_old_run(out: &mut Output, volumes: &[&[u8]], after_gap: bool) {
+    let mut reader = OldReader {
+        out,
+        pending: None,
+        decoder: Rar15Decoder::new(),
+        // Members of the chain may have been in the missing volume.
+        chain_started: after_gap,
+        chain_broken: after_gap,
+        orphaned: false,
+    };
+    for volume in volumes {
+        if let Some(data) = old_volume(volume) {
+            reader.read_volume(data);
+        }
+    }
+    if let Some(pending) = reader.pending.take() {
+        reader.out.skipped.note(format!(
+            "'{}' continues in the next volume, which is not available",
+            pending.name
+        ));
+        reader.out.dropped = Some(pending.name);
+    }
+}
+
+impl OldReader<'_> {
+    // Packed data of the file whose piece `piece` is, joined with its earlier
+    // pieces; `None` when the piece cannot be used.
+    fn gather<'a>(
+        &mut self,
+        name: &str,
+        unpacked_size: u64,
+        piece: &'a [u8],
+        continues_from_previous: bool,
+    ) -> Option<Cow<'a, [u8]>> {
+        let earlier = match self.pending.take() {
+            Some(earlier)
+                if continues_from_previous
+                    && earlier.name == name
+                    && earlier.unpacked_size == unpacked_size =>
+            {
+                Some(earlier)
+            }
+            Some(earlier) => {
+                self.out.skipped.note(format!(
+                    "'{}' is incomplete: its next piece is missing",
+                    earlier.name
+                ));
+                // A packed file that was never decoded ends its chain.
+                self.chain_broken |= !earlier.stored;
+                self.out.dropped = Some(earlier.name);
+                None
+            }
+            None => None,
+        };
+        match earlier {
+            Some(mut earlier) => {
+                earlier.packed.extend_from_slice(piece);
+                Some(Cow::Owned(earlier.packed))
+            }
+            None if continues_from_previous => {
+                self.orphaned = true;
+                self.out.incomplete(name, true, false);
+                None
+            }
+            None => Some(Cow::Borrowed(piece)),
+        }
+    }
+
+    // Keeps the packed data of a file that continues in the next volume;
+    // false when it is given up instead.
+    fn hold(
+        &mut self,
+        name: &str,
+        unpacked_size: u64,
+        packed: Cow<'_, [u8]>,
+        stored: bool,
+    ) -> bool {
+        if packed.len() as u64 > crate::MAX_DECOMPRESSED_SIZE {
+            self.out
+                .skipped
+                .note(format!("'{name}' is too large to join across volumes"));
+            self.out.dropped = Some(name.to_string());
+            return false;
+        }
+        self.pending = Some(Pending {
+            name: name.to_string(),
+            unpacked_size,
+            packed: packed.into_owned(),
+            stored,
+        });
+        true
+    }
+
+    // Leaves out a file that cannot be read at all; reported once, however
+    // many pieces it has.
+    fn refuse(&mut self, name: &str, continues_from_previous: bool, reason: &str) {
+        if !continues_from_previous || self.out.dropped.as_deref() != Some(name) {
+            self.out.skipped.note(format!("'{name}' {reason}"));
+        }
+        self.out.dropped = Some(name.to_string());
+    }
+
+    // Unpacks and verifies one file; a failure leaves out this file only,
+    // plus the later members of its solid chain when the state is lost.
+    fn deliver(&mut self, member: &OldMember<'_>, packed: Cow<'_, [u8]>) {
+        let result = self.unpack(member, packed).and_then(|data| {
+            Checksum::Sum16(member.checksum).verify(&data)?;
+            Ok(data)
+        });
+        self.out
+            .deliver(member.name, method_metadata(member.level), result);
+    }
+
+    fn unpack(
+        &mut self,
+        member: &OldMember<'_>,
+        packed: Cow<'_, [u8]>,
+    ) -> core::result::Result<Vec<u8>, String> {
+        let size = member.unpacked_size;
+        if member.stored {
+            // Stored files never touch a chain.
+            if packed.len() as u64 != size {
+                return Err(format!(
+                    "is corrupt: {} stored bytes for a declared size of {size}",
+                    packed.len()
+                ));
+            }
+            return Ok(packed.into_owned());
+        }
+        // An empty file leaves the chain untouched, damaged or not.
+        if size == 0 {
+            return Ok(Vec::new());
+        }
+
+        if member.solid && self.chain_broken {
+            let orphan = !self.chain_started && self.orphaned;
+            return Err(if orphan { NO_PREDECESSOR } else { BROKEN_CHAIN }.to_string());
+        }
+        // The first packed file of a solid archive starts the chain.
+        let fresh = !member.solid || !self.chain_started;
+        self.chain_started = true;
+        // Until this member is through, the state is not usable.
+        self.chain_broken = true;
+        check_size_limit(size)?;
+        if fresh {
+            self.decoder.reset();
+        }
+        let data = self
+            .decoder
+            .decompress(&packed, size)
+            .map_err(|err| format!("cannot be decoded: {err}"))?;
+        if data.len() as u64 != size {
+            return Err(format!(
+                "decodes to {} bytes instead of the declared {size}",
+                data.len()
+            ));
+        }
+        // A checksum mismatch from here on does not stop the chain.
+        self.chain_broken = false;
+        Ok(data)
+    }
+
+    fn read_volume(&mut self, data: &[u8]) {
+        let Some((archive_flags, mut offset)) = old_archive_header(data) else {
+            return;
+        };
         let solid = archive_flags & OLD_ARCHIVE_SOLID != 0;
 
         // No end marker: the blocks run to the end of the volume.
         while offset < data.len() {
             let rest = &data[offset..];
             if rest.len() < OLD_FILE_HEAD {
-                self.skipped
+                self.out
+                    .skipped
                     .note(format!("{} stray bytes follow the last entry", rest.len()));
                 break;
             }
             let Some(file) = old_file_header(rest) else {
-                self.skipped
+                self.out
+                    .skipped
                     .note("corrupt file header; the listing ends there".to_string());
                 self.chain_broken = true;
                 break;
@@ -985,8 +1117,7 @@ impl SetReader {
                 .checked_add(file.packed_size)
                 .and_then(|end| rest.get(file.head_len..end));
             let Some(piece) = piece else {
-                self.skipped
-                    .note(format!("'{name}' is truncated; the listing ends there"));
+                self.out.skipped.note(format!("'{name}' {TRUNCATED}"));
                 self.chain_broken = true;
                 break;
             };
@@ -1024,493 +1155,537 @@ impl SetReader {
             }
             // Only the last part's checksum is the file's.
             self.deliver(
-                Member {
+                &OldMember {
                     name: &name,
                     unpacked_size,
-                    checksum: Checksum::Sum16(file.checksum),
-                    method: (!stored).then_some(Method::Rar15),
+                    checksum: file.checksum,
+                    stored,
                     solid,
-                    metadata: method_metadata(file.method),
+                    level: file.method,
                 },
                 packed,
             );
         }
-
-        Ok(if archive_flags & OLD_ARCHIVE_VOLUME != 0 {
-            Next::Possible
-        } else {
-            Next::None
-        })
     }
 }
 
 // ============================================================================
-// RAR4 parsing
+// RAR 1.50 to 4.x (docs/rar/rar4-container.md)
 // ============================================================================
 
-const RAR4_ENDARC_NEXT_VOLUME: u16 = 0x0001;
+const RAR4_METHOD_STORE: u8 = 0x30;
+const RAR4_FILE_CONTINUES: u16 = 0x0002;
+const RAR4_END_NEXT_VOLUME: u16 = 0x0001;
 
-const RAR4_FILE_SOLID: u16 = 0x0010;
-const RAR4_FILE_UNICODE: u16 = 0x0200;
-// All three dictionary bits: a directory, from RAR 2.0 on.
-const RAR4_FILE_DIRECTORY: u16 = 0x00E0;
+// The packed bytes of a member, its pieces joined.
+fn joined<'a>(pieces: impl Iterator<Item = Option<&'a [u8]>>) -> Option<Cow<'a, [u8]>> {
+    let mut joined: Option<Cow<'a, [u8]>> = None;
+    for piece in pieces {
+        let piece = piece?;
+        joined = Some(match joined {
+            None => Cow::Borrowed(piece),
+            Some(earlier) => {
+                let mut earlier = earlier.into_owned();
+                earlier.extend_from_slice(piece);
+                Cow::Owned(earlier)
+            }
+        });
+    }
+    Some(joined.unwrap_or_default())
+}
 
-impl SetReader {
-    // The blocks of one volume (docs/rar/rar4-container.md section 4.5).
-    fn read_rar4(&mut self, data: &[u8]) -> Result<Next> {
-        if !rar4_archive_header_ok(data) {
-            return Err(Error::invalid_format("corrupt RAR archive header"));
-        }
-        let archive_hdr = ArchiveHeaderParser::parse(&data[7..])
-            .map_err(|e| Error::invalid_format(format!("Invalid RAR4 archive header: {e}")))?;
-        let solid_archive = archive_hdr.has_solid_attributes;
-        let unmarked_end = if archive_hdr.has_volume_attributes {
-            Next::Possible
-        } else {
-            Next::None
-        };
-        if archive_hdr.is_block_encoded {
-            self.skipped
+struct Rar4Run<'a, 'v> {
+    volumes: &'a [&'v [u8]],
+    rar15: Rar15Decoder,
+    rar20: Rar20Decoder,
+    rar29: Option<rar29::Decoder>,
+    // By member: nothing can continue from the decoder state it left.
+    unusable: Vec<bool>,
+    last_decoded: Option<usize>,
+    ratio: Ratio,
+}
+
+fn read_rar4_run(out: &mut Output, volumes: &[&[u8]], base: usize, parsed: Parsed) {
+    use container4::{Content, Note, SkipReason};
+
+    let archive = match parsed {
+        Parsed::Rar4(archive) => archive,
+        Parsed::EncryptedHeaders => {
+            out.skipped
                 .note("the archive headers are encrypted; nothing can be listed".to_string());
-            return Ok(Next::None);
+            return;
         }
-        let mut offset = 7 + archive_hdr.size as usize;
-
-        while offset < data.len() {
-            let rest = &data[offset..];
-            if rest.len() < 7 {
-                self.skipped
-                    .note(format!("{} stray bytes follow the last block", rest.len()));
-                break;
-            }
-            let header_type = rest[2];
-            let flags = u16::from_le_bytes([rest[3], rest[4]]);
-            let head_size = usize::from(u16::from_le_bytes([rest[5], rest[6]]));
-
-            if header_type == RAR4_ENDARC_HEAD {
-                return Ok(if flags & RAR4_ENDARC_NEXT_VOLUME != 0 {
-                    Next::Expected
-                } else {
-                    Next::None
-                });
-            }
-
-            // Sub-blocks and the old recovery blocks always carry data;
-            // other blocks say so with a flag.
-            let has_data = matches!(header_type, 0x77 | 0x78 | 0x7A) || flags & 0x8000 != 0;
-            let sound = head_size >= if has_data { 11 } else { 7 }
-                && head_size <= rest.len()
-                && !matches!(header_type, 0x72 | 0x73);
-            let file_hdr = if sound && header_type == RAR4_FILE_HEAD {
-                FileHeaderParser::parse(rest).ok()
-            } else {
-                None
-            };
-            if !sound || (header_type == RAR4_FILE_HEAD && file_hdr.is_none()) {
-                // Blocks, and with them members of chains, may be lost here.
-                self.skipped.note(format!(
-                    "corrupt block header at offset {offset}; the listing ends there"
+        _ => match container4::read_archive(volumes) {
+            Ok(archive) => archive,
+            Err(error) => {
+                out.skipped.note(format!(
+                    "volume {} of the set: {}",
+                    base + 1,
+                    reason(&error)
                 ));
-                return Ok(self.end_at_damage());
+                return;
             }
-
-            if let Some(file_hdr) = file_hdr {
-                let data_end = usize::try_from(file_hdr.packed_size)
-                    .ok()
-                    .and_then(|packed_size| head_size.checked_add(packed_size))
-                    .filter(|&data_end| data_end <= rest.len());
-                let Some(data_end) = data_end else {
-                    self.skipped.note(format!(
-                        "'{}' is truncated; the listing ends there",
-                        rar4_name(&file_hdr)
-                    ));
-                    return Ok(self.end_at_damage());
-                };
-
-                if !is_rar4_directory(&file_hdr) {
-                    self.rar4_file(&file_hdr, &rest[head_size..data_end], solid_archive);
-                } else if file_hdr.packed_size != 0 {
-                    self.skipped.note(format!(
-                        "directory entry '{}' carries {} bytes of data, which are ignored",
-                        rar4_name(&file_hdr),
-                        file_hdr.packed_size
-                    ));
-                }
-                offset += data_end;
-            } else {
-                let data_size = if has_data {
-                    u32::from_le_bytes([rest[7], rest[8], rest[9], rest[10]]) as usize
-                } else {
-                    0
-                };
-                let Some(block_size) = head_size
-                    .checked_add(data_size)
-                    .filter(|&size| size <= rest.len())
-                else {
-                    self.skipped
-                        .note("the archive is truncated; the listing ends there".to_string());
-                    return Ok(self.end_at_damage());
-                };
-                offset += block_size;
-            }
-        }
-
-        Ok(unmarked_end)
-    }
-
-    // The walk of a volume stopped at a corrupt or truncated block: the
-    // set ends there, and nothing continues a chain or a split file.
-    fn end_at_damage(&mut self) -> Next {
-        self.chain_broken = true;
-        self.stop = true;
-        Next::None
-    }
-
-    fn rar4_file(&mut self, header: &FileHeader, piece: &[u8], solid_archive: bool) {
-        let name = rar4_name(header);
-        let stored = header.method == RAR4_METHOD_STORE;
-        let before = header.continues_from_previous;
-
-        // Encrypted data cannot be given to a decoder, so a packed encrypted
-        // file also ends the usable part of its chain.
-        let method = rar4_method(header.version);
-        let unreadable = if header.is_encrypted {
-            Some("is encrypted".to_string())
-        } else if !(RAR4_METHOD_STORE..=0x35).contains(&header.method) {
-            Some(format!("uses unsupported method 0x{:02x}", header.method))
-        } else if !stored && method.is_none() {
-            Some(format!(
-                "needs unsupported unpack version {}",
-                header.version
-            ))
-        } else {
-            None
-        };
-        if let Some(reason) = unreadable {
-            self.refuse(&name, before, &reason);
-            self.chain_broken |= !stored;
-            return;
-        }
-
-        let Some(packed) = self.gather(&name, header.unpacked_size, piece, before) else {
-            self.chain_broken |= !stored;
-            return;
-        };
-        if header.continues_in_next {
-            if !self.hold(&name, header.unpacked_size, packed, stored) {
-                self.chain_broken |= !stored;
-            }
-            return;
-        }
-
-        // Before RAR 2.0 solidity is the archive's; from 2.0 on each file
-        // says whether it continues the one before.
-        let solid = match method {
-            Some(Method::Rar15) => solid_archive,
-            _ => header.flags & RAR4_FILE_SOLID != 0,
-        };
-        // The CRC of the last part is that of the whole unpacked file; those
-        // of earlier parts are not.
-        self.deliver(
-            Member {
-                name: &name,
-                unpacked_size: header.unpacked_size,
-                checksum: Checksum::Crc32(header.file_crc),
-                method: if stored { None } else { method },
-                solid,
-                metadata: method_metadata(header.method.wrapping_sub(RAR4_METHOD_STORE)),
-            },
-            packed,
-        );
-    }
-}
-
-// Paths are stored with backslashes. DOS and OS/2 names are in the OEM
-// code page of the packing machine.
-fn rar4_name(header: &FileHeader) -> String {
-    rar4_name_field(&header.name_bytes, header.flags, header.host_os)
-}
-
-fn rar4_name_field(field: &[u8], flags: u16, host_os: u8) -> String {
-    // The Unicode form: a plain name, a zero byte and an encoded name
-    // (docs/rar/rar4-container.md section 7.2).
-    let name = if flags & RAR4_FILE_UNICODE != 0 {
-        rar_native::container4::decode_name(field, true).0
-    } else {
-        match core::str::from_utf8(field) {
-            Ok(name) => name.to_string(),
-            Err(_) if matches!(host_os, 0 | 1) => decode_cp437(field),
-            Err(_) => String::from_utf8_lossy(field).into_owned(),
-        }
+        },
     };
-    name.replace('\\', "/")
-}
-
-fn is_rar4_directory(header: &FileHeader) -> bool {
-    // Not a name a file can have; only an entry without contents is taken
-    // for a directory on the strength of it.
-    let named_as_directory = header.name.ends_with('/') || header.name.ends_with('\\');
-    if named_as_directory && header.packed_size == 0 && header.unpacked_size == 0 {
-        return true;
+    let mut run = Rar4Run {
+        volumes,
+        rar15: Rar15Decoder::new(),
+        rar20: Rar20Decoder::new(),
+        rar29: None,
+        unusable: vec![false; archive.members.len()],
+        last_decoded: None,
+        ratio: Ratio::default(),
+    };
+    for (index, member) in archive.members.iter().enumerate() {
+        run.member(out, index, member);
     }
-    // RAR 1.5 does not use the dictionary bits; DOS and OS/2 attributes mark
-    // its directories (docs/rar/old-container.md section 5.4).
-    if header.version < 20 {
-        return matches!(header.host_os, 0 | 1) && header.attributes & 0x10 != 0;
-    }
-    // From RAR 2.0 on the dictionary bits alone decide; the attributes are
-    // not consulted (docs/rar/rar4-container.md section 6.5).
-    header.flags & RAR4_FILE_DIRECTORY == RAR4_FILE_DIRECTORY
-}
 
-// ============================================================================
-// RAR5 parsing
-// ============================================================================
-
-const RAR5_END_NEXT_VOLUME: u64 = 0x0001;
-
-impl SetReader {
-    fn read_rar5(&mut self, data: &[u8]) -> Result<Next> {
-        let mut offset = 8; // Skip RAR5 marker (8 bytes)
-
-        // Parse archive header
-        let (archive_hdr, consumed) = Rar5ArchiveHeaderParser::parse(&data[offset..])
-            .map_err(|e| Error::invalid_format(format!("Invalid RAR5 archive header: {e}")))?;
-        offset += consumed;
-        let solid_archive = archive_hdr.archive_flags.is_solid;
-
-        while offset < data.len() {
-            let Some(header_type) = peek_rar5_header_type(&data[offset..]) else {
-                self.skipped.note(format!(
-                    "corrupt block header at offset {offset}; the listing ends there"
-                ));
-                self.chain_broken = true;
-                break;
-            };
-
-            if header_type == RAR5_END_HEADER {
-                let flags = rar5_end_flags(&data[offset..]).unwrap_or(0);
-                return Ok(if flags & RAR5_END_NEXT_VOLUME != 0 {
-                    Next::Expected
-                } else {
-                    Next::None
-                });
+    let truncated_member = archive
+        .members
+        .iter()
+        .any(|member| member.content == Content::Skipped(SkipReason::Truncated));
+    for finding in &archive.findings {
+        let number = base + finding.volume + 1;
+        let offset = finding.offset.unwrap_or(0);
+        let message = match finding.note {
+            Note::CorruptHeader => {
+                format!("corrupt block header at offset {offset}; the listing ends there")
             }
-
-            if header_type == RAR5_FILE_HEADER {
-                let (file_hdr, consumed) = match Rar5FileHeaderParser::parse(&data[offset..]) {
-                    Ok(parsed) => parsed,
-                    Err(err) => {
-                        self.skipped.note(format!(
-                            "corrupt file header ({err}); the listing ends there"
-                        ));
-                        self.chain_broken = true;
-                        break;
-                    }
-                };
-
-                let data_end = usize::try_from(file_hdr.packed_size)
-                    .ok()
-                    .and_then(|packed_size| offset.checked_add(consumed)?.checked_add(packed_size))
-                    .filter(|&data_end| data_end <= data.len());
-                let Some(data_end) = data_end else {
-                    self.skipped.note(format!(
-                        "'{}' is truncated; the listing ends there",
-                        file_hdr.name
-                    ));
-                    self.chain_broken = true;
-                    break;
-                };
-
-                if !file_hdr.is_directory() {
-                    self.rar5_file(&file_hdr, &data[offset + consumed..data_end], solid_archive);
-                }
-
-                offset = data_end;
-            } else {
-                // Skip non-file block (service headers, encryption headers, etc.)
-                let Some(block_size) = skip_rar5_block(&data[offset..]) else {
-                    self.skipped
-                        .note("corrupt block header; the listing ends there".to_string());
-                    self.chain_broken = true;
-                    break;
-                };
-                offset = offset.saturating_add(block_size);
+            Note::Truncated if !truncated_member => {
+                "the archive is truncated; the listing ends there".to_string()
             }
-        }
-
-        Ok(Next::None)
-    }
-
-    fn rar5_file(&mut self, header: &Rar5FileHeader, piece: &[u8], solid_archive: bool) {
-        let name = header.name.as_str();
-        let stored = header.is_stored();
-        let before = header.continues_from_previous();
-        if header.is_encrypted() {
-            self.refuse(name, before, "is encrypted");
-            self.chain_broken |= !stored;
-            return;
-        }
-        // The parts of a split file need not repeat its size.
-        let Some(packed) = self.gather(name, 0, piece, before) else {
-            self.chain_broken |= !stored;
-            return;
+            Note::StrayBytes => {
+                let len = volumes.get(finding.volume).map_or(0, |volume| volume.len());
+                format!(
+                    "{} stray bytes follow the last block",
+                    len.saturating_sub(offset)
+                )
+            }
+            Note::EncryptedVolume => format!("volume {number} of the set has encrypted headers"),
+            Note::VolumeUnusable => {
+                format!("volume {number} of the set is not a matching RAR archive")
+            }
+            _ => continue,
         };
-        if header.continues_in_next() {
-            if !self.hold(name, 0, packed, stored) {
-                self.chain_broken |= !stored;
+        out.skipped.note(message);
+    }
+}
+
+// The packed bytes of a member, checked as far as the headers allow.
+fn rar4_bytes<'v>(
+    member: &container4::Member,
+    volumes: &[&'v [u8]],
+) -> core::result::Result<Cow<'v, [u8]>, String> {
+    // Part checksums cover the packed bytes (section 13.3 rule 3).
+    if !member.part_checksums_match(volumes) {
+        return Err(CORRUPT_PART.to_string());
+    }
+    joined(member.pieces.iter().map(|piece| piece.bytes(volumes)))
+        .ok_or_else(|| CORRUPT_PART.to_string())
+}
+
+impl Rar4Run<'_, '_> {
+    fn member(&mut self, out: &mut Output, index: usize, member: &container4::Member) {
+        use container4::{Content, Note, SkipReason};
+
+        let name = member.path();
+        let size = member.unpacked_size;
+        let result = match member.content {
+            Content::None => {
+                if member.packed_size != 0 && member.notes.contains(&Note::DirectoryWithData) {
+                    out.skipped.note(format!(
+                        "directory entry '{name}' carries {} bytes of data, which are ignored",
+                        member.packed_size
+                    ));
+                }
+                return;
             }
+            Content::Empty => Ok(Vec::new()),
+            Content::Stored => self.stored(member),
+            Content::Packed(kind) => {
+                self.unusable[index] = true;
+                match self.packed(index, member, kind) {
+                    // An empty file whatever the decoder makes of its packed
+                    // bytes (docs/rar/rar4-container.md section 15.2).
+                    Err(_) if size == 0 => Ok(Vec::new()),
+                    result => result,
+                }
+            }
+            Content::Skipped(reason) => {
+                self.unusable[index] = true;
+                Err(match reason {
+                    SkipReason::MissingVolumePart => {
+                        let at_end = member
+                            .pieces
+                            .last()
+                            .is_some_and(|piece| piece.volume + 1 == self.volumes.len());
+                        out.incomplete(&name, member.head_missing, at_end);
+                        return;
+                    }
+                    SkipReason::Truncated => TRUNCATED.to_string(),
+                    SkipReason::EmptyName => {
+                        out.skipped
+                            .note("an entry without a name is left out".to_string());
+                        return;
+                    }
+                    SkipReason::Encrypted => "is encrypted".to_string(),
+                    SkipReason::UnsupportedMethod => {
+                        format!("uses unsupported method 0x{:02x}", member.method)
+                    }
+                    SkipReason::UnsupportedVersion(version) => {
+                        format!("needs unsupported unpack version {version}")
+                    }
+                    SkipReason::Corrupt => format!(
+                        "is corrupt: {} stored bytes for a declared size of {size}",
+                        member.packed_size
+                    ),
+                    SkipReason::ChecksumMismatch => "fails its checksum".to_string(),
+                    SkipReason::SolidPredecessorUnavailable => NO_PREDECESSOR.to_string(),
+                    SkipReason::DependsOnUnreadable => BROKEN_CHAIN.to_string(),
+                })
+            }
+        };
+        // Not a name a file can have; only an entry without contents is
+        // taken for a directory on the strength of it.
+        let named_as_directory = member.name.ends_with(['/', '\\']);
+        if named_as_directory && member.packed_size == 0 && size == 0 {
             return;
         }
+        let metadata = method_metadata(member.method.wrapping_sub(RAR4_METHOD_STORE));
+        out.deliver(&name, metadata, result);
+    }
 
-        let result = self
-            .rar5_unpack(header, packed, solid_archive)
-            .and_then(|data| {
-                // Of the last part: the CRC of the whole unpacked file. A
-                // BLAKE2sp hash, kept in the extra area, is not checked.
-                header
-                    .file_crc32
-                    .map_or(Checksum::None, Checksum::Crc32)
-                    .verify(&data)?;
-                Ok(data)
-            });
-        match result {
-            Ok(data) => self.entries.push(RarEntry {
-                path: name.to_string(),
-                data,
-                metadata: rar5_metadata(header),
-            }),
-            Err(reason) => self.skipped.note(format!("'{name}' {reason}")),
+    fn stored(&self, member: &container4::Member) -> core::result::Result<Vec<u8>, String> {
+        check_size_limit(member.unpacked_size)?;
+        // Part checksums and the checksum of the contents (section 13.3).
+        let checked = member.check_stored(self.volumes);
+        let data = joined(member.pieces.iter().map(|piece| piece.bytes(self.volumes)))
+            .ok_or_else(|| CORRUPT_PART.to_string())?
+            .into_owned();
+        match checked {
+            Ok(()) => Ok(data),
+            Err(container4::SkipReason::ChecksumMismatch) => {
+                Checksum::Crc32(member.crc32).verify(&data)?;
+                Err("fails its checksum".to_string())
+            }
+            Err(_) => Err(CORRUPT_PART.to_string()),
         }
     }
 
-    fn rar5_unpack(
+    fn packed(
         &mut self,
-        header: &Rar5FileHeader,
-        packed: Cow<'_, [u8]>,
-        solid_archive: bool,
+        index: usize,
+        member: &container4::Member,
+        kind: container4::DecoderKind,
     ) -> core::result::Result<Vec<u8>, String> {
-        let size = header.unpacked_size;
-        if header.is_stored() {
-            if packed.len() as u64 != size {
-                return Err(format!(
-                    "is corrupt: {} stored bytes for a declared size of {size}",
-                    packed.len()
-                ));
-            }
-            return Ok(packed.into_owned());
-        }
+        use container4::DecoderKind;
 
-        let solid = header.compression.is_solid;
-        if solid && self.chain_broken {
-            let orphan = self.rar5.is_none() && self.orphaned;
-            return Err(if orphan { NO_PREDECESSOR } else { BROKEN_CHAIN }.to_string());
+        let size = member.unpacked_size;
+        let continues = member.chain.is_some_and(|link| link.continues);
+        if continues {
+            match member.chain.and_then(|link| link.predecessor) {
+                None => return Err(NO_PREDECESSOR.to_string()),
+                Some(previous)
+                    if self.unusable.get(previous).copied().unwrap_or(true)
+                        || self.last_decoded != Some(previous) =>
+                {
+                    return Err(BROKEN_CHAIN.to_string());
+                }
+                Some(_) => {}
+            }
         }
-        // Until this member is through, the state is not usable.
-        self.chain_broken = true;
-        self.check_ratio(!solid, packed.len() as u64, size)?;
-        if !solid {
-            self.rar5 = Some(Rar5Decoder::with_dict_size(
-                header.compression.dict_size_log,
-            ));
+        check_size_limit(size)?;
+        // The older decoders bound their output by their input themselves.
+        if kind == DecoderKind::Rar29 {
+            self.ratio.check(!continues, member.packed_size, size)?;
         }
-        let decoder = self.rar5.get_or_insert_with(Rar5Decoder::new);
-        let data = decoder
-            .decompress(
-                &packed,
-                size,
-                header.compression.method,
-                solid,
-                solid_archive,
-            )
-            .map_err(|err| format!("cannot be decoded: {err}"))?;
+        let packed = rar4_bytes(member, self.volumes)?;
+        let mut usable = true;
+        let decoded = match kind {
+            DecoderKind::Rar15 => {
+                if !continues {
+                    self.rar15.reset();
+                }
+                self.rar15
+                    .decompress(&packed, size)
+                    .map_err(|err| err.to_string())
+            }
+            DecoderKind::Rar20 => {
+                if !continues {
+                    self.rar20.reset();
+                }
+                self.rar20
+                    .decompress(&packed, size)
+                    .map_err(|err| err.to_string())
+            }
+            DecoderKind::Rar29 => {
+                let decoder = self.rar29.get_or_insert_with(rar29::Decoder::new);
+                let decoded = decoder
+                    .decode_member(&packed, size, continues, crate::MAX_DECOMPRESSED_SIZE)
+                    .map_err(|err| reason(&err));
+                // A member without its end marker is delivered, but nothing
+                // can continue from it.
+                usable = decoder.can_continue();
+                decoded
+            }
+        };
+        let data = decoded.map_err(|err| format!("cannot be decoded: {err}"))?;
+        self.last_decoded = Some(index);
+        // A size or checksum mismatch from here on does not stop the chain.
+        if let Some(unusable) = self.unusable.get_mut(index) {
+            *unusable = !usable;
+        }
         if data.len() as u64 != size {
             return Err(format!(
                 "decodes to {} bytes instead of the declared {size}",
                 data.len()
             ));
         }
-        self.chain_broken = false;
+        if !data.is_empty() {
+            Checksum::Crc32(member.crc32).verify(&data)?;
+        }
         Ok(data)
     }
 }
 
-// End-of-archive flags: the field after the common header fields.
-fn rar5_end_flags(data: &[u8]) -> Option<u64> {
-    let mut pos = 4; // Skip CRC32
-    let (_, len) = read_vint(data.get(pos..)?)?;
-    pos += len;
-    let (_, len) = read_vint(data.get(pos..)?)?;
-    pos += len;
-    let (flags, len) = read_vint(data.get(pos..)?)?;
-    pos += len;
-    for present in [flags & 1 != 0, flags & 2 != 0] {
-        if present {
-            let (_, len) = read_vint(data.get(pos..)?)?;
-            pos += len;
+// ============================================================================
+// RAR 5 and 7 (docs/rar/rar5-container.md)
+// ============================================================================
+
+// As for RAR4 links (rar4-container.md D11).
+const MAX_LINK_TARGET: usize = 4096;
+
+struct Rar5Run<'a, 'v> {
+    volumes: &'a [&'v [u8]],
+    decoder: Option<rar5::Decoder>,
+    // By member: its decoding failed, which ends its solid group.
+    failed: Vec<bool>,
+    last_decoded: Option<usize>,
+    ratio: Ratio,
+}
+
+fn read_rar5_run(out: &mut Output, volumes: &[&[u8]], parsed: Parsed) {
+    use container5::{Failure, Handling, Kind, StopReason};
+
+    let archive = match parsed {
+        Parsed::Rar5(archive) => archive,
+        _ => container5::read_archive(volumes),
+    };
+    let mut run = Rar5Run {
+        volumes,
+        decoder: None,
+        failed: vec![false; archive.members.len()],
+        last_decoded: None,
+        ratio: Ratio::default(),
+    };
+    // By member: its entry, for the links to it.
+    let mut delivered: Vec<Option<usize>> = vec![None; archive.members.len()];
+    for (index, member) in archive.members.iter().enumerate() {
+        let name = member.path();
+        let result = match member.handling {
+            // A symbolic link or junction is a file holding its target, as
+            // in the RAR4 format.
+            Handling::NoContents => match (member.kind, &member.link_target) {
+                (
+                    Kind::UnixSymlink | Kind::WindowsSymlink | Kind::WindowsJunction,
+                    Some(target),
+                ) => {
+                    if target.len() > MAX_LINK_TARGET {
+                        Err("is a symbolic link with an overlong target".to_string())
+                    } else {
+                        Ok(target.clone())
+                    }
+                }
+                // Directories.
+                _ => continue,
+            },
+            Handling::Failed(Failure::Incomplete) => {
+                let at_end = member
+                    .pieces
+                    .last()
+                    .is_some_and(|piece| piece.volume + 1 == volumes.len());
+                out.incomplete(&name, member.head_missing, at_end);
+                continue;
+            }
+            Handling::Failed(Failure::Corrupt)
+                if matches!(member.kind, Kind::HardLink | Kind::FileCopy) =>
+            {
+                Err("is a link to a file that the archive does not hold".to_string())
+            }
+            Handling::Failed(Failure::Corrupt)
+                if member.compression.is_stored()
+                    && member
+                        .unpacked_size
+                        .is_some_and(|size| size != member.packed_size) =>
+            {
+                Err(format!(
+                    "is corrupt: {} stored bytes for a declared size of {}",
+                    member.packed_size,
+                    member.unpacked_size.unwrap_or(0)
+                ))
+            }
+            Handling::Failed(failure) => Err(match failure {
+                Failure::Encrypted => "is encrypted",
+                Failure::Unsupported => "uses an unsupported compression method or link type",
+                Failure::Truncated => TRUNCATED,
+                Failure::NoSolidState => NO_PREDECESSOR,
+                Failure::PoisonedGroup => BROKEN_CHAIN,
+                Failure::Incomplete | Failure::Corrupt => "is corrupt",
+            }
+            .to_string()),
+            Handling::Stored | Handling::Empty => run.stored(member),
+            Handling::Decode { previous, .. } => {
+                if let Some(failed) = run.failed.get_mut(index) {
+                    *failed = true;
+                }
+                run.decode(index, member, previous)
+            }
+            Handling::CopyOf(source) => {
+                let source = delivered.get(source).copied().flatten();
+                match source.and_then(|entry| out.entries.get(entry)) {
+                    Some(entry) => {
+                        let data = entry.data.clone();
+                        out.copy_budget(data.len() as u64).map(|()| data)
+                    }
+                    None => Err("is a link to an entry that could not be read".to_string()),
+                }
+            }
+        };
+        let metadata = method_metadata(member.compression.method);
+        if let Some(slot) = delivered.get_mut(index) {
+            *slot = out.deliver(&name, metadata, result);
         }
     }
-    read_vint(data.get(pos..)?).map(|(flags, _)| flags)
+
+    let truncated_member = archive
+        .members
+        .iter()
+        .any(|member| member.handling == Handling::Failed(Failure::Truncated));
+    if let Some(stop) = archive.stop {
+        let message = match stop.reason {
+            StopReason::EncryptedHeaders => {
+                "the archive headers are encrypted; nothing can be listed".to_string()
+            }
+            StopReason::CorruptHeader | StopReason::MalformedHeader | StopReason::NotRar5 => {
+                format!(
+                    "corrupt block header at offset {}; the listing ends there",
+                    stop.offset
+                )
+            }
+            StopReason::Truncated if !truncated_member => {
+                "the archive is truncated; the listing ends there".to_string()
+            }
+            // The search for the next volume reports it.
+            StopReason::Truncated | StopReason::MissingVolume => return,
+        };
+        out.skipped.note(message);
+    }
 }
 
-fn peek_rar5_header_type(data: &[u8]) -> Option<u64> {
-    if data.len() < 7 {
-        return None;
+impl Output {
+    // Links to earlier files are delivered as copies; together they stay
+    // within what the input could have unpacked to.
+    fn copy_budget(&mut self, size: u64) -> core::result::Result<(), String> {
+        let copied = self.copied.saturating_add(size);
+        let allowed = self
+            .input_len
+            .max(RATIO_CHECK_MIN_PACKED)
+            .saturating_mul(MAX_COMPRESSION_RATIO)
+            .min(crate::MAX_DECOMPRESSED_SIZE);
+        if copied > allowed {
+            return Err("is a copy of another entry, over the output limit for copies".to_string());
+        }
+        self.copied = copied;
+        Ok(())
     }
-    // Skip CRC32 (4 bytes)
-    let pos = 4;
-    // Read header_size vint
-    let (_, vint_len) = read_vint(&data[pos..])?;
-    // Read header_type vint
-    let (header_type, _) = read_vint(&data[pos + vint_len..])?;
-    Some(header_type)
 }
 
-fn skip_rar5_block(data: &[u8]) -> Option<usize> {
-    if data.len() < 7 {
-        return None;
+fn verify_rar5(member: &container5::Member, data: &[u8]) -> core::result::Result<(), String> {
+    if let Some(stored) = member.crc32 {
+        Checksum::Crc32(stored).verify(data)?;
     }
-    let mut pos = 4; // Skip CRC32
-    // Read header_size vint (covers from header_type to end of extra area)
-    let (header_size, vint_len) = read_vint(&data[pos..])?;
-    pos += vint_len;
-    let header_end = pos.checked_add(header_size as usize)?;
-
-    // Parse header_type and flags to find data area size
-    let (_, type_len) = read_vint(&data[pos..])?;
-    pos += type_len;
-    let (flags, flags_len) = read_vint(&data[pos..])?;
-    pos += flags_len;
-
-    let mut data_area_size = 0u64;
-    // Extra area size present (flag bit 0)
-    if flags & 1 != 0 {
-        let (_, extra_len) = read_vint(&data[pos..])?;
-        pos += extra_len;
+    if member
+        .blake2sp
+        .is_some_and(|stored| stored != container5::blake2sp(data))
+    {
+        return Err("fails its checksum (BLAKE2sp)".to_string());
     }
-    // Data area present (flag bit 1)
-    if flags & 2 != 0 {
-        let (size, _) = read_vint(&data[pos..])?;
-        data_area_size = size;
-    }
-
-    header_end.checked_add(data_area_size as usize)
+    Ok(())
 }
 
-fn rar5_metadata(header: &Rar5FileHeader) -> Option<Metadata> {
-    if header.is_stored() {
-        return None;
+fn rar5_bytes<'v>(
+    member: &container5::Member,
+    volumes: &[&'v [u8]],
+) -> core::result::Result<Cow<'v, [u8]>, String> {
+    // Piece checksums before the data are used (section 10.1).
+    container5::verify_pieces(member, volumes).map_err(|_| CORRUPT_PART.to_string())?;
+    let pieces = member
+        .packed(volumes)
+        .map_err(|_| CORRUPT_PART.to_string())?;
+    joined(pieces.into_iter().map(Some)).ok_or_else(|| CORRUPT_PART.to_string())
+}
+
+impl Rar5Run<'_, '_> {
+    fn stored(&self, member: &container5::Member) -> core::result::Result<Vec<u8>, String> {
+        check_size_limit(member.packed_size)?;
+        let data = rar5_bytes(member, self.volumes)?.into_owned();
+        verify_rar5(member, &data)?;
+        Ok(data)
     }
-    let method_name = match header.compression.method {
-        0 => return None, // Stored
-        1 => "fastest",
-        2 => "fast",
-        3 => "normal",
-        4 => "good",
-        5 => "best",
-        _ => "unknown",
-    };
-    Some(Metadata::new().with_compression_method(method_name))
+
+    fn decode(
+        &mut self,
+        index: usize,
+        member: &container5::Member,
+        previous: Option<usize>,
+    ) -> core::result::Result<Vec<u8>, String> {
+        if let Some(previous) = previous
+            && (self.failed.get(previous).copied().unwrap_or(true)
+                || self.last_decoded != Some(previous))
+        {
+            return Err(BROKEN_CHAIN.to_string());
+        }
+        let fresh = previous.is_none();
+        let limit = match member.unpacked_size {
+            Some(size) => {
+                self.ratio.check(fresh, member.packed_size, size)?;
+                crate::MAX_DECOMPRESSED_SIZE
+            }
+            None => self.ratio.allowance(fresh, member.packed_size),
+        };
+        let packed = rar5_bytes(member, self.volumes)?;
+        let params = rar5::MemberParams {
+            dict_size: member.compression.dictionary_size,
+            version: match member.compression.algorithm {
+                Some(container5::Algorithm::Rar70) => 1,
+                _ => 0,
+            },
+            unpacked_size: member.unpacked_size,
+            solid: !fresh,
+        };
+        let data = self
+            .decoder
+            .get_or_insert_with(rar5::Decoder::new)
+            .decode_member(&packed, &params, limit)
+            .map_err(|err| format!("cannot be decoded: {}", reason(&err)))?;
+        self.last_decoded = Some(index);
+        // A size or checksum mismatch from here on does not stop the group.
+        if let Some(failed) = self.failed.get_mut(index) {
+            *failed = false;
+        }
+        let len = data.len() as u64;
+        match member.unpacked_size {
+            Some(size) if size != len => {
+                return Err(format!(
+                    "decodes to {len} bytes instead of the declared {size}"
+                ));
+            }
+            Some(_) => {}
+            None => self.ratio.unpacked = self.ratio.unpacked.saturating_add(len),
+        }
+        verify_rar5(member, &data)?;
+        Ok(data)
+    }
 }
 
 // ============================================================================
@@ -1547,20 +1722,30 @@ impl Container for RarContainer {
     }
 
     fn get_file(&self, path: &str) -> Option<&[u8]> {
-        let lower = path.to_lowercase();
-        let index = self.path_index.get_or_init(|| {
-            crate::formats::build_path_index(
-                self.entries.iter().enumerate().map(|(i, e)| (i, &e.path)),
-            )
-        });
-        index
-            .get(&lower)
-            .map(|&idx| self.entries[idx].data.as_slice())
+        self.path_index
+            .get(&path.to_lowercase())
+            .and_then(|&index| self.entries.get(index))
+            .map(|entry| entry.data.as_slice())
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+    use crate::formats::dos::rar_native::container4::crc32;
+
+    const RAR4_FILE_HEAD: u8 = 0x74;
+    const RAR4_ENDARC_HEAD: u8 = 0x7B;
+    // All three dictionary bits: a directory, from RAR 2.0 on.
+    const RAR4_FILE_DIRECTORY: u16 = 0x00E0;
+
+    // The name of a RAR4 file header as an entry path.
+    fn rar4_name_field(field: &[u8], flags: u16) -> String {
+        container4::decode_name(field, flags & 0x0200 != 0)
+            .0
+            .replace('\\', "/")
+    }
+
     #[test]
     fn rar4_unicode_names_use_the_encoded_form() {
         // docs/rar/rar4-container.md section 17.2, both examples.
@@ -1568,34 +1753,29 @@ mod tests {
             0xE6, 0x97, 0xA5, 0xE6, 0x9C, 0xAC, 0xE8, 0xAA, 0x9E, 0x2E, 0x74, 0x78, 0x74, 0x00,
             0x65, 0x68, 0xE5, 0x2C, 0x67, 0x9E, 0x8A, 0x2E, 0x00, 0x74, 0x78, 0x74,
         ];
-        assert_eq!(super::rar4_name_field(&japanese, 0x0200, 2), "日本語.txt");
+        assert_eq!(rar4_name_field(&japanese, 0x0200), "日本語.txt");
 
         let mut greek = b"dir\\\xCE\x94\xCE\xB5\xCE\xBB\xCF\x84\xCE\xB1 file.txt\0".to_vec();
         greek.extend_from_slice(&[
             0x03, 0xD5, 0x02, 0x94, 0xB5, 0xBB, 0x50, 0xC4, 0xB1, 0x20, 0x66, 0x00, 0x69, 0x6C,
             0x65, 0x2E, 0x00, 0x74, 0x78, 0x74,
         ]);
-        assert_eq!(
-            super::rar4_name_field(&greek, 0x0200, 2),
-            "dir/Δελτα file.txt"
-        );
+        assert_eq!(rar4_name_field(&greek, 0x0200), "dir/Δελτα file.txt");
 
         // An OEM plain name from Windows RAR: the encoded form wins over it.
         let swedish = [
             0x66, 0x72, 0x86, 0x6E, 0x00, 0x00, 0x10, 0x66, 0x72, 0xE5, 0x6E,
         ];
-        assert_eq!(super::rar4_name_field(&swedish, 0x0200, 2), "från");
+        assert_eq!(rar4_name_field(&swedish, 0x0200), "från");
 
         // Without the flag nothing after a zero byte is interpreted.
-        assert_eq!(super::rar4_name_field(b"fr\x86n", 0, 0), "från");
-        assert_eq!(super::rar4_name_field(b"plain.txt", 0, 2), "plain.txt");
+        assert_eq!(rar4_name_field(b"fr\x86n", 0), "från");
+        assert_eq!(rar4_name_field(b"plain.txt", 0), "plain.txt");
     }
-
-    use super::*;
 
     // The limits for a member that starts a chain.
     fn check_declared_size(packed: u64, unpacked: u64) -> core::result::Result<(), String> {
-        SetReader::new(Layout::Rar4).check_ratio(true, packed, unpacked)
+        Ratio::default().check(true, packed, unpacked)
     }
 
     #[test]
@@ -1643,8 +1823,9 @@ mod tests {
     #[test]
     fn rar4_decoder_does_not_preallocate_declared_size() {
         // Garbage stream: whatever the outcome, 4 GiB must not be reserved.
-        let mut decoder = Rar29Decoder::new();
-        if let Ok(output) = decoder.decompress(&[0x5A; 64], u64::from(u32::MAX)) {
+        let mut decoder = rar29::Decoder::new();
+        let limit = crate::MAX_DECOMPRESSED_SIZE;
+        if let Ok(output) = decoder.decode_member(&[0x5A; 64], u64::from(u32::MAX), false, limit) {
             assert!(output.capacity() <= 64 * 1024 * 1024);
         }
     }
@@ -1715,23 +1896,29 @@ mod tests {
         main.extend_from_slice(&[13, 0, 0, 0, 0, 0, 0, 0]);
         out.extend_from_slice(&(crc32(&main) as u16).to_le_bytes());
         out.extend_from_slice(&main);
+        // A block header behind its checksum.
+        let block = |out: &mut Vec<u8>, head: &[u8]| {
+            out.extend_from_slice(&(crc32(head) as u16).to_le_bytes());
+            out.extend_from_slice(head);
+        };
         for file in files {
-            out.extend_from_slice(&[0, 0, RAR4_FILE_HEAD]);
-            out.extend_from_slice(&(0x8000 | file.flags).to_le_bytes());
-            out.extend_from_slice(&(32 + file.name.len() as u16).to_le_bytes());
-            out.extend_from_slice(&(file.packed.len() as u32).to_le_bytes());
-            out.extend_from_slice(&(file.size as u32).to_le_bytes());
-            out.push(file.host);
-            out.extend_from_slice(&file.crc.to_le_bytes());
-            out.extend_from_slice(&[0; 4]); // time
-            out.extend_from_slice(&[file.version, file.method]);
-            out.extend_from_slice(&(file.name.len() as u16).to_le_bytes());
-            out.extend_from_slice(&file.attributes.to_le_bytes());
-            out.extend_from_slice(file.name.as_bytes());
+            let mut head = vec![RAR4_FILE_HEAD];
+            head.extend_from_slice(&(0x8000 | file.flags).to_le_bytes());
+            head.extend_from_slice(&(32 + file.name.len() as u16).to_le_bytes());
+            head.extend_from_slice(&(file.packed.len() as u32).to_le_bytes());
+            head.extend_from_slice(&(file.size as u32).to_le_bytes());
+            head.push(file.host);
+            head.extend_from_slice(&file.crc.to_le_bytes());
+            head.extend_from_slice(&[0; 4]); // time
+            head.extend_from_slice(&[file.version, file.method]);
+            head.extend_from_slice(&(file.name.len() as u16).to_le_bytes());
+            head.extend_from_slice(&file.attributes.to_le_bytes());
+            head.extend_from_slice(file.name.as_bytes());
+            block(&mut out, &head);
             out.extend_from_slice(file.packed);
         }
         if let Some(more) = end {
-            out.extend_from_slice(&[0, 0, RAR4_ENDARC_HEAD, u8::from(more), 0, 7, 0]);
+            block(&mut out, &[RAR4_ENDARC_HEAD, u8::from(more), 0, 7, 0]);
         }
         out
     }
@@ -1741,6 +1928,8 @@ mod tests {
             .iter()
             .map(|&(name, data, whole, before, after)| Rar4File {
                 packed: data,
+                // A part before the last carries the checksum of its bytes.
+                crc: crc32(if after { data } else { whole }),
                 ..Rar4File::stored(name, whole).flags(u16::from(before) | (u16::from(after) << 1))
             })
             .collect();
@@ -1767,7 +1956,8 @@ mod tests {
             // unpacked size, attributes, CRC, compression (stored), host
             // OS, name.
             let mut body = vec![2, flags, data.len() as u8, 4, whole.len() as u8, 0];
-            body.extend_from_slice(&crc32(whole).to_le_bytes());
+            // A part before the last carries the checksum of its bytes.
+            body.extend_from_slice(&crc32(if after { data } else { whole }).to_le_bytes());
             body.extend_from_slice(&[0, 0]);
             body.push(name.len() as u8);
             body.extend_from_slice(name.as_bytes());
@@ -2182,23 +2372,6 @@ mod tests {
             message.contains("'b1' depends on an unreadable earlier entry"),
             "{message}"
         );
-
-        // The follow-up message names the cause.
-        let mut reader = SetReader::new(Layout::Rar4);
-        reader.chain = Some(Method::Rar20);
-        reader.chain_broken = true;
-        let member = Member {
-            name: "b",
-            unpacked_size: 13,
-            checksum: Checksum::None,
-            method: Some(Method::Rar20),
-            solid: true,
-            metadata: None,
-        };
-        assert_eq!(
-            reader.unpack(&member, Cow::Borrowed(V20_B.0)).unwrap_err(),
-            BROKEN_CHAIN
-        );
     }
 
     #[test]
@@ -2251,6 +2424,51 @@ mod tests {
         assert!(names(&archive).is_empty());
         let message = skipped(&archive);
         assert!(message.contains("'a' fails its checksum"), "{message}");
+    }
+
+    // A RAR5 file header without data: a link of `kind` to `target`.
+    fn rar5_link(name: &str, kind: u8, target: &str, size: u8) -> Vec<u8> {
+        let mut extra = vec![4 + target.len() as u8, 5, kind, 0, target.len() as u8];
+        extra.extend_from_slice(target.as_bytes());
+        // Type, header flags (extra area), extra size, file flags, unpacked
+        // size, attributes, compression (stored), host OS, name.
+        let mut body = vec![2, 0x01, extra.len() as u8, 0, size, 0, 0, 0];
+        body.push(name.len() as u8);
+        body.extend_from_slice(name.as_bytes());
+        body.extend_from_slice(&extra);
+        rar5_block(&body)
+    }
+
+    #[test]
+    fn rar5_links_are_copies_of_their_files() {
+        let mut volume = rar5_volume(&[("a", b"data", b"data", false, false)], false);
+        let end = volume.split_off(volume.len() - rar5_block(&[5, 0, 0]).len());
+        // Symbolic link, hard link, file copy, a link to nothing.
+        volume.extend_from_slice(&rar5_link("sym", 1, "a", 0));
+        volume.extend_from_slice(&rar5_link("hard", 4, "a", 4));
+        volume.extend_from_slice(&rar5_link("copy", 5, "a", 4));
+        volume.extend_from_slice(&rar5_link("lost", 4, "b", 4));
+        volume.extend_from_slice(&end);
+        let archive = open(volume);
+        assert_eq!(names(&archive), ["a", "copy", "hard", "sym"]);
+        assert_eq!(archive.get_file("sym"), Some(b"a".as_slice()));
+        assert_eq!(archive.get_file("hard"), Some(b"data".as_slice()));
+        assert_eq!(archive.get_file("copy"), Some(b"data".as_slice()));
+        assert_eq!(
+            skipped(&archive),
+            "RAR: 'lost' is a link to a file that the archive does not hold"
+        );
+    }
+
+    #[test]
+    fn copies_stay_within_the_output_budget() {
+        let mut out = Output {
+            input_len: 100,
+            ..Output::default()
+        };
+        assert!(out.copy_budget(60_000).is_ok());
+        assert!(out.copy_budget(40_000).is_ok());
+        assert!(out.copy_budget(1).is_err());
     }
 
     #[test]
@@ -2645,11 +2863,12 @@ mod tests {
             &files([false, false, true, true]),
             None,
         ));
-        assert_eq!(names(&archive), ["m1"]);
+        // The empty member stays an empty file whatever its chain.
+        assert_eq!(names(&archive), ["m1", "m3"]);
         let message = skipped(&archive);
         assert!(message.contains("'m2' cannot be decoded"), "{message}");
         assert!(
-            message.contains("'m3' depends on an unreadable earlier entry"),
+            message.contains("'m4' depends on an unreadable earlier entry"),
             "{message}"
         );
 
@@ -2659,23 +2878,23 @@ mod tests {
             &files([false, true, true, true])[1..],
             None,
         ));
-        assert!(names(&archive).is_empty());
+        assert_eq!(names(&archive), ["m3"]);
         assert!(skipped(&archive).contains("'m2' has no solid predecessor"));
     }
 
     #[test]
     fn ratio_limit_applies_to_the_solid_chain() {
-        let mut reader = SetReader::new(Layout::Rar4);
+        let mut reader = Ratio::default();
         // Alone, 2 MiB from 100 bytes is refused.
-        assert!(reader.check_ratio(true, 100, 2 << 20).is_err());
+        assert!(reader.check(true, 100, 2 << 20).is_err());
         // After 2 MiB that took 1 MiB, the same member repeats earlier data.
-        assert!(reader.check_ratio(true, 1 << 20, 2 << 20).is_ok());
-        assert!(reader.check_ratio(false, 100, 2 << 20).is_ok());
+        assert!(reader.check(true, 1 << 20, 2 << 20).is_ok());
+        assert!(reader.check(false, 100, 2 << 20).is_ok());
         // The chain as a whole still has to stay within the limit.
-        assert!(reader.check_ratio(false, 100, 2000 << 20).is_err());
+        assert!(reader.check(false, 100, 2000 << 20).is_err());
         // A single member over the absolute limit.
         let over = crate::MAX_DECOMPRESSED_SIZE + 1;
-        assert!(reader.check_ratio(true, over, over).is_err());
+        assert!(reader.check(true, over, over).is_err());
     }
 
     #[test]
@@ -2784,12 +3003,11 @@ mod tests {
         assert_eq!(names(&set), ["a"]);
         assert!(skipped(&set).contains("corrupt block header"));
 
-        // RAR5: the chain does not survive the end of a listing.
+        // RAR5: a file cut short is left out.
         let volume = rar5_volume(&[("a", b"a", b"a", false, false)], false);
-        let mut reader = SetReader::new(Layout::Rar5);
-        reader.read_volume(&volume[..volume.len() - 9]).unwrap();
-        assert!(reader.chain_broken);
-        assert!(reader.skipped.into_message().is_some());
+        let archive = open(volume[..volume.len() - 9].to_vec());
+        assert!(names(&archive).is_empty());
+        assert!(skipped(&archive).contains("'a' is truncated"));
     }
 
     #[test]
@@ -2879,7 +3097,10 @@ mod tests {
             old_archive(0, &[OldFile::stored("a", b"a")]),
             rar5_volume(&[("a", b"a", b"a", false, false)], false),
         ];
-        for archive in &archives {
+        // The last offset searched: docs/rar/rar4-container.md section 3.3
+        // and docs/rar/rar5-container.md section 4.
+        let last = [SFX_SEARCH - 1, SFX_SEARCH - 1, SFX_SEARCH];
+        for (archive, last) in archives.iter().zip(last) {
             let sfx = [module.as_slice(), archive].concat();
             assert!(is_rar_archive(&sfx));
             let container = open(sfx.clone());
@@ -2894,7 +3115,7 @@ mod tests {
 
             // The search ends after 1 MiB.
             let mut far = b"\x7FELF".to_vec();
-            far.resize(SFX_SEARCH, 0);
+            far.resize(last + 1, 0);
             far.extend_from_slice(archive);
             assert!(!is_rar_archive(&far));
             far.remove(4);
@@ -2970,7 +3191,7 @@ mod tests {
             "{message}"
         );
         assert!(
-            message.contains("'b' depends on an unreadable earlier entry"),
+            message.contains("'b' has no solid predecessor"),
             "{message}"
         );
     }
@@ -3053,5 +3274,28 @@ mod tests {
             volumes_before("set.part12.rar").collect::<Vec<_>>().len(),
             MISSING_VOLUME_LOOKAHEAD + 1
         );
+    }
+
+    // rar4-container.md 12.2 and rar5-container.md 11.5.
+    #[test]
+    fn self_extracting_volume_names() {
+        for first in ["a.part1.exe", "a.part1.sfx"] {
+            assert_eq!(volume_after(first, 1).as_deref(), Some("a.part2.rar"));
+            assert_eq!(volume_before(first), None);
+        }
+        assert_eq!(
+            volume_after("A.PART01.EXE", 2).as_deref(),
+            Some("A.PART03.RAR")
+        );
+        assert_eq!(volume_after("SET.EXE", 1).as_deref(), Some("SET.R00"));
+        assert_eq!(volume_after("set.sfx", 2).as_deref(), Some("set.r01"));
+        assert_eq!(
+            sfx_first_volumes("a.part2.rar"),
+            ["a.part1.exe", "a.part1.sfx"]
+        );
+        assert_eq!(sfx_first_volumes("SET.R00"), ["SET.EXE", "SET.SFX"]);
+        for name in ["a.part1.rar", "a.part1.sfx", "set.rar", "a.part11.rar"] {
+            assert!(sfx_first_volumes(name).is_empty(), "{name}");
+        }
     }
 }

@@ -1,4 +1,3 @@
-#![cfg(feature = "macintosh")]
 //! DiskCopy 4.2 and DART images of Macintosh volumes: hand-built regression
 //! cases, and real images from `$UNRETRO_SPECIMENS/diskcopy/` and the
 //! Macintosh disks of `$UNRETRO_SPECIMENS/lisa/` when present.
@@ -6,6 +5,7 @@
 //! Each specimen `X` has `X.info.txt` (what it is and who must claim it) and
 //! `X.manifest.tsv` (paths, sizes and FNV-1a hashes written down from other
 //! readers, not taken from this crate).
+#![cfg(feature = "macintosh")]
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};

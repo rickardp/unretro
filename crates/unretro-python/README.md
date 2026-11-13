@@ -140,6 +140,12 @@ Invalid combinations raise `ValueError`:
   UDIF/NDIF, raw CD sector dumps, HFS wrappers). HFS Plus hard links
   resolve to their content; the journal is not replayed and files using transparent
   compression (decmpfs) are not decoded; see the HFS Plus section of the usage guide.
+- Toast images (`.toast`) are sector dumps without a format of their own and open as
+  what they hold: `Apm`, `Hfs`, `Iso9660` or `Udf`, from cooked 2048-byte sectors, raw
+  2352-byte sectors or CD-ROM XA sectors of 2056 or 2336 bytes. A hybrid disc (a
+  Macintosh volume and an ISO 9660 volume in one image) opens as `Apm` or `Hfs` and
+  lists its ISO 9660 volume as one more partition, `iso9660.img`. See the Toast Images section of
+  the usage guide.
 - `ContainerFormat.Iso9660` covers ISO 9660 CD-ROM images (Joliet / Rock Ridge names, raw
   2352-byte sector dumps), High Sierra volumes and multi-session images (the last session
   is presented). El Torito boot images are listed under `..eltorito/<n>.img`; see the
@@ -148,6 +154,11 @@ Invalid combinations raise `ValueError`:
   sparable and metadata partitions). A bridge disc with a usable ISO 9660 volume keeps
   opening as `Iso9660`. Named streams and extended attributes are not read; see the UDF
   section of the usage guide.
+- `ContainerFormat.Rar` covers RAR archives, decoded natively (written from the
+  specifications in [docs/rar/](../../docs/rar/README.md)): the RAR 1.3/1.4 container,
+  RAR 1.50 to 4.x and RAR 5/7, solid archives, self-extracting archives and multi-volume
+  sets joined through their first volume. Encrypted files are left out and reported;
+  see the RAR section of the usage guide.
 - `ContainerFormat.Arj` covers ARJ archives (methods 0-4, decoded natively). Garbled
   (password-protected) files are left out and reported; multi-volume sets are joined
   through their first volume when the later volumes sit next to it; see the ARJ
@@ -169,6 +180,11 @@ Invalid combinations raise `ValueError`:
   little-endian PCM without a header). Track files are looked up next to the sheet, so
   a sheet passed as `data=` lists nothing and reports its tracks; `WAVE`, `MP3` and
   `AIFF` track files are not read. See the CUE/BIN section of the usage guide.
+- `ContainerFormat.Nrg` covers Nero NRG disc images (both footer versions, disc-at-once
+  and track-at-once, multi-session): the same `trackNN.img` and `trackNN.pcm` entries as
+  a CUE/BIN image of the disc, from one file, so `data=` works too. An image is
+  recognised by the footer and chunk chain at its end under any name, before the file
+  system its first track starts with. See the Nero NRG section of the usage guide.
 - `ContainerFormat.NextDisklabel` covers NeXT disk labels (`NeXT`, `dlV2`, `dlV3`) on
   NeXTSTEP, OPENSTEP and Rhapsody media; each partition is an entry (`p0.img`, or the
   label's name for a single partition) that opens as the file system it holds.

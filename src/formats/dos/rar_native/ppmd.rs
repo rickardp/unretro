@@ -21,11 +21,13 @@ pub(crate) trait ByteSource {
     fn next_byte(&mut self) -> Option<u8>;
 }
 
+#[cfg(test)]
 pub(crate) struct SliceSource<'a> {
     data: &'a [u8],
     pos: usize,
 }
 
+#[cfg(test)]
 impl<'a> SliceSource<'a> {
     pub(crate) fn new(data: &'a [u8], pos: usize) -> Self {
         Self { data, pos }
@@ -36,6 +38,7 @@ impl<'a> SliceSource<'a> {
     }
 }
 
+#[cfg(test)]
 impl ByteSource for SliceSource<'_> {
     fn next_byte(&mut self) -> Option<u8> {
         let byte = *self.data.get(self.pos)?;
@@ -99,6 +102,7 @@ impl RangeDecoder {
 
     // 4.3: scale 0, a scale above the range and a result at or beyond the
     // scale are corrupt input.
+    #[inline(always)]
     fn query(&mut self, scale: u32) -> Result<u32> {
         if scale == 0 {
             return Err(corrupt("RAR: PPMd context total is zero"));
@@ -117,6 +121,7 @@ impl RangeDecoder {
 
     // Requires lo < hi <= scale of the preceding query. Normalises at once:
     // the read position after every symbol is part of the format.
+    #[inline(always)]
     fn narrow<S: ByteSource>(&mut self, lo: u32, hi: u32, src: &mut S) -> Result<()> {
         if lo >= hi {
             return Err(broken());
@@ -218,6 +223,7 @@ impl Arena {
         })
     }
 
+    #[inline]
     fn byte(&self, off: u32) -> u8 {
         self.chunks
             .get((off >> CHUNK_BITS) as usize)
@@ -226,25 +232,49 @@ impl Arena {
             .unwrap_or(0)
     }
 
-    fn get<const N: usize>(&self, off: u32) -> [u8; N] {
-        let mut out = [0u8; N];
+    // `len` bytes at `off`, when they are backed and lie in one piece.
+    #[inline]
+    fn span(&self, off: u32, len: usize) -> Option<&[u8]> {
         let at = off as usize & (CHUNK - 1);
-        let whole = self
-            .chunks
-            .get((off >> CHUNK_BITS) as usize)
-            .and_then(|chunk| chunk.get(at..at + N));
-        match whole {
-            Some(bytes) => out.copy_from_slice(bytes),
-            None => {
-                for (i, b) in out.iter_mut().enumerate() {
-                    *b = self.byte(off.wrapping_add(i as u32));
-                }
-            }
+        self.chunks
+            .get((off >> CHUNK_BITS) as usize)?
+            .get(at..at + len)
+    }
+
+    #[inline]
+    fn get<const N: usize>(&self, off: u32) -> [u8; N] {
+        match self.span(off, N).map(<[u8; N]>::try_from) {
+            Some(Ok(bytes)) => bytes,
+            _ => self.get_split(off),
+        }
+    }
+
+    #[cold]
+    #[inline(never)]
+    fn get_split<const N: usize>(&self, off: u32) -> [u8; N] {
+        let mut out = [0u8; N];
+        for (i, b) in out.iter_mut().enumerate() {
+            *b = self.byte(off.wrapping_add(i as u32));
         }
         out
     }
 
+    #[inline]
     fn set_byte(&mut self, off: u32, value: u8) {
+        let at = off as usize & (CHUNK - 1);
+        match self
+            .chunks
+            .get_mut((off >> CHUNK_BITS) as usize)
+            .and_then(|chunk| chunk.get_mut(at))
+        {
+            Some(b) if off < self.size => *b = value,
+            _ => self.set_byte_unbacked(off, value),
+        }
+    }
+
+    #[cold]
+    #[inline(never)]
+    fn set_byte_unbacked(&mut self, off: u32, value: u8) {
         let chunk = match self.chunks.get_mut((off >> CHUNK_BITS) as usize) {
             Some(chunk) if off < self.size => chunk,
             _ => {
@@ -264,21 +294,96 @@ impl Arena {
         }
     }
 
-    fn put(&mut self, off: u32, bytes: &[u8]) {
+    #[inline]
+    fn put<const N: usize>(&mut self, off: u32, bytes: [u8; N]) {
         let at = off as usize & (CHUNK - 1);
-        let whole = self
+        // The last piece may reach past `size`.
+        let inside = off
+            .checked_add(N as u32)
+            .is_some_and(|end| end <= self.size);
+        match self
             .chunks
             .get_mut((off >> CHUNK_BITS) as usize)
-            .and_then(|chunk| chunk.get_mut(at..at + bytes.len()));
-        match whole {
-            Some(dst) => dst.copy_from_slice(bytes),
-            None => {
-                for (i, &b) in bytes.iter().enumerate() {
-                    self.set_byte(off.wrapping_add(i as u32), b);
-                }
-            }
+            .and_then(|chunk| chunk.get_mut(at..at + N))
+        {
+            Some(dst) if inside => dst.copy_from_slice(&bytes),
+            _ => self.put_split(off, &bytes),
         }
     }
+
+    #[cold]
+    #[inline(never)]
+    fn put_split(&mut self, off: u32, bytes: &[u8]) {
+        for (i, &b) in bytes.iter().enumerate() {
+            self.set_byte(off.wrapping_add(i as u32), b);
+        }
+    }
+
+    // Runs `f` on the `n` (at most 256) states at `base`, 6 bytes each.
+    #[inline]
+    fn with_states<R>(&self, base: u32, n: u32, f: impl FnOnce(&[u8]) -> R) -> R {
+        let len = (STATE * n.min(256)) as usize;
+        match self.span(base, len) {
+            Some(states) => f(states),
+            None => self.with_split_states(base, len, f),
+        }
+    }
+
+    #[cold]
+    #[inline(never)]
+    fn with_split_states<R>(&self, base: u32, len: usize, f: impl FnOnce(&[u8]) -> R) -> R {
+        let mut copy = [0u8; 256 * STATE as usize];
+        let len = len.min(copy.len());
+        for (i, b) in copy[..len].iter_mut().enumerate() {
+            *b = self.byte(base.wrapping_add(i as u32));
+        }
+        f(&copy[..len])
+    }
+}
+
+// A context as read from its unit.
+#[derive(Clone, Copy)]
+struct Ctx {
+    suffix: u32,
+    n: u32,
+    // For n >= 2.
+    total: u16,
+    states: u32,
+    // For n = 1.
+    single: StateRec,
+}
+
+fn state_rec(raw: &[u8]) -> StateRec {
+    match *raw {
+        [s0, s1, s2, s3, symbol, freq, ..] => StateRec {
+            successor: u32::from_le_bytes([s0, s1, s2, s3]),
+            symbol,
+            freq: u32::from(freq),
+            found: false,
+        },
+        _ => StateRec::default(),
+    }
+}
+
+// What 9.4 starts from: the context the symbol was found in with its
+// suffix, the state found and the text reference it holds, and the state
+// credited in 9.2 (0 = none) with the suffix of its context.
+struct Chain {
+    found_in: u32,
+    suffix: u32,
+    state: u32,
+    text: u32,
+    credited: u32,
+    credited_suffix: u32,
+    symbol: u8,
+}
+
+// Where a code value falls among the states of a context.
+enum Scan {
+    // Index of the state, the sum of the frequencies before it, its own.
+    Hit(u32, u32, u32),
+    // No state: the sum of all frequencies counted.
+    Escape(u32),
 }
 
 fn no_memory() -> Error {
@@ -369,7 +474,9 @@ struct Model {
     seed: u32,
     bin: Vec<u16>,
     see: Vec<See>,
-    masked: [bool; 256],
+    // A symbol is masked when its entry equals `mask_stamp`.
+    masked: [u8; 256],
+    mask_stamp: u8,
     mask_used: bool,
 }
 
@@ -409,7 +516,8 @@ impl Model {
             seed: 0,
             bin,
             see,
-            masked: [false; 256],
+            masked: [0; 256],
+            mask_stamp: 1,
             mask_used: false,
         };
         model.start();
@@ -437,7 +545,8 @@ impl Model {
         self.merge_countdown = 0;
         self.work.clear();
 
-        self.masked = [false; 256];
+        self.masked = [0; 256];
+        self.mask_stamp = 1;
         self.mask_used = false;
         self.success = 0;
         self.deficit = self.max_order;
@@ -475,48 +584,61 @@ impl Model {
 
     // -- arena access --
 
+    #[inline]
     fn r8(&self, off: u32) -> u8 {
         self.mem.byte(off)
     }
 
+    #[inline]
     fn r16(&self, off: u32) -> u16 {
         u16::from_le_bytes(self.mem.get(off))
     }
 
+    #[inline]
     fn r32(&self, off: u32) -> u32 {
         u32::from_le_bytes(self.mem.get(off))
     }
 
+    #[inline]
     fn w8(&mut self, off: u32, value: u8) {
         self.mem.set_byte(off, value);
     }
 
+    #[inline]
     fn w16(&mut self, off: u32, value: u16) {
-        self.mem.put(off, &value.to_le_bytes());
+        self.mem.put(off, value.to_le_bytes());
     }
 
+    #[inline]
     fn w32(&mut self, off: u32, value: u32) {
-        self.mem.put(off, &value.to_le_bytes());
+        self.mem.put(off, value.to_le_bytes());
     }
 
     fn copy_units(&mut self, from: u32, to: u32, units: u32) {
         for i in 0..units {
             let unit: [u8; UNIT as usize] = self.mem.get(from.wrapping_add(i * UNIT));
-            self.mem.put(to.wrapping_add(i * UNIT), &unit);
+            self.mem.put(to.wrapping_add(i * UNIT), unit);
         }
     }
 
     // -- allocator (6.4 to 6.7) --
 
+    #[inline]
     fn push_free(&mut self, class: usize, off: u32) {
         let Some(head) = self.free.get_mut(class) else {
             return;
         };
         let next = core::mem::replace(head, off);
-        self.w32(off, FREE_MARK);
-        self.w32(off + 4, next);
+        let (mark, next) = (FREE_MARK.to_le_bytes(), next.to_le_bytes());
+        self.mem.put(
+            off,
+            [
+                mark[0], mark[1], mark[2], mark[3], next[0], next[1], next[2], next[3],
+            ],
+        );
     }
 
+    #[inline]
     fn pop_free(&mut self, class: usize) -> Option<u32> {
         let off = *self.free.get(class)?;
         if off == 0 {
@@ -528,6 +650,7 @@ impl Model {
     }
 
     // 6.4. `None` is the exhaustion that restarts the model.
+    #[inline]
     fn alloc_context(&mut self) -> Option<u32> {
         if self.high >= self.low.saturating_add(UNIT) {
             self.high -= UNIT;
@@ -706,33 +829,28 @@ impl Model {
 
     // -- records --
 
+    #[inline]
     fn state(&self, off: u32) -> StateRec {
         let raw: [u8; STATE as usize] = self.mem.get(off);
-        StateRec {
-            successor: u32::from_le_bytes([raw[0], raw[1], raw[2], raw[3]]),
-            symbol: raw[4],
-            freq: u32::from(raw[5]),
-            found: false,
-        }
+        state_rec(&raw)
     }
 
+    #[inline]
     fn put_state(&mut self, off: u32, successor: u32, symbol: u8, freq: u32) {
         let s = successor.to_le_bytes();
         if freq > 255 {
             self.mem.fault = Fault::Bounds;
         }
         self.mem
-            .put(off, &[s[0], s[1], s[2], s[3], symbol, freq as u8]);
+            .put(off, [s[0], s[1], s[2], s[3], symbol, freq as u8]);
     }
 
-    fn symbol(&self, state: u32) -> u8 {
-        self.r8(state.wrapping_add(4))
-    }
-
+    #[inline]
     fn freq(&self, state: u32) -> u32 {
         u32::from(self.r8(state.wrapping_add(5)))
     }
 
+    #[inline]
     fn set_freq(&mut self, state: u32, freq: u32) {
         if freq > 255 {
             self.mem.fault = Fault::Bounds;
@@ -740,15 +858,17 @@ impl Model {
         self.w8(state.wrapping_add(5), freq as u8);
     }
 
+    #[inline]
     fn swap_states(&mut self, a: u32, b: u32) {
         let x: [u8; STATE as usize] = self.mem.get(a);
         let y: [u8; STATE as usize] = self.mem.get(b);
-        self.mem.put(a, &y);
-        self.mem.put(b, &x);
+        self.mem.put(a, y);
+        self.mem.put(b, x);
     }
 
     // Number of states of the context at `off`, which must be a unit of the
     // units area holding a plausible context (section 14 item 5).
+    #[inline]
     fn context(&self, off: u32) -> Result<u32> {
         if off < self.units_start || off > self.mem.size - UNIT {
             return Err(broken());
@@ -760,6 +880,27 @@ impl Model {
         Ok(n)
     }
 
+    // The context at `off`, checked like `context`.
+    #[inline(always)]
+    fn load(&self, off: u32) -> Result<Ctx> {
+        if off < self.units_start || off > self.mem.size - UNIT {
+            return Err(broken());
+        }
+        let raw: [u8; UNIT as usize] = self.mem.get(off);
+        let n = u32::from(u16::from_le_bytes([raw[4], raw[5]]));
+        if n == 0 || n > 256 {
+            return Err(broken());
+        }
+        Ok(Ctx {
+            suffix: u32::from_le_bytes([raw[0], raw[1], raw[2], raw[3]]),
+            n,
+            total: u16::from_le_bytes([raw[6], raw[7]]),
+            states: u32::from_le_bytes([raw[8], raw[9], raw[10], raw[11]]),
+            single: state_rec(&raw[STATE as usize..]),
+        })
+    }
+
+    #[inline]
     fn successor_context(&self, successor: u32) -> Result<u32> {
         if successor & CONTEXT_REF == 0 {
             return Err(broken());
@@ -769,42 +910,51 @@ impl Model {
         Ok(off)
     }
 
-    fn suffix(&self, context: u32) -> u32 {
-        self.r32(context)
-    }
-
+    #[inline]
     fn total(&self, context: u32) -> u16 {
         self.r16(context + 6)
     }
 
-    fn add_total(&mut self, context: u32, by: u16) {
-        let total = self.total(context).wrapping_add(by);
-        self.w16(context + 6, total);
-    }
-
+    #[inline]
     fn states(&self, context: u32) -> u32 {
         self.r32(context + 8)
     }
 
-    // The state of `context` (n states) that holds `symbol`.
-    fn find(&self, context: u32, n: u32, symbol: u8) -> Result<u32> {
-        if n == 1 {
-            let state = context + STATE;
-            return if self.symbol(state) == symbol {
-                Ok(state)
+    // The state of the context `ctx` at `context` that holds `symbol`.
+    #[inline(always)]
+    fn find(&self, context: u32, ctx: &Ctx, symbol: u8) -> Result<(u32, StateRec)> {
+        if ctx.n == 1 {
+            return if ctx.single.symbol == symbol {
+                Ok((context + STATE, ctx.single))
             } else {
                 Err(broken())
             };
         }
-        let base = self.states(context);
-        (0..n)
-            .map(|i| base.wrapping_add(STATE * i))
-            .find(|&state| self.symbol(state) == symbol)
-            .ok_or_else(broken)
+        let found = self.mem.with_states(ctx.states, ctx.n, |states| {
+            states
+                .chunks_exact(STATE as usize)
+                .enumerate()
+                .find(|(_, state)| state[4] == symbol)
+                .map(|(index, state)| (index as u32, state_rec(state)))
+        });
+        let (index, rec) = found.ok_or_else(broken)?;
+        Ok((ctx.states.wrapping_add(STATE * index), rec))
     }
 
+    #[inline]
     fn mask(&mut self, symbol: u8) {
-        self.masked[usize::from(symbol)] = true;
+        self.masked[usize::from(symbol)] = self.mask_stamp;
+        self.mask_used = true;
+    }
+
+    // Masks every symbol of the context's states.
+    fn mask_all(&mut self, base: u32, n: u32) {
+        let (masked, stamp) = (&mut self.masked, self.mask_stamp);
+        self.mem.with_states(base, n, |states| {
+            for state in states.chunks_exact(STATE as usize) {
+                masked[usize::from(state[4])] = stamp;
+            }
+        });
         self.mask_used = true;
     }
 
@@ -812,16 +962,20 @@ impl Model {
 
     fn decode<S: ByteSource>(&mut self, rc: &mut RangeDecoder, src: &mut S) -> Result<u8> {
         if self.mask_used {
-            self.masked = [false; 256];
             self.mask_used = false;
+            self.mask_stamp = self.mask_stamp.wrapping_add(1);
+            if self.mask_stamp == 0 {
+                self.masked = [0; 256];
+                self.mask_stamp = 1;
+            }
         }
         let start = self.current;
         let mut found_in = start;
-        let mut n = self.context(found_in)?;
-        let mut hit = if n == 1 {
-            self.binary_step(found_in, rc, src)?
+        let mut ctx = self.load(found_in)?;
+        let mut hit = if ctx.n == 1 {
+            self.binary_step(found_in, &ctx, rc, src)?
         } else {
-            self.full_step(found_in, n, rc, src)?
+            self.full_step(found_in, &ctx, rc, src)?
         };
         let state = loop {
             if let Some(state) = hit {
@@ -829,9 +983,9 @@ impl Model {
             }
             // 8.1 step 3: after an escape all n symbols of the context are
             // masked.
-            let masked = n;
+            let masked = ctx.n;
             loop {
-                found_in = self.suffix(found_in);
+                found_in = ctx.suffix;
                 if found_in == 0 {
                     return Err(corrupt("RAR: PPMd escape from the root context"));
                 }
@@ -839,15 +993,17 @@ impl Model {
                 if self.deficit > self.max_order {
                     return Err(broken());
                 }
-                n = self.context(found_in)?;
-                if n > masked {
+                ctx = self.load(found_in)?;
+                if ctx.n > masked {
                     break;
                 }
             }
-            hit = self.masked_step(found_in, n, rc, src)?;
+            hit = self.masked_step(found_in, &ctx, rc, src)?;
         };
-        let symbol = self.symbol(state);
-        let restarted = self.update(start, found_in, state, symbol)?;
+        // The steps leave the suffix of a context alone.
+        let rec = self.state(state);
+        let symbol = rec.symbol;
+        let restarted = self.update(start, found_in, ctx.suffix, state, rec)?;
         // 9.6: the symbol whose update restarted the model is not remembered.
         self.last = if restarted { 0 } else { symbol };
         self.health()?;
@@ -858,13 +1014,14 @@ impl Model {
     fn binary_step<S: ByteSource>(
         &mut self,
         context: u32,
+        ctx: &Ctx,
         rc: &mut RangeDecoder,
         src: &mut S,
     ) -> Result<Option<u32>> {
         let state = context + STATE;
-        let freq = self.freq(state);
-        let symbol = self.symbol(state);
-        let suffix = self.suffix(context);
+        let freq = ctx.single.freq;
+        let symbol = ctx.single.symbol;
+        let suffix = ctx.suffix;
         if suffix == 0 || freq == 0 || freq > 128 {
             return Err(broken());
         }
@@ -909,75 +1066,89 @@ impl Model {
     fn full_step<S: ByteSource>(
         &mut self,
         context: u32,
-        n: u32,
+        ctx: &Ctx,
         rc: &mut RangeDecoder,
         src: &mut S,
     ) -> Result<Option<u32>> {
-        let base = self.states(context);
-        let total = u32::from(self.total(context));
+        let (base, n) = (ctx.states, ctx.n);
+        let total = u32::from(ctx.total);
         let v = rc.query(total)?;
-        let first = self.freq(base);
-        if v < first {
-            rc.narrow(0, first, src)?;
-            self.success = u32::from(2 * first > total);
-            if self.success == 1 {
-                self.run = self.run.wrapping_add(1);
+        // Also the frequency of the state before the one found.
+        let (scan, before_freq) = self.mem.with_states(base, n, |states| {
+            let mut sum = 0;
+            let mut before = 0;
+            for (i, state) in states.chunks_exact(STATE as usize).enumerate() {
+                let freq = u32::from(state[5]);
+                if v < sum + freq {
+                    return (Scan::Hit(i as u32, sum, freq), before);
+                }
+                sum += freq;
+                before = freq;
             }
-            self.set_freq(base, first + 4);
-            self.add_total(context, 4);
-            if first + 4 > MAX_FREQ {
-                return self.rescale(context, n, 0).map(Some);
+            (Scan::Escape(sum), before)
+        });
+        let grown = ctx.total.wrapping_add(4);
+        match scan {
+            Scan::Hit(0, _, first) => {
+                rc.narrow(0, first, src)?;
+                self.success = u32::from(2 * first > total);
+                if self.success == 1 {
+                    self.run = self.run.wrapping_add(1);
+                }
+                self.set_freq(base, first + 4);
+                self.w16(context + 6, grown);
+                if first + 4 > MAX_FREQ {
+                    return self.rescale(context, n, 0).map(Some);
+                }
+                Ok(Some(base))
             }
-            return Ok(Some(base));
-        }
-        self.success = 0;
-        let mut sum = first;
-        for i in 1..n {
-            let state = base.wrapping_add(STATE * i);
-            let freq = self.freq(state);
-            if v < sum + freq {
+            Scan::Hit(i, sum, freq) => {
+                self.success = 0;
+                let state = base.wrapping_add(STATE * i);
                 rc.narrow(sum, sum + freq, src)?;
                 let freq = freq + 4;
                 self.set_freq(state, freq);
-                self.add_total(context, 4);
+                self.w16(context + 6, grown);
                 let before = state.wrapping_sub(STATE);
-                if freq <= self.freq(before) {
+                if freq <= before_freq {
                     return Ok(Some(state));
                 }
                 self.swap_states(state, before);
                 if freq > MAX_FREQ {
                     return self.rescale(context, n, i - 1).map(Some);
                 }
-                return Ok(Some(before));
+                Ok(Some(before))
             }
-            sum += freq;
+            Scan::Escape(sum) => {
+                self.success = 0;
+                rc.narrow(sum, total, src)?;
+                self.mask_all(base, n);
+                Ok(None)
+            }
         }
-        rc.narrow(sum, total, src)?;
-        for i in 0..n {
-            let symbol = self.symbol(base.wrapping_add(STATE * i));
-            self.mask(symbol);
-        }
-        Ok(None)
     }
 
     // 8.4
     fn masked_step<S: ByteSource>(
         &mut self,
         context: u32,
-        n: u32,
+        ctx: &Ctx,
         rc: &mut RangeDecoder,
         src: &mut S,
     ) -> Result<Option<u32>> {
-        let base = self.states(context);
-        let mut unmasked = 0u32;
-        let mut live = 0u32;
-        for i in 0..n {
-            let state = base.wrapping_add(STATE * i);
-            if !self.masked[usize::from(self.symbol(state))] {
-                unmasked += 1;
-                live += self.freq(state);
+        let (base, n) = (ctx.states, ctx.n);
+        let (masked, stamp) = (&self.masked, self.mask_stamp);
+        let (unmasked, live) = self.mem.with_states(base, n, |states| {
+            let mut unmasked = 0u32;
+            let mut live = 0u32;
+            // Without a branch: which symbols are masked is hard to predict.
+            for state in states.chunks_exact(STATE as usize) {
+                let open = u32::from(masked[usize::from(state[4])] != stamp);
+                unmasked += open;
+                live += open * u32::from(state[5]);
             }
-        }
+            (unmasked, live)
+        });
         if unmasked == 0 {
             return Err(broken());
         }
@@ -985,18 +1156,14 @@ impl Model {
         let mut estimator = None;
         let mut escape = 1;
         if n != 256 {
-            let suffix = self.suffix(context);
+            let suffix = ctx.suffix;
             if suffix == 0 {
                 return Err(broken());
             }
             let suffix_n = self.context(suffix)?;
             let masked = n - unmasked;
             let column = usize::from(unmasked + n < suffix_n)
-                + if u32::from(self.total(context)) < 11 * n {
-                    2
-                } else {
-                    0
-                }
+                + if u32::from(ctx.total) < 11 * n { 2 } else { 0 }
                 + if masked > unmasked { 4 } else { 0 }
                 + if self.last >= 64 { 8 } else { 0 };
             let index = usize::from(SEE_ROW[unmasked as usize]) * SEE_COLS + column;
@@ -1014,24 +1181,27 @@ impl Model {
                 let see = &mut self.see[index];
                 see.sum = see.sum.wrapping_add((escape + live) as u16);
             }
-            for i in 0..n {
-                let symbol = self.symbol(base.wrapping_add(STATE * i));
-                self.mask(symbol);
-            }
+            self.mask_all(base, n);
             return Ok(None);
         }
 
-        let mut sum = 0;
-        for i in 0..n {
-            let state = base.wrapping_add(STATE * i);
-            if self.masked[usize::from(self.symbol(state))] {
-                continue;
-            }
-            let freq = self.freq(state);
-            if v >= sum + freq {
+        let (masked, stamp) = (&self.masked, self.mask_stamp);
+        let scan = self.mem.with_states(base, n, |states| {
+            let mut sum = 0;
+            for (i, state) in states.chunks_exact(STATE as usize).enumerate() {
+                // A masked state counts as frequency 0 and is never hit,
+                // since `v >= sum` here.
+                let open = u32::from(masked[usize::from(state[4])] != stamp);
+                let freq = open * u32::from(state[5]);
+                if v < sum + freq {
+                    return Scan::Hit(i as u32, sum, freq);
+                }
                 sum += freq;
-                continue;
             }
+            Scan::Escape(sum)
+        });
+        if let Scan::Hit(i, sum, freq) = scan {
+            let state = base.wrapping_add(STATE * i);
             rc.narrow(sum, sum + freq, src)?;
             if let Some(index) = estimator {
                 let see = &mut self.see[index];
@@ -1045,7 +1215,7 @@ impl Model {
                 }
             }
             self.set_freq(state, freq + 4);
-            self.add_total(context, 4);
+            self.w16(context + 6, ctx.total.wrapping_add(4));
             self.run = self.run_reset;
             if freq + 4 > MAX_FREQ {
                 return self.rescale(context, n, i).map(Some);
@@ -1141,9 +1311,22 @@ impl Model {
     // -- updating the model (section 9) --
 
     // Returns whether the model was restarted (9.7).
-    fn update(&mut self, start: u32, found_in: u32, state: u32, symbol: u8) -> Result<bool> {
-        let freq = self.freq(state);
-        let successor = self.r32(state);
+    // `suffix` is the suffix of `found_in`, `rec` the state at `state`.
+    #[inline(always)]
+    fn update(
+        &mut self,
+        start: u32,
+        found_in: u32,
+        suffix: u32,
+        state: u32,
+        rec: StateRec,
+    ) -> Result<bool> {
+        let StateRec {
+            successor,
+            symbol,
+            freq,
+            ..
+        } = rec;
 
         // 9.1
         if self.deficit == 0 && successor & CONTEXT_REF != 0 {
@@ -1153,35 +1336,45 @@ impl Model {
 
         // 9.2
         let mut credited = 0;
-        let suffix = self.suffix(found_in);
+        let mut credited_suffix = 0;
         if freq < 31 && suffix != 0 {
-            let n = self.context(suffix)?;
-            let mut twin = self.find(suffix, n, symbol)?;
-            let twin_freq = self.freq(twin);
-            if n == 1 {
+            let ctx = self.load(suffix)?;
+            let (mut twin, twin_rec) = self.find(suffix, &ctx, symbol)?;
+            let twin_freq = twin_rec.freq;
+            if ctx.n == 1 {
                 if twin_freq < 32 {
                     self.set_freq(twin, twin_freq + 1);
                 }
             } else {
                 let before = twin.wrapping_sub(STATE);
-                if twin != self.states(suffix) && twin_freq >= self.freq(before) {
+                if twin != ctx.states && twin_freq >= self.freq(before) {
                     self.swap_states(twin, before);
                     twin = before;
                 }
                 if twin_freq < 115 {
                     self.set_freq(twin, twin_freq + 2);
-                    self.add_total(suffix, 2);
+                    self.w16(suffix + 6, ctx.total.wrapping_add(2));
                 }
             }
             credited = twin;
+            credited_suffix = ctx.suffix;
         }
+        let chain = Chain {
+            found_in,
+            suffix,
+            state,
+            text: successor,
+            credited,
+            credited_suffix,
+            symbol,
+        };
 
         // 9.3 case A
         if self.deficit == 0 {
             if successor == 0 {
                 return Err(broken());
             }
-            let Some(next) = self.build_chain(found_in, state, credited, symbol, false)? else {
+            let Some(next) = self.build_chain(&chain, false)? else {
                 self.start();
                 return Ok(true);
             };
@@ -1207,7 +1400,7 @@ impl Model {
             let next = if successor & CONTEXT_REF != 0 {
                 self.successor_context(successor)?
             } else {
-                match self.build_chain(found_in, state, credited, symbol, true)? {
+                match self.build_chain(&chain, true)? {
                     Some(next) => next,
                     None => {
                         self.start();
@@ -1233,30 +1426,31 @@ impl Model {
         Ok(false)
     }
 
-    // 9.4. `state` holds a text reference; `credited` is the state V of 9.2
-    // or 0. `None`: a context could not be allocated.
-    fn build_chain(
-        &mut self,
-        found_in: u32,
-        state: u32,
-        credited: u32,
-        symbol: u8,
-        include_state: bool,
-    ) -> Result<Option<u32>> {
-        let text = self.r32(state);
+    // 9.4. `None`: a context could not be allocated.
+    fn build_chain(&mut self, chain: &Chain, include_state: bool) -> Result<Option<u32>> {
+        let Chain {
+            found_in,
+            state,
+            text,
+            credited,
+            symbol,
+            ..
+        } = *chain;
         let mut list = [0u32; 64];
         let mut len = 0usize;
         let limit = (self.max_order as usize).min(list.len());
         let mut context = found_in;
+        // The suffix of `context`.
+        let mut suffix = chain.suffix;
         let mut walk = true;
 
         if include_state {
             list[0] = state;
             len = 1;
-            walk = self.suffix(context) != 0;
+            walk = suffix != 0;
         }
         if walk && credited != 0 {
-            context = self.suffix(found_in);
+            context = suffix;
             let successor = self.r32(credited);
             if successor != text {
                 context = self.successor_context(successor)?;
@@ -1267,19 +1461,19 @@ impl Model {
                     .filter(|_| len < limit)
                     .ok_or_else(broken)? = credited;
                 len += 1;
-                walk = self.suffix(context) != 0;
+                suffix = chain.credited_suffix;
+                walk = suffix != 0;
             }
         }
         while walk {
-            context = self.suffix(context);
+            context = suffix;
             if context == 0 {
                 return Err(broken());
             }
-            let n = self.context(context)?;
-            let twin = self.find(context, n, symbol)?;
-            let successor = self.r32(twin);
-            if successor != text {
-                context = self.successor_context(successor)?;
+            let ctx = self.load(context)?;
+            let (twin, rec) = self.find(context, &ctx, symbol)?;
+            if rec.successor != text {
+                context = self.successor_context(rec.successor)?;
                 break;
             }
             *list
@@ -1287,7 +1481,8 @@ impl Model {
                 .filter(|_| len < limit)
                 .ok_or_else(broken)? = twin;
             len += 1;
-            walk = self.suffix(context) != 0;
+            suffix = ctx.suffix;
+            walk = suffix != 0;
         }
         if len == 0 {
             return Ok(Some(context));
@@ -1298,13 +1493,14 @@ impl Model {
             return Err(broken());
         }
         let next_symbol = self.r8(text);
-        let n = self.context(context)?;
-        let twin = self.find(context, n, next_symbol)?;
+        let ctx = self.load(context)?;
+        let (_, twin) = self.find(context, &ctx, next_symbol)?;
+        let n = ctx.n;
         let freq = if n == 1 {
-            self.freq(twin)
+            twin.freq
         } else {
-            let a = self.freq(twin) as i32 - 1;
-            let b = i32::from(self.total(context)) - n as i32 - a;
+            let a = twin.freq as i32 - 1;
+            let b = i32::from(ctx.total) - n as i32 - a;
             if 2 * a <= b {
                 if 5 * a > b { 2 } else { 1 }
             } else if b <= 0 {
@@ -1321,9 +1517,24 @@ impl Model {
             let Some(new) = self.alloc_context() else {
                 return Ok(None);
             };
-            self.w32(new, context);
-            self.w16(new + 4, 1);
-            self.put_state(new + STATE, text + 1, next_symbol, freq);
+            let (suffix, successor) = (context.to_le_bytes(), (text + 1).to_le_bytes());
+            self.mem.put(
+                new,
+                [
+                    suffix[0],
+                    suffix[1],
+                    suffix[2],
+                    suffix[3],
+                    1,
+                    0,
+                    successor[0],
+                    successor[1],
+                    successor[2],
+                    successor[3],
+                    next_symbol,
+                    freq as u8,
+                ],
+            );
             self.w32(listed, new | CONTEXT_REF);
             context = new;
         }
@@ -1353,20 +1564,20 @@ impl Model {
             if context == 0 || steps > self.max_order {
                 return Err(broken());
             }
-            let n = self.context(context)?;
+            let ctx = self.load(context)?;
+            let n = ctx.n;
             let (base, mut total) = if n >= 2 {
                 if n >= 256 {
                     return Err(broken());
                 }
-                let mut base = self.states(context);
+                let mut base = ctx.states;
                 if n % 2 == 0 {
                     let Some(grown) = self.grow(base, n / 2) else {
                         return Ok(false);
                     };
                     base = grown;
-                    self.w32(context + 8, base);
                 }
-                let mut total = self.total(context);
+                let mut total = ctx.total;
                 if 4 * n as i32 <= found_n && u32::from(total) <= 8 * n {
                     total = total.wrapping_add(2);
                 }
@@ -1378,10 +1589,9 @@ impl Model {
                 let Some(base) = self.alloc_block(0) else {
                     return Ok(false);
                 };
-                let rec = self.state(context + STATE);
+                let rec = ctx.single;
                 let own = if rec.freq < 30 { 2 * rec.freq } else { 120 };
                 self.put_state(base, rec.successor, rec.symbol, own);
-                self.w32(context + 8, base);
                 let total = own + self.seed + u32::from(found_n > 3);
                 (base, total as u16)
             };
@@ -1405,9 +1615,19 @@ impl Model {
             };
             total = total.wrapping_add(add);
             self.put_state(base.wrapping_add(STATE * n), successor, symbol, new_freq);
-            self.w16(context + 4, (n + 1) as u16);
-            self.w16(context + 6, total);
-            context = self.suffix(context);
+            let (count, total, states) = (
+                ((n + 1) as u16).to_le_bytes(),
+                total.to_le_bytes(),
+                base.to_le_bytes(),
+            );
+            self.mem.put(
+                context + 4,
+                [
+                    count[0], count[1], total[0], total[1], states[0], states[1], states[2],
+                    states[3],
+                ],
+            );
+            context = ctx.suffix;
         }
         Ok(true)
     }
@@ -1433,10 +1653,12 @@ impl Ppmd {
         }
     }
 
+    #[cfg(test)]
     pub(crate) fn has_model(&self) -> bool {
         self.model.is_some()
     }
 
+    #[cfg(test)]
     pub(crate) fn escape_value(&self) -> u8 {
         self.escape
     }
@@ -1672,6 +1894,28 @@ mod tests {
 
     fn hello() -> Vec<u8> {
         b"hello hello hello world\n".to_vec()
+    }
+
+    // Records that lie in two pieces of the arena, and unbacked memory.
+    #[test]
+    fn arena_pieces() {
+        let mut arena = Arena::new(2 * CHUNK as u32).unwrap();
+        assert_eq!(arena.get::<4>(CHUNK as u32 - 2), [0; 4]);
+        assert_eq!(arena.span(0, 4), None);
+        let at = CHUNK as u32 - 3;
+        arena.put(at, [1, 2, 3, 4, 5, 6]);
+        arena.put(at + 6, [7, 8, 9, 10, 11, 12]);
+        assert_eq!(arena.get::<6>(at), [1, 2, 3, 4, 5, 6]);
+        assert_eq!(arena.span(at, 6), None);
+        assert_eq!(arena.span(at + 6, 6), Some(&[7, 8, 9, 10, 11, 12][..]));
+        let symbols = |states: &[u8]| -> Vec<u8> {
+            states.chunks_exact(STATE as usize).map(|s| s[4]).collect()
+        };
+        assert_eq!(arena.with_states(at, 2, symbols), [5, 11]);
+        assert_eq!(arena.with_states(at + 6, 1, symbols), [11]);
+        assert!(arena.fault == Fault::None);
+        arena.put(2 * CHUNK as u32 - 2, [1, 2, 3, 4]);
+        assert!(arena.fault == Fault::Bounds);
     }
 
     #[test]

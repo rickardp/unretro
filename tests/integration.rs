@@ -2103,22 +2103,27 @@ fn build_rar4_volume(pieces: &[RarPiece<'_>], more: bool) -> Vec<u8> {
     out.extend_from_slice(&archive_header);
     for &(name, data, whole, before, after) in pieces {
         let flags = 0x8000 | u16::from(before) | (u16::from(after) << 1);
-        out.extend_from_slice(&[0, 0, 0x74]);
-        out.extend_from_slice(&flags.to_le_bytes());
-        out.extend_from_slice(&(32 + name.len() as u16).to_le_bytes());
-        out.extend_from_slice(&(data.len() as u32).to_le_bytes());
-        out.extend_from_slice(&(whole.len() as u32).to_le_bytes());
-        out.push(0);
-        // The reader checks it on the last piece.
-        out.extend_from_slice(&rar_crc32(whole).to_le_bytes());
-        out.extend_from_slice(&[0; 4]);
-        out.extend_from_slice(&[29, 0x30]);
-        out.extend_from_slice(&(name.len() as u16).to_le_bytes());
-        out.extend_from_slice(&0x20u32.to_le_bytes());
-        out.extend_from_slice(name.as_bytes());
+        let mut head = vec![0x74];
+        head.extend_from_slice(&flags.to_le_bytes());
+        head.extend_from_slice(&(32 + name.len() as u16).to_le_bytes());
+        head.extend_from_slice(&(data.len() as u32).to_le_bytes());
+        head.extend_from_slice(&(whole.len() as u32).to_le_bytes());
+        head.push(0);
+        // Of the whole file on the last piece, of the piece on the others.
+        head.extend_from_slice(&rar_crc32(if after { data } else { whole }).to_le_bytes());
+        head.extend_from_slice(&[0; 4]);
+        head.extend_from_slice(&[29, 0x30]);
+        head.extend_from_slice(&(name.len() as u16).to_le_bytes());
+        head.extend_from_slice(&0x20u32.to_le_bytes());
+        head.extend_from_slice(name.as_bytes());
+        // Block headers are only accepted with their checksums.
+        out.extend_from_slice(&(rar_crc32(&head) as u16).to_le_bytes());
+        out.extend_from_slice(&head);
         out.extend_from_slice(data);
     }
-    out.extend_from_slice(&[0, 0, 0x7b, u8::from(more), 0, 7, 0]);
+    let end = [0x7b, u8::from(more), 0, 7, 0];
+    out.extend_from_slice(&(rar_crc32(&end) as u16).to_le_bytes());
+    out.extend_from_slice(&end);
     out
 }
 

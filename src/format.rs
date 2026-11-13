@@ -113,6 +113,9 @@ pub enum ContainerFormat {
     /// `CUE/BIN` CD image (cue sheet plus track files).
     #[cfg(feature = "dos")]
     CueBin,
+    /// Nero `NRG` disc image (one entry per track).
+    #[cfg(feature = "dos")]
+    Nrg,
     /// `UDF` disc image (optical discs without a usable `ISO 9660` volume).
     #[cfg(feature = "dos")]
     Udf,
@@ -206,6 +209,8 @@ impl ContainerFormat {
             #[cfg(feature = "dos")]
             Self::CueBin => "CUE/BIN Disc Image",
             #[cfg(feature = "dos")]
+            Self::Nrg => "Nero NRG Disc Image",
+            #[cfg(feature = "dos")]
             Self::Udf => "UDF Disc Image",
             #[cfg(feature = "next")]
             Self::NextDisklabel => "NeXT Disk Image",
@@ -289,6 +294,8 @@ impl ContainerFormat {
             #[cfg(feature = "dos")]
             "cue" => Some(Self::CueBin),
             #[cfg(feature = "dos")]
+            "nrg" => Some(Self::Nrg),
+            #[cfg(feature = "dos")]
             "udf" => Some(Self::Udf),
             #[cfg(feature = "next")]
             "ufs" => Some(Self::Ufs),
@@ -340,6 +347,7 @@ impl ContainerFormat {
             | Self::Iso9660
             | Self::Arj
             | Self::CueBin
+            | Self::Nrg
             | Self::Udf => true,
             #[cfg(feature = "next")]
             Self::NextDisklabel | Self::Ufs => true,

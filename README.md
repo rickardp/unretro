@@ -69,7 +69,7 @@ Default features are `std` + `full`.
 | `macintosh` | HFS (incl. MFS, HFS Plus, HFSX), Apple Partition Map, StuffIt, CompactPro, BinHex, MacBinary, AppleSingle, AppleDouble, Resource Fork |
 | `amiga` | LHA/LZH, ADF (OFS/FFS disk images) |
 | `game` | SCUMM (incl. `MONSTER.SOU` speech bundles), iMUSE bundles, WAD, PAK, Wolf3D |
-| `dos` | FAT, MBR, GPT, ISO 9660 (Joliet, Rock Ridge, High Sierra, El Torito boot images, multi-session, raw 2352-byte sectors), UDF, RAR, ARJ, CUE/BIN CD images |
+| `dos` | FAT, MBR, GPT, ISO 9660 (Joliet, Rock Ridge, High Sierra, El Torito boot images, multi-session, raw 2352-byte and XA 2056/2336-byte sectors), UDF, RAR, ARJ, CUE/BIN CD images, Nero NRG disc images |
 | `next` | NeXT disk labels, UFS (UFS1: NeXTSTEP, OPENSTEP, Rhapsody, BSD) |
 | `beos` | Be File System (BFS) |
 | `lisa` | Apple Lisa file system (DiskCopy 4.2 with tags, DART, raw ProFile dumps) |
@@ -115,6 +115,13 @@ and `wasm32`, as `ContainerFormat::Compress`. The reader was written from the fo
 specification in [docs/compress/](docs/compress/README.md); see
 [docs/USAGE.md](docs/USAGE.md#unix-compress-files).
 
+RAR archives (the RAR 1.3/1.4 container, RAR 1.50 to 4.x and RAR 5/7; the RAR 1.5, 2.0,
+2.9 and 5/7 compression methods, solid archives, multi-volume sets and self-extracting
+archives) are read natively wherever `dos` is enabled, including `no_std` and `wasm32`,
+as `ContainerFormat::Rar`. Encrypted files are reported and left out. The reader was
+written from the format specifications in [docs/rar/](docs/rar/README.md); see
+[docs/USAGE.md](docs/USAGE.md#rar-archives).
+
 CUE/BIN CD images are read natively wherever `dos` is enabled, including `no_std` and
 `wasm32`, as `ContainerFormat::CueBin`: a `.cue` sheet lists one entry per track, data
 tracks cooked to 2048-byte sectors (`trackNN.img`, which open as the file system they
@@ -122,6 +129,24 @@ hold) and audio tracks as headerless little-endian PCM (`trackNN.pcm`). Track fi
 looked up next to the sheet, on disk or in the same archive; `WAVE`, `MP3` and `AIFF`
 track files are not read. The reader was written from the format specification in
 [docs/cue/](docs/cue/README.md); see [docs/USAGE.md](docs/USAGE.md#cuebin-cd-images).
+
+Nero NRG disc images (`NERO` and `NER5` footers, disc-at-once and track-at-once, CD and
+DVD, multi-session) are read natively wherever `dos` is enabled, including `no_std` and
+`wasm32`, as `ContainerFormat::Nrg`. They list the same entries as a CUE/BIN image of the
+same disc: one `trackNN.img` per data track, cooked to 2048-byte sectors and opened as
+the file system it holds, and one `trackNN.pcm` per audio track. An image is recognised
+by the footer and chunk chain at its end, under any file name, before the file system
+its first track starts with. The reader was written from the format specification in
+[docs/nrg/](docs/nrg/README.md); see [docs/USAGE.md](docs/USAGE.md#nero-nrg-images).
+
+Toast images (`.toast`) have no format of their own: they are sector dumps of one data
+track and open as what they hold, an Apple Partition Map, a bare HFS or HFS Plus volume,
+ISO 9660 or UDF, as cooked 2048-byte sectors, raw 2352-byte sectors or CD-ROM XA sectors
+of 2056 or 2336 bytes. On a hybrid disc (a Macintosh volume and an ISO 9660 volume in
+one image, under any extension) the Macintosh side keeps its paths and the ISO 9660
+volume is listed as one more partition, `iso9660.img`. See
+[docs/USAGE.md](docs/USAGE.md#toast-images) and the findings in
+[docs/toast/](docs/toast/README.md).
 
 NeXT disk labels (`NeXT`, `dlV2`, `dlV3`) on NeXTSTEP, OPENSTEP and Rhapsody floppies,
 hard disks and CD-ROMs, and UFS1 volumes inside them or on their own (4.2BSD/4.3BSD and

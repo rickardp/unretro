@@ -631,6 +631,30 @@ fn a_track_file_in_an_archive_stays_reachable_without_its_sheet() {
     assert_eq!(walk.tracks("a.cue"), ["track01.img"]);
 }
 
+#[cfg(feature = "common")]
+#[test]
+fn an_audio_track_is_a_leaf_whatever_its_samples_look_like() {
+    let scratch = Unpacked::empty("audio-leaf");
+    let mut samples = tar_of(&[("inner.txt", b"not audio")]);
+    samples.resize(samples.len().div_ceil(2352) * 2352, 0);
+    assert_eq!(
+        detect_format("track01.pcm", Some(&samples)),
+        Some(ContainerFormat::Tar)
+    );
+    let sheet = "FILE \"audio.bin\" BINARY\n  TRACK 01 AUDIO\n    INDEX 01 00:00:00\n";
+    let archive = scratch.write(
+        "audio.tar",
+        &tar_of(&[("audio.cue", sheet.as_bytes()), ("audio.bin", &samples)]),
+    );
+
+    let walk = Walk::new(Loader::from_path(&archive));
+    assert_eq!(walk.tracks("audio.cue"), ["track01.pcm"]);
+    let track = walk.find("audio.cue/track01.pcm").unwrap();
+    assert_eq!(track.format, None);
+    assert_eq!(track.size, samples.len());
+    assert_eq!(below(&walk, "track01.pcm"), 0);
+}
+
 // Two files whose names differ in letter case only: the sheet reads one.
 #[cfg(feature = "common")]
 #[test]

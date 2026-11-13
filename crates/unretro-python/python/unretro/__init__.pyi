@@ -42,6 +42,7 @@ class ContainerFormat:
     LisaFs: ContainerFormat
     Udf: ContainerFormat
     Apm: ContainerFormat
+    Nrg: ContainerFormat
     Unknown: ContainerFormat
 
     @property

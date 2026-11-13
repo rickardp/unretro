@@ -1,9 +1,10 @@
 # RAR format specifications: index
 
-This directory specifies the parts of the RAR format that the reader in
-this repository implements from a written specification rather than from
-existing code. Each document is the only source its implementation is
-written from.
+This directory specifies the RAR format as the reader in this repository
+implements it. The whole reader (`src/formats/dos/rar.rs` and
+`src/formats/dos/rar_native/`) is written from these specifications; no
+part of it is vendored or derived from existing code. Each document is
+the only source its implementation is written from.
 
 ## 1. Purpose and provenance
 

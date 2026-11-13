@@ -112,10 +112,16 @@ fn extract4(volumes: &[&[u8]], limit: u64) -> Result<Listing> {
                     &mut last_decoded,
                     index,
                 );
-                if !matches!(outcome, Ok(_)) || !decoder.can_continue() {
+                if outcome.is_err() || !decoder.can_continue() {
                     unusable[index] = true;
                 }
-                outcome.unwrap_or_else(|failure| failure)
+                match outcome {
+                    Ok(outcome) => outcome,
+                    // 15.2 and vector C1 (`Z0`): the entry is an empty file
+                    // whatever the decoder does with its packed bytes.
+                    Err(_) if member.unpacked_size == 0 => Outcome::Ok { size: 0, crc32: 0 },
+                    Err(failure) => failure,
+                }
             }
             Content::Packed(other) => {
                 unusable[index] = true;
@@ -1055,6 +1061,7 @@ mod vectors {
     pub(super) enum Want {
         Ok(u64, u32),
         NoContents,
+        Encrypted,
         // Failed with a reason containing this text.
         Failed(&'static str),
     }
@@ -1243,6 +1250,27 @@ mod vectors {
                 volumes: vec![hex(R4_V3_RAR), hex(R4_V3_R00)],
                 want: vec![("BIG.BIN", BIG)],
             },
+            // rar4-container.md 18.1, C1: chain decisions; every packed
+            // member holds dummy data that its decoder rejects.
+            Case {
+                name: "rar4 solid C1",
+                volumes: vec![hex(R4_C1)],
+                want: vec![
+                    ("P1", Want::Failed("decoder: ")),
+                    ("S1", Want::Ok(4, 0x5758_779a)),
+                    ("DD", Want::NoContents),
+                    ("P2", Want::Failed("depends on an unreadable earlier entry")),
+                    ("P3", Want::Failed("solid predecessor unavailable")),
+                    ("P4", Want::Failed("depends on an unreadable earlier entry")),
+                    ("P5", Want::Failed("decoder: ")),
+                    ("P6", Want::Encrypted),
+                    ("P7", Want::Failed("depends on an unreadable earlier entry")),
+                    ("P8", Want::Failed("decoder: ")),
+                    ("P9", Want::Failed("depends on an unreadable earlier entry")),
+                    ("Z0", Want::Ok(0, 0)),
+                    ("PA", Want::Failed("depends on an unreadable earlier entry")),
+                ],
+            },
             // rar29-lz.md 14.1.
             case4("rar4 lz V1", &[raw("v1", LZ_V1, 6, 0x726e_994c)]),
             case4("rar4 lz V2", &[raw("v2", LZ_V2, 148, 0x7524_0148)]),
@@ -1276,6 +1304,49 @@ mod vectors {
                     raw("m1", LZ_V6F_M1, 16, 0xe0e8_ff4d),
                     solid(raw("m2", LZ_V6F_M2, 24, 0xff37_3421)),
                 ],
+            ),
+            // rar29-filters.md 20.4.
+            case4("rar4 filters S1", &[raw("m0", F_S1_M0, 60, 0x0bcd_453f)]),
+            case4("rar4 filters S2", &[raw("m0", F_S2_M0, 420, 0xac79_8647)]),
+            case4("rar4 filters S3", &[raw("m0", F_S3_M0, 120, 0x4ad1_fd39)]),
+            case4(
+                "rar4 solid filters S4",
+                &[
+                    raw("m0", F_S4_M0, 80, 0xab7f_cad2),
+                    solid(raw("m1", F_S4_M1, 80, 0x7d14_9e4a)),
+                ],
+            ),
+            case4("rar4 filters S5", &[raw("m0", F_S5_M0, 300, 0x06e1_d4f7)]),
+            case4(
+                "rar4 solid filters S6",
+                &[
+                    raw("m0", F_S6_M0, 80, 0x7592_bf1a),
+                    solid(raw("m1", F_S6_M1, 100, 0xa67b_6346)),
+                ],
+            ),
+            // rar29-ppmd.md 13.1, 13.2.
+            case4("rar4 ppmd PV1", &[raw("v1", P_V1, 12, 0x7718_bd00)]),
+            case4("rar4 ppmd PV2", &[raw("v2", P_V2, 24, 0xe05b_d988)]),
+            case4("rar4 ppmd PV3", &[raw("v3", P_V3, 10, 0xc97d_aaed)]),
+            case4("rar4 ppmd PV4", &[raw("v4", P_V4, 726, 0x29f1_3248)]),
+            case4("rar4 ppmd PV5a", &[raw("v5a", P_V5A, 48, 0x5911_03fe)]),
+            case4("rar4 ppmd PV5b", &[raw("v5b", P_V5B, 48, 0x5911_03fe)]),
+            case4("rar4 ppmd PV5c", &[raw("v5c", P_V5C, 24, 0xe05b_d988)]),
+            case4("rar4 ppmd PV5d", &[raw("v5d", P_V5D, 48, 0x5911_03fe)]),
+            case4("rar4 ppmd PV5e", &[raw("v5e", P_V5E, 51, 0xde6c_42db)]),
+            case4("rar4 ppmd PV5f", &[raw("v5f", P_V5F, 24, 0xe05b_d988)]),
+            case4("rar4 ppmd PV9", &[raw("v9", P_V9, 341, 0x29e8_9153)]),
+            case4(
+                "rar4 solid ppmd PV6",
+                &[
+                    raw("m1", P_V2, 24, 0xe05b_d988),
+                    solid(raw("m2", P_V6_M2, 47, 0x423f_b5d5)),
+                ],
+            ),
+            case4("rar4 ppmd filters PV7", &[raw("v7", P_V7, 68, 0x4319_5e29)]),
+            case4(
+                "rar4 ppmd filters PV7b",
+                &[raw("v7b", P_V7B, 132, 0xb1cf_103f)],
             ),
             // rar5-container.md 15.1, 16.1, 16.2.
             Case {
@@ -1373,6 +1444,25 @@ mod vectors {
         "00000003000000000f416d5d14300800ed410000656d707479646972f0fffa70",
         "3a0f416d5d92713a0f416d5dfa703ac43d7b00400700"
     );
+    pub(super) const R4_C1: &str = concat!(
+        "526172211a0700cf907300000d000000000000002e1c7400802200040000000a",
+        "0000000000000000a320432a1d330200200000005031deadbeef839574108022",
+        "000400000004000000009a775857a320432a1430020020000000533173746f72",
+        "d77d74f080220000000000000000000000000000a320432a1430020010000000",
+        "444484c07410802200040000000a0000000000000000a320432a1d3302002000",
+        "00005032deadbeefd8db7410802200040000000a0000000000000000a320432a",
+        "14330200200000005033deadbeefb1657410802200040000000a000000000000",
+        "0000a320432a1d330200200000005034deadbeefbda17400802200040000000a",
+        "0000000000000000a320432a1d350200200000005035deadbeef6cf87414842a",
+        "00040000000a0000000000000000a320432a1d33020020000000503601020304",
+        "05060708deadbeef0b347410802200040000000a0000000000000000a320432a",
+        "1d330200200000005037deadbeef780d7400802200040000000a000000000000",
+        "0000a320432a24330200200000005038deadbeef8a317410802200040000000a",
+        "0000000000000000a320432a1d310200200000005039deadbeefedd974108022",
+        "0004000000000000000000000000a320432a1d330200200000005a30deadbeef",
+        "02e07410802200040000000a0000000000000000a320432a1d33020020000000",
+        "5041deadbeef",
+    );
     pub(super) const R4_A1: &str = concat!(
         "526172211a0700cf907300000d000000000000004c5174008025001200000012",
         "000000003b7c8adfa320432a1430050020000000412e54585468656c6c6f2068",
@@ -1460,6 +1550,231 @@ mod vectors {
         "879ae419b15ce12dd775538bdd2ef757efa9aa94a961cd62a3ad68f086007b5c",
         "506df39f785a6bdb5fb682adef00"
     );
+    pub(super) const F_S1_M0: &str = concat!(
+        "0c199987e493c493666c9a0d934db229a69a8e049a69a69a84934d34dc894f9c",
+        "151f5ff7faba98c8031244d65c6c04a01c1a602000000344e840564bb1432e64",
+        "82e497c0a464554c0c4ab94440d564ad801055b5019aac08d12410d80948fa5c",
+        "007e08e49a7a2aaecb766250601e6f924c7897b080cc921aea62bf0c72cf4d77",
+        "e39ebbfd",
+    );
+    pub(super) const F_S1_M0_OUT: &str = concat!(
+        "00070e151c232a313940474e90e8f21f0000e800000001e8faffff00e800e0ff",
+        "ffe910000000e8e8ffff0000e8563412646b727980878f969da4abb2",
+    );
+    pub(super) const F_S2_M0: &str = concat!(
+        "0bcd4c7dd5008080808000000202020202000000080808080800000020202020",
+        "20202021b6adb6cb6db2db6cb6db27bbffe816c380008a010d1d2f019a4180ec",
+        "27482f09766dd3ea415b5944e8175ce16c914c4e3f7700000923c041016db012",
+        "78940109d847019a4195e5720dc26482749324b14006d8384400a8013411dca1",
+        "ba01990cc4033119a4066622604d9a400d668e60d030401826c1c8f6e6261378",
+        "9208e850bc5a07c6e9f520a9a0ed3733473966907019a39bcf258380c1bd3016",
+        "6e233493811609b050183b4dc84c059b88c528e0769390980b37118a59c48042",
+        "4843a947ee43346047d44a0dbbd359a486ee05094026c9342476a0306a20ea02",
+        "2004a041509e503fe6e128944601bd8b40f0681136c9a1923811419ca89510ee",
+        "50662b00209511040262ac668c6aca2640b2671b4b26cc648a6271a2b8006470",
+        "7c8894a2b0beccd8e4f0fd0b192735414d596573818f9da9b5c1cdd9e5f01450",
+        "f2864707c8896a4b2c0ccd8e4f0ff0d1b2935414d59677583919da9b5c1cfdbe",
+        "7f21450f2866727e8a96a4b2c0cedae6f2ff0d1b2937434f5b677583919fabb7",
+        "c207a02123c0450016d2c1c025889031816571406690657269936e92c502bd26",
+        "e013000569aa01c98ab27122e1988c83e1990901999c46663310cccc664019a2",
+        "0ccc333443a602cccd100334519986668a3312602cccd140334619986668c332",
+        "2602cccd181334419a29481899a20cd18a0143cc831334519a3140107923f221",
+        "57809f3249a060ec2770b7a71e2b359a2d039c76ec924e1b808a8b104ac42620",
+        "9240c53d3865c01cfdbe7f2185902a66727e8a98a6b4c2cedae6f3010f1d2b37",
+        "434f5b697785939fabb7c3d1dde9f4185902a6874808c98a6b4c2d0dce8f5010",
+        "f1d2b3945515d69778593a1adb9c5d1dde9f41c6112c6874808c9aa8b6c4d0dc",
+        "e8f503111f2d3945515d6b798795a1adb9c5d3dfea0838c2258d4ed051d35516",
+        "d89a5bdd5ee06223e5a768ea6bed6f30f2b475f778fa7bfd41081a48b9a9da0a",
+        "3a72aae31b4b7babdc144c84bced1d4d7db5ee265e8ebeef1f5787b031034917",
+        "363c42484e555c636a70767c828990979ea4aab0b6bdc4cbd2d8dee4eaf0f606",
+        "24713306c7884909eacbac8d4e0ecf9071523313d4955616f7d8b99a5b1bdc9d",
+        "7e3ee1048e2660dcf50d253d597591adc5ddf60e2a46627e96aec6defb17334f",
+        "677f97afc7dc27dfe7eff1b9ea1a4a82baf32b5b8bbbec245c94ccfd2d5d8dc5",
+        "fe366ffa",
+    );
+    pub(super) const F_S2_M0_OUT: &str = concat!(
+        "00cf9df99633eb56c1d60f48bac1c8976c416d108e959ca3abb2b9c0c7ce2b4f",
+        "6b808e95958e806b4e2affcd94540dbf690c646b727980878f969da455c6a385",
+        "ea3d2aee6298933bbdd7e06cfcf9117f1ffe267625e71d510eb4f810db64b7b1",
+        "8cf75a36c8cfd6dde5ecf3fa01080f161e252c333a41484f575e656c737a8188",
+        "90979ea5acb3bac1c9d0d7dee5ecf3fa020910171e252c333b424950575e656c",
+        "747b828990979ea5adb4bbc2c9d0d7dee6edf4fb020910171f262d343b424950",
+        "585f666d747b828991989fa6adb4bbc2cad1d8dfe6edf4fb030a11181f262d34",
+        "3c434a51585f666d757c838a91989fa6aeb5bcc3cad1d8dfe7eef5fc030a1118",
+        "20272e353c434a515960676e757c838a9299a0a7aeb5bcc3cbd2d9e0e7eef5fc",
+        "040b121920272e353d444b525960676e767d848b9299a0a7afb6bdc4cbd2d9e0",
+        "e8eff6fd040b121921282f363d444b525a61686f767d848b939aa1a8afb6bdc4",
+        "ccd3dae1e8eff6fdfbd1a67b50ef9b45ef99dc5ddd5cdbc2186ec216a1ccf721",
+        "4a7979797977dae1e9f0f7fe050c131ade3d893e6c0b908c86d49efa0aa16631",
+        "cbcba2a9",
+    );
+    pub(super) const F_S3_M0: &str = concat!(
+        "a30102058c4458707db6fe6e2f054afe9970f505d0433ae38722ced15372bf9d",
+        "c1d9223c197dcb1c530b75e57207c418aeb6a48453ddb98130fd1ae4dc354b7e",
+        "86474267a637dbdb7d736cc85a9bf57d0f3ca75e481f1319bd356041b98320c9",
+        "f183b03eafd2eeae247963b4f6c051a129fa3b47b3cb1be2217e10d2dec49d06",
+        "298b3e90f5716c7b3aaf736cfef378b5a0471fc64d4f2957fa30069ed58a79a1",
+        "f9a77536e392392708c89e2c293d2f2594bd62a966a84e6cc7bc65c4cbf15fb2",
+        "d7c3ed3f00",
+    );
+    pub(super) const F_S3_M0_OUT: &str = concat!(
+        "00070e151c232a313940b94e6b9516d5ba0e5740ed6b7b8f02ab82c0fbce6dd5",
+        "d8d53cce99c0eeab1d242b323940474e565d90e8cc1f0000e800000001e8faff",
+        "ff00e800e0ffffe9c8ffffffe8e8ffff0000e856341240474e555c636a727980",
+        "878e959ca3abb2b9c0c7ced5dce4ebf2f900070e151d242b",
+    );
+    pub(super) const F_S4_M0: &str = concat!(
+        "0c015547e4978926ccd9341b269b64534d34c9269a89a69a6c8a69a89a69a69a",
+        "69a0821d64d323d7bffea8a63200a49135971b012807069808000000d13a1015",
+        "92ec50cb9920b925f0291915530312ae511035592b6004156d4066ab02344904",
+        "3602523e970045b0e84ad228042474bc06690603b09d20bc25d9b74fa9056d65",
+        "13a05d7385b2453138fddc00004d45d869b71e7ec20c8040048be33321c19f4a",
+        "80088ccc146eacbb0d36e3cfc10c524b34f4535576dd7e18e59e9aedbf3df9e8",
+        "fd",
+    );
+    pub(super) const F_S4_M0_OUT: &str = concat!(
+        "00070e151c232a31394090e8f41f0000e800000001e8faffff00e800e0ffffe9",
+        "10000000e8e8ffff0000e8563412151c232a313940474e555c636a727980878e",
+        "959ca3abb2b9c0c7ced5dce4ebf2f900",
+    );
+    pub(super) const F_S4_M1: &str = concat!(
+        "10019404fe09be4f4f6ed0d4dda19224249a69a64d34d34d34d44d34d34d34d3",
+        "244891c8bbbcee4d347c7ffeb65d865aefc72878f3f3ea29aabb0cb5dd1828a2",
+        "48038ebcfc10c51c92cd3d14d55db7e39c843f0040040b933321a19ede800446",
+        "6609b5bdff4945fa40",
+    );
+    pub(super) const F_S4_M1_OUT: &str = concat!(
+        "c8cfd6dde5ecf3fa0108f1a9db4bbde6987a6c07398dff0cbe8476f4275d9ea5",
+        "acb3bac1c9d0d7de90e8d61f0000e800000001e8faffff00e800e0ffffe91000",
+        "0000e8e8ffff0000e8563412242b323a",
+    );
+    pub(super) const F_S5_M0: &str = concat!(
+        "0fd04bdd12aadaaadaaadaaadaaadaaadaaadaaae1556d556d556d52da16d0b6",
+        "85b42e01c0380700e10b685b42da1700e01c03807085b42da16d0b80700e01c0",
+        "384fffd6b2c6daef03172b3f5366ad3128002a0943200e0401c49039140732c0",
+        "e88601d14d03a31c07473c12001629031c000f000192291309c80426e5515592",
+        "08f091a00ab6c020b90a82443c19901bdc7cfd3d7da3489533dfe3e7eaa56b16",
+        "beff3f7fb164cda359636d77838d97a1a9b3bdc604207143489532750234ca56",
+        "b16ae5e3f85164cda35b656f79838d97a1abb5bfc804207143891634750234ca",
+        "97326ce5e3f851a54ea55b656f79858f99a3abb5bfc808288163891634790a44",
+        "ea97326ce9ec0871a54ea55d67717b858f99a3adb7c1ca08288163c99736790a",
+        "44ead7b36ee9ec0871e5cfa75d67717b87919ba5adb7c1ca0c309183c997367d",
+        "12550ad7b36eedf41891e5cfa75f69737d87919ba5afb9c20018612308143070",
+        "fa24aa163068e1dbe831244ca152bed2e6fb13273b4f5f738407475767710286",
+        "0e78797a7b2c60d1c7c7d7e7f489942a585add5fe264e769ec6ef1737fa0",
+    );
+    pub(super) const F_S5_M0_OUT: &str = concat!(
+        "00070e151c232a31394000000000000000000000000000c00300500000000000",
+        "00000a0000000000040000000000000000000000000000c00300500000000000",
+        "00000000000050000000000000000a000000000000000000000081888f969da4",
+        "acb3bac1c8cfd6dde5ecf3fa010807000000000000000000000000c003005000",
+        "0000010000006e0000000000040007000000000000000000000000c003005000",
+        "0000010000003412000050000000000000006e00000000000000010000004950",
+        "585f666d747b828991989fa6adb4bbc2cad10000000000000000f0ffffff00c0",
+        "03005000000099000000d2000000000004000000000000000000f0ffffff00c0",
+        "03005000000099000000000000005000000000000000d2000000000000000200",
+        "0000121920272e353d444b52",
+    );
+    pub(super) const F_S6_M0: &str = concat!(
+        "0c015547e4978926ccd9341b269b64534d34c9269a89a69a6c8a69a89a69a69a",
+        "69a0821d64d323d7bffea8a63200a49135971b012807069808000000d13a1015",
+        "92ec50cb9920b925f0291915530312ae511035592b6004156d4066ab02344904",
+        "3602523e970045b0e8499228042474bc06690603b09d20bc25d9b74fa9056d65",
+        "13a05d7385b2453138fddc00004d45d869b71e7ec20c8040048be33321c19f4a",
+        "80088ccc146eacbb0d36e3cfc10c524b34f4535576dd7e18e59e9aedbf3df9e8",
+        "fd",
+    );
+    pub(super) const F_S6_M0_OUT: &str = concat!(
+        "00070e151c232a31394090e8f41f0000e800000001e8faffff00e800e0ffffe9",
+        "10000000e8e8ffff0000e8563412151c232acf87960756800ff2c15d6cc1101e",
+        "ad7343c1d108c0c7ced5dce4ebf2f900",
+    );
+    pub(super) const F_S6_M1: &str = concat!(
+        "10019404fe09be4f4f6ed0d4dda1b4b696da49a69a6d2da5b4b69a69a69e4891",
+        "2269a69a6489123917779dc9a68f8fffd659e9aeec31c90d5af76fe5d3b22926",
+        "a69020a29e3d7cfcb2ec32d38f410c51c9351558d10e00100102c8ccc85a677e",
+        "c00111998257bedd24c200086038f3ea8a49a8af9f7f565d867fb6ebf0c51c92",
+        "e680",
+    );
+    pub(super) const F_S6_M1_OUT: &str = concat!(
+        "c8cfd6dde5ecf3fa01080f161e252c333a41484f575e656c737a818890979ea5",
+        "acb3bac1c9d0d7de90e8d61f0000e800000001e8faffff00e800e0ffffe91000",
+        "0000e8e8ffff0000e8563412dcaa78b14de97fe953457eb6040b12bc91666d10",
+        "b3bac1c8",
+    );
+    pub(super) const P_V1: &str = "a10061036de8962ed0815a1faad2556c";
+    pub(super) const P_V2: &str = "a30067fb8354d7359752711402985d331beb77eb";
+    pub(super) const P_V3: &str = "e200414202a734b5369a64698f0a4283ce06ed00";
+    pub(super) const P_V4: &str = concat!(
+        "a10030042efcd5ce467b88ef249575d53fa7a61d7c5fd307bc7602fd3adb9afa",
+        "c67f1fc000",
+    );
+    pub(super) const P_V5A: &str = "a30067fb8354d7359752711402985d331bcd5200008066e2d90f820000";
+    pub(super) const P_V5B: &str = concat!(
+        "a30067fb8354d7359752711402985d331bcd520000b00167fb8354d7359752cc",
+        "7554dc9537522b5e7300",
+    );
+    pub(super) const P_V5C: &str = "a30067fb8354d7359752711402985d331bcd52000000bf8867f6a9ffd4";
+    pub(super) const P_V5D: &str = concat!(
+        "a30067fb8354d7359752711402985d331bcd520000df686a39a6cdccf31b5f2f",
+        "00",
+    );
+    pub(super) const P_V5E: &str = concat!(
+        "a30067fb8354d7359752711402985d331bcd520000000bf4845a1f80a7f109ff",
+        "cc708066e2d90f820000",
+    );
+    pub(super) const P_V5F: &str = "a30067fb8354d7359752711402985d331bcd5200008004d2409700";
+    pub(super) const P_V9: &str = "a10079fd5ec3c4aa3670ac5a00";
+    pub(super) const P_V6_M2: &str = "809ffbcb54df1515a4b73031cf0132000000";
+    pub(super) const P_V7: &str = concat!(
+        "a30002058cefe6c03c99633b6f7383abadf89825b33f8396d36a388740f7fbae",
+        "ed9bc77069582fb82319832a4c0575b017e56bc86cc38463ce41d06634dce1ec",
+        "854d2bb7b18b6761c6cebe3134d05c8f924ac403db23c6c0f5d499e8fe20cfc8",
+        "4b15e378ccaef2182eb7a05f2e701efbc704ad43c20f41182d978de097ac7c8a",
+        "1945ca14b7298124d7c1d8cc0397a844c2be7a4638aa75088d097aae06f68c5f",
+        "c25e77f330911a5388df074c65c57bb7922c26aa1eb51302f41b0d018cf94cef",
+        "5ffc29d026d8b6400b331775b559ab61308dff33317a653bf5ecf3b6f697e844",
+        "a822f31245f2c3df441f548da141874161374a2a960db81b73859332ff2d6863",
+        "9fe861af35a2e7df536f33c919b75c92f20e4a58f08f322edf7ee54b4a46be76",
+        "a16fbb653334be896756a43e03338aa300",
+    );
+    pub(super) const P_V7B: &str = concat!(
+        "a30002058d166976d76748ea32369e61471d092770b5d39dd5dd3c624b5b509d",
+        "0a4fac0496e33fadda5434ed2bafe7ca88fb3d28df4f70a2177b3f7dade66275",
+        "289bdb64b6044db84638d6254f346b0bdaa70008959d3e5057aadbe6b492611f",
+        "e3fd7e3e4274c5d99effc1d593f4fc4f5f29bae07fcc5991aa65a97c98f6e763",
+        "d3edab9d56d311a26c52464201f3cf9356e478241bcbc79582d2e959404e052d",
+        "42c8377170236db95e18700e56b3cad073065ce5fe4e32f60abcd913065ca4ea",
+        "e43599d211ca057692837335dbce010edf6c29ef885a3e26700ea8b5e5408e21",
+        "a886ef32eef8a59c3580b9ca8e72692aee173f2e171416bb65ee5691cd8bd179",
+        "16100ec3153876f60a9831fbdc90c3f21a133d81b95643e49d897692044c42c8",
+        "758e3bca39fea22fd8b6854cb53113cc18736981d4e4772a1a9e9195",
+    );
+    // Member streams of rar29-filters.md 20.4 with their delivered output;
+    // `true` marks a member that continues the group.
+    pub(super) const FILTER_STREAMS: [(&str, &str, bool); 8] = [
+        (F_S1_M0, F_S1_M0_OUT, false),
+        (F_S2_M0, F_S2_M0_OUT, false),
+        (F_S3_M0, F_S3_M0_OUT, false),
+        (F_S4_M0, F_S4_M0_OUT, false),
+        (F_S4_M1, F_S4_M1_OUT, true),
+        (F_S5_M0, F_S5_M0_OUT, false),
+        (F_S6_M0, F_S6_M0_OUT, false),
+        (F_S6_M1, F_S6_M1_OUT, true),
+    ];
+    // rar29-ppmd.md 13.4: packed bytes and U of streams that are corrupt.
+    pub(super) const PPMD_REJECTED: [(&str, &str, u32); 9] = [
+        ("E1", "a00067fb8354d73597422b3b8f7d900eb0d130461100", 24),
+        ("E2", "8367fb8354d7359752711402985d331beb77eb", 24),
+        ("E3", "a30067fb8354d7359752", 24),
+        ("E4", "a300610401bef800", 3),
+        ("E5", "a300ffffffff00000000", 1),
+        ("E6", "a30061030a7d6d89ef4bbeb93a26", 34),
+        ("E7", "a3000206cd12976d3d00", 4),
+        ("E9", "a30061036d92479ef9b16c8b20a25e00", 20),
+        ("E8", P_V2, 30),
+    ];
+    pub(super) const P_U1: &str = "a30067fb8354d7359752711402985d32d19c00";
     pub(super) const R5_C1: &str = concat!(
         "526172211a070100c51a333203010000150a5e311402020e040ea4830218a755",
         "7b000105612e74787448656c6c6f2c20776f726c64210a19b23a3503050000"
@@ -1566,6 +1881,7 @@ fn run_cases(prefix: &str) {
             let matches = match (&entry.outcome, want) {
                 (Outcome::Ok { size, crc32 }, vectors::Want::Ok(s, c)) => size == s && crc32 == c,
                 (Outcome::NoContents, vectors::Want::NoContents) => true,
+                (Outcome::Encrypted, vectors::Want::Encrypted) => true,
                 (Outcome::Failed(why), vectors::Want::Failed(text)) => why.contains(text),
                 _ => false,
             };
@@ -1701,6 +2017,49 @@ fn printed_outputs() {
             .unwrap();
         assert_eq!(got, want, "RAR 5 output {index}");
     }
+}
+
+// rar29-filters.md 20.4: the delivered bytes, not only their CRC-32.
+#[test]
+fn printed_filter_stream_outputs() {
+    let mut decoder = rar29::Decoder::new();
+    for (index, (packed, output, solid)) in vectors::FILTER_STREAMS.iter().enumerate() {
+        let want = vectors::hex(output);
+        let got = decoder
+            .decode_member(
+                &vectors::hex(packed),
+                want.len() as u64,
+                *solid,
+                DEFAULT_LIMIT,
+            )
+            .unwrap();
+        assert_eq!(got, want, "filter stream {index}");
+    }
+}
+
+// rar29-ppmd.md 13.4: corrupt streams fail in the decoder; the unterminated
+// member U1 is delivered but its group cannot be continued (11.2).
+#[test]
+fn rar4_ppmd_rejected_streams() {
+    for (name, packed, size) in vectors::PPMD_REJECTED {
+        let mut decoder = rar29::Decoder::new();
+        let result =
+            decoder.decode_member(&vectors::hex(packed), u64::from(size), false, DEFAULT_LIMIT);
+        let error = result.expect_err(name).to_string();
+        assert!(error.contains("RAR: "), "{name}: {error}");
+        assert!(!decoder.can_continue(), "{name}");
+    }
+    let mut decoder = rar29::Decoder::new();
+    let output = decoder
+        .decode_member(&vectors::hex(vectors::P_U1), 24, false, DEFAULT_LIMIT)
+        .unwrap();
+    assert_eq!(container4::crc32(&output), 0xe05b_d988);
+    assert!(!decoder.can_continue());
+    assert!(
+        decoder
+            .decode_member(&vectors::hex(vectors::P_V6_M2), 47, true, DEFAULT_LIMIT)
+            .is_err()
+    );
 }
 
 #[test]

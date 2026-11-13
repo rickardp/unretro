@@ -1,6 +1,7 @@
 use crate::compat::{String, ToString, Vec, format};
 use crate::error::{Error, Result};
 use crate::format::ContainerFormat;
+use crate::formats::macintosh::encoding::decode_mac_roman;
 use crate::limits::OutputBudget;
 use crate::sanitize_path_component;
 use crate::{Container, ContainerInfo, Entry};
@@ -274,12 +275,10 @@ impl ResourceFork {
                     if abs_name_offset < data.len() {
                         let name_len = data[abs_name_offset] as usize;
                         if abs_name_offset + 1 + name_len <= data.len() {
-                            Some(
-                                String::from_utf8_lossy(
-                                    &data[abs_name_offset + 1..abs_name_offset + 1 + name_len],
-                                )
-                                .to_string(),
-                            )
+                            // Resource names are in the Mac OS Roman encoding.
+                            Some(decode_mac_roman(
+                                &data[abs_name_offset + 1..abs_name_offset + 1 + name_len],
+                            ))
                         } else {
                             None
                         }
@@ -588,6 +587,18 @@ mod tests {
             (*b"CODE", 2, None, &[0x4E, 0x71]),
             ([0, 1, 2, 3], -5, None, b"x"),
         ])
+    }
+
+    #[test]
+    fn resource_names_are_mac_roman() {
+        let mut fork = build_test_fork(&[(*b"PSTk", 128, Some("Sound @ 1991"), b"x")]);
+        let at = fork.iter().rposition(|&byte| byte == b'@').unwrap();
+        fork[at] = 0xA9;
+        let parsed = ResourceFork::parse(&fork).unwrap();
+        assert_eq!(
+            parsed.resources[0].name.as_deref(),
+            Some("Sound \u{a9} 1991")
+        );
     }
 
     #[test]

@@ -1222,10 +1222,13 @@ impl<'v, 'a> Walk<'v, 'a> {
                 continue;
             }
             // A catalog counts 512-byte sectors, and writers round a file up
-            // to one of those or to a whole logical block.
+            // to one of those or to a whole logical block. A no-emulation
+            // count may also cover only the part of a loader the BIOS reads
+            // (isolinux records four sectors), which is no image of its own.
             let same_file = self.listed.get(&start).is_some_and(|&size| {
                 len == size.next_multiple_of(VIRTUAL_SECTOR_SIZE)
                     || len == size.next_multiple_of(volume.block_size)
+                    || (entry.media == 0 && len < size)
             });
             if same_file || !self.charge(len, &path) {
                 continue;
@@ -2457,6 +2460,37 @@ mod tests {
         );
         disc.put(41, &pattern(2048, 2)).put(42, &pattern(2048, 3));
         assert_eq!(paths(&disc.0), ["..eltorito/2.img", "odd.bin"]);
+    }
+
+    #[test]
+    fn el_torito_no_emulation_image_that_starts_a_listed_file_is_not_repeated() {
+        // isolinux: four sectors of a larger loader. A floppy image that
+        // starts where a longer file does is still an image of its own.
+        let mut disc = bootable(
+            &[
+                record(b"LOADER.BIN;1", 41, 5000, FILE, &[]),
+                record(b"BIG.IMG;1", 50, 2_000_000, FILE, &[]),
+            ],
+            &[
+                boot_entry(NO_EMULATION, 4, 41),
+                section_header(true, 2),
+                boot_entry(NO_EMULATION, 1, 42),
+                boot_entry(FLOPPY_1440, 1, 50),
+            ],
+        );
+        for sector in 41..44 {
+            disc.put(sector, &pattern(2048, sector as u8));
+        }
+        disc.put(50 + 2_000_000 / 2048, &pattern(2048, 9));
+        assert_eq!(
+            paths(&disc.0),
+            [
+                "..eltorito/1.img",
+                "..eltorito/2.img",
+                "big.img",
+                "loader.bin"
+            ]
+        );
     }
 
     #[test]

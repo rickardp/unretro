@@ -46,6 +46,7 @@ sources below.
 
 | Source | Used for | Licence |
 |---|---|---|
+| *Operating System Reference Manual for the Lisa* (Apple, 1983, 029-0414-A); *Release 3.0 Notes* to it; Workshop 3.0 release notes in *Lisa Development System Internals Documentation* (February 1984); bitsavers.org `pdf/apple/lisa/os/` and `pdf/apple/lisa/workshop_3.0/` | Path name delimiters, directories (`MAKE_CATALOG`), the names and meanings of file and volume attributes; cross-check of the Apple-source statements (`lisafs.md` section 21.5) | Published product documentation, Apple copyright |
 | Aaru Data Preservation Suite, `Aaru.Filesystems/LisaFS` and `Aaru.Decoders/LisaTag.cs` (`github.com/aaru-dps/Aaru`, revision `828d9a8`), by Natalia Portillo | Structure tables, tag layouts, detection rule, record sizes of the version-17 catalog; reference for observed implementation gaps | LGPL-2.1-or-later |
 | Claunia.Encoding, `LisaRoman.cs` (`github.com/claunia/Claunia.Encoding`) | Lisa character set to Unicode table | MIT |
 | LisaEm, `src/tools/src/lisafsh-tool.c` and `blu-to-dc42.c` (`github.com/rayarachelian/lisaem`, revision `a3ee183`), by Ray Arachelian | Reserved tag file IDs; description of the BLU hard-disk dump layout | GPL (the tool states version 2, the project README version 3) |

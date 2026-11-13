@@ -54,6 +54,7 @@ fn program_truncated() -> Error {
 }
 
 /// Number of size bytes that follow the flags byte of a record (section 3).
+#[cfg(test)]
 pub(crate) fn size_field_len(flags: u8) -> usize {
     match flags & 7 {
         6 => 1,
@@ -64,6 +65,7 @@ pub(crate) fn size_field_len(flags: u8) -> usize {
 
 /// Payload size of a record from its flags byte and the size bytes that
 /// followed it (section 3); a size of 0 is corrupt.
+#[cfg(test)]
 pub(crate) fn payload_len(flags: u8, size_field: &[u8]) -> Result<usize> {
     let len = match (flags & 7, size_field) {
         (code @ 0..=5, []) => usize::from(code) + 1,
@@ -1109,6 +1111,7 @@ impl Filters {
     }
 
     /// Start of a solid group: empty store, no current program, empty queue.
+    #[cfg(test)]
     pub(crate) fn reset(&mut self) {
         self.clear_store();
         self.current = None;

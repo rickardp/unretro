@@ -2593,3 +2593,19 @@ written from any decoder's source.
     they are written so that any stride, channel count or offset is
     harmless (no panic, result of the block's length). For RGB with R
     at or beyond L the second step does nothing.
+12. **F11 against the reference tool, found end to end.** Three crafted
+    archives from the PPMd verification set (variants of vector V7b of
+    `rar29-ppmd.md`) are rejected here with "invalid parameters for a
+    standard filter" while `unar` extracts them with the CRC-32 their
+    headers declare. In each, a second record reuses the audio program
+    with no register field (flags `0x00` or `0x01`, block of 64 or 32
+    bytes at position 64): R0 is its default 0, R1 to R4 are the
+    defaults. Audio with 0 channels is outside section 14 and F11. The
+    tool's result is the stale output of the previous run (section 22
+    item 9); in the two 132-byte archives the previous block held the
+    same data, which would explain the match. The rule was kept as
+    written: no result
+    can be defined for 0 channels without the memory that F18 says does
+    not persist. If those archives were meant as positive vectors they
+    need a register field with R0 of 1 or more in the second record
+    (as V7b itself has).

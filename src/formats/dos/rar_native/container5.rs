@@ -8,6 +8,7 @@
 
 use crate::compat::{FastMap, String, Vec, format};
 use crate::error::{Error, Result};
+#[cfg(test)]
 use crate::limits::prealloc_hint;
 
 const SIGNATURE: [u8; 8] = [0x52, 0x61, 0x72, 0x21, 0x1a, 0x07, 0x01, 0x00];
@@ -73,6 +74,7 @@ pub(crate) struct Stop {
 }
 
 impl Stop {
+    #[cfg(test)]
     pub(crate) fn to_error(self) -> Error {
         let Self { volume, offset, .. } = self;
         match self.reason {
@@ -164,6 +166,7 @@ pub(crate) enum Failure {
 }
 
 impl Failure {
+    #[cfg(test)]
     pub(crate) fn to_error(self) -> Error {
         match self {
             Self::Encrypted => Error::unsupported("RAR: member is encrypted"),
@@ -352,6 +355,10 @@ pub(crate) struct Member {
     pub compression: Compression,
     pub encrypted: bool,
     pub handling: Handling,
+    // Incomplete because the volumes ended before its last piece.
+    pub tail_missing: bool,
+    // Its first piece found continues one that was not read.
+    pub head_missing: bool,
     incomplete: bool,
     truncated: bool,
     // Pieces disagree on compression information or directory flag (11.3).
@@ -359,6 +366,7 @@ pub(crate) struct Member {
 }
 
 impl Member {
+    #[cfg(test)]
     pub(crate) const fn failure(&self) -> Option<Failure> {
         match self.handling {
             Handling::Failed(failure) => Some(failure),
@@ -395,6 +403,7 @@ impl Member {
     }
 
     // Verifier for the unpacked contents (10.1).
+    #[cfg(test)]
     pub(crate) fn verifier(&self) -> Verifier {
         Verifier::new(self.crc32, self.blake2sp)
     }
@@ -433,32 +442,9 @@ pub(crate) struct Archive {
 // Primitive encodings (3)
 // ---------------------------------------------------------------------------
 
-const CRC_TABLE: [u32; 256] = {
-    let mut table = [0u32; 256];
-    let mut i = 0;
-    while i < 256 {
-        let mut value = i as u32;
-        let mut bit = 0;
-        while bit < 8 {
-            value = if value & 1 != 0 {
-                (value >> 1) ^ 0xEDB8_8320
-            } else {
-                value >> 1
-            };
-            bit += 1;
-        }
-        table[i] = value;
-        i += 1;
-    }
-    table
-};
-
 // Running CRC-32 state; start from `!0`, complement at the end.
-fn crc32_update(mut state: u32, data: &[u8]) -> u32 {
-    for &byte in data {
-        state = CRC_TABLE[usize::from((state as u8) ^ byte)] ^ (state >> 8);
-    }
-    state
+fn crc32_update(state: u32, data: &[u8]) -> u32 {
+    crate::formats::common::crc32::crc32_update(state, data)
 }
 
 pub(crate) fn crc32(data: &[u8]) -> u32 {
@@ -651,6 +637,11 @@ fn find_archive(volume: &[u8]) -> Option<usize> {
         from = start + 1;
     }
     None
+}
+
+// Offset of the signature of a RAR 5 archive in `volume` (section 4).
+pub(crate) fn signature_offset(volume: &[u8]) -> Option<usize> {
+    find_archive(volume).map(|first_block| first_block - SIGNATURE.len())
 }
 
 // Extra area records (5.5): `(type, data)` pairs. Stops at the first broken
@@ -982,6 +973,8 @@ impl Member {
             compression: Compression::parse(header.compression),
             encrypted: false,
             handling: Handling::NoContents,
+            tail_missing: false,
+            head_missing: false,
             incomplete: false,
             truncated: false,
             inconsistent: false,
@@ -1086,6 +1079,7 @@ impl Reader {
     fn close_open_incomplete(&mut self) {
         if let Some(mut member) = self.open.take() {
             member.incomplete = true;
+            member.tail_missing = true;
             self.archive.members.push(member.finish());
         }
     }
@@ -1327,6 +1321,7 @@ impl Reader {
                 let mut member = Member::new(header, extras);
                 // Its beginning is in a volume that was not read.
                 member.incomplete = continued;
+                member.head_missing = continued;
                 member
             }
         };
@@ -1575,6 +1570,7 @@ pub(crate) fn verify_pieces(member: &Member, volumes: &[&[u8]]) -> Result<()> {
 
 // Contents of a member whose handling is `Stored` or `Empty`, verified
 // against its checksums. `limit` is the caller's bound on the output.
+#[cfg(test)]
 pub(crate) fn read_stored(member: &Member, volumes: &[&[u8]], limit: u64) -> Result<Vec<u8>> {
     match member.handling {
         Handling::Stored | Handling::Empty => {}
@@ -1789,6 +1785,7 @@ pub(crate) fn blake2sp(data: &[u8]) -> [u8; 32] {
 // `sfx`, any case) becomes `rar`, since only the first volume of a
 // self-extracting set carries a module. `None` if `name` does not follow the
 // scheme or the run cannot count further.
+#[cfg(test)]
 pub(crate) fn next_volume_name(name: &str) -> Option<String> {
     let bytes = name.as_bytes();
     let base = bytes

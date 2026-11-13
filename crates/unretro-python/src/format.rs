@@ -81,6 +81,8 @@ pub enum PyContainerFormat {
     Udf = 34,
     /// Apple Partition Map disk image (partitions listed as entries).
     Apm = 35,
+    /// Nero NRG disc image (one entry per track).
+    Nrg = 36,
     /// Unknown format.
     Unknown = 99,
 }
@@ -127,6 +129,7 @@ impl PyContainerFormat {
             Self::LisaFs => "Lisa Disk Image",
             Self::Udf => "UDF Disc Image",
             Self::Apm => "Apple Partition Map Disk Image",
+            Self::Nrg => "Nero NRG Disc Image",
             Self::Unknown => "Unknown",
         }
     }
@@ -162,7 +165,8 @@ impl PyContainerFormat {
             | Self::CueBin
             | Self::LisaFs
             | Self::Udf
-            | Self::Apm => true,
+            | Self::Apm
+            | Self::Nrg => true,
             Self::Gzip
             | Self::Compress
             | Self::Bzip2
@@ -219,6 +223,7 @@ impl From<ContainerFormat> for PyContainerFormat {
             ContainerFormat::LisaFs => Self::LisaFs,
             ContainerFormat::Udf => Self::Udf,
             ContainerFormat::Apm => Self::Apm,
+            ContainerFormat::Nrg => Self::Nrg,
             ContainerFormat::Unknown => Self::Unknown,
             // `ContainerFormat` is `#[non_exhaustive]`; future variants
             // surface as `Unknown` until the Python bindings are extended.

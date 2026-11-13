@@ -1,0 +1,53 @@
+archive	image	outcome	entries	reported	reasons	rule	defect
+broken.tar.gz	bad-truncated.nrg	not-nrg	-	-	-	3.2(1) 16.1	last byte removed
+broken.tar.gz	bad-truncated-footer.nrg	not-nrg	-	-	-	3.2(1) 16.1	the 12 footer bytes removed; the file ends with the END! chunk
+broken.tar.gz	bad-truncated-data.nrg	not-nrg	-	-	-	3.2(1) 16.1	cut in the middle of the data area
+broken.tar.gz	bad-empty.nrg	not-nrg	-	-	-	3.2(1)	empty file
+broken.tar.gz	bad-tiny-v2.nrg	not-nrg	-	-	-	3.2(1)	12 bytes: a version 2 footer and nothing else
+broken.tar.gz	bad-tiny-v1.nrg	not-nrg	-	-	-	3.2(1)	8 bytes: a version 1 footer and nothing else
+broken.tar.gz	bad-minimal-no-tracks.nrg	not-nrg	-	-	-	3.2(4)	20 bytes: END! and a version 2 footer; a valid chain without tracks
+broken.tar.gz	bad-trailing-byte.nrg	not-nrg	-	-	-	3.2(1)	one zero byte after the footer
+broken.tar.gz	bad-trailing-sector.nrg	not-nrg	-	-	-	3.2(1)	2048 zero bytes after the footer
+broken.tar.gz	bad-offset-zero.nrg	not-nrg	-	-	-	3.2(3) 16.1	chain offset 0: the first identifier would be four zero bytes of the pregap
+broken.tar.gz	bad-offset-plus1.nrg	not-nrg	-	-	-	3.2(3)	chain offset one too high: the first identifier is UEX and a zero byte
+broken.tar.gz	bad-offset-no-room.nrg	not-nrg	-	-	-	3.2(2) 16.1	chain offset 7 bytes before the footer: no room for a chunk header
+broken.tar.gz	bad-offset-at-footer.nrg	not-nrg	-	-	-	3.2(2) 16.1	chain offset is the offset of the footer
+broken.tar.gz	bad-offset-filesize.nrg	not-nrg	-	-	-	3.2(2) 16.1	chain offset is the file size
+broken.tar.gz	bad-offset-beyond.nrg	not-nrg	-	-	-	3.2(2) 16.1	chain offset beyond the end of the file
+broken.tar.gz	bad-offset-max.nrg	not-nrg	-	-	-	3.2(2) 16.1	chain offset FFFFFFFFFFFFFFFF
+broken.tar.gz	bad-v1-offset-max.nrg	not-nrg	-	-	-	3.2(2) 16.1	version 1 footer with chain offset FFFFFFFF
+broken.tar.gz	bad-v1-offset-plus1.nrg	not-nrg	-	-	-	3.2(3)	version 1 footer with a chain offset one too high
+broken.tar.gz	bad-signature.nrg	not-nrg	-	-	-	3.2(1)	signature NER6
+broken.tar.gz	bad-signature-swapped.nrg	not-nrg	-	-	-	3.2(1)	NERO in place of NER5 before a 64-bit offset: the last 8 bytes do not start with NERO
+broken.tar.gz	bad-no-end.nrg	not-nrg	-	-	-	3.2(3) 16.2	XXXX in place of END!: the chain runs into the footer
+broken.tar.gz	bad-end-overrun.nrg	not-nrg	-	-	-	3.2(3) 5.9 16.2	END! with length FFFFFFFF, which is bounds-checked like any other
+broken.tar.gz	bad-chunk-overrun.nrg	not-nrg	-	-	-	3.2(3) 16.2	SINF with length FFFFFFFF
+broken.tar.gz	bad-chunk-overrun-1.nrg	not-nrg	-	-	-	3.2(3) 16.2	last chunk reaches one byte into the footer
+broken.tar.gz	bad-chunk-swallows-end.nrg	not-nrg	-	-	-	3.2(3) 16.2	last chunk ends at the footer and contains the only END!
+broken.tar.gz	bad-chunk-id-nul.nrg	not-nrg	-	-	-	3.2(3)	identifier with a zero byte
+broken.tar.gz	bad-chunk-id-high.nrg	not-nrg	-	-	-	3.2(3)	identifiers with the bytes C4 and 7F
+broken.tar.gz	bad-chunks-257.nrg	not-nrg	-	-	-	3.2(3) 16.2	257 chunks, END! included
+broken.tar.gz	bad-no-track-chunk.nrg	not-nrg	-	-	-	3.2(4)	CUEX, SINF, MTYP, END!: no track chunk
+broken.tar.gz	bad-empty-track-chunks.nrg	not-nrg	-	-	-	3.2(4) 5.1 5.2	track chunks too short for one whole entry
+broken.tar.gz	bad-chain-1mib-plus1.nrg	not-nrg	-	-	-	3.2(2) 16.2	chain of 1,048,577 bytes, otherwise as chain-1mib.nrg
+broken.tar.gz	bad-tracks-100.nrg	not-nrg	-	-	-	3.2(4) 8.1 16.3	100 tracks in one ETN2 chunk
+broken.tar.gz	bad-tracks-100-split.nrg	not-nrg	-	-	-	3.2(4) 8.1 16.3	100 tracks in two ETN2 chunks of 60 and 40
+broken.tar.gz	bad-track-beyond.nrg	partial	track01.img,track02.pcm	1	beyond	8.3(2) 16.6	track 3 has index 1 and end 4096 bytes beyond the chain offset
+broken.tar.gz	bad-track-at-end.nrg	partial	track01.img,track02.pcm	1	beyond	8.3(2) 16.6	track 3 has index 1 at the chain offset
+broken.tar.gz	bad-sector-size-zero.nrg	partial	track01.img,track02.pcm	1	sector-size	8.3(1) 16.5	track 3 has sector size 0
+broken.tar.gz	bad-sector-size-absurd.nrg	partial	track02.pcm	2	sector-size	8.3(1) 16.5	track 1 has sector size 1, track 3 has 65535
+broken.tar.gz	bad-sector-size-near.nrg	partial	track02.pcm	2	sector-size	8.3(1) 16.5	track 1 has sector size 2324, track 3 has 2340
+broken.tar.gz	bad-audio-2048.nrg	partial	track02.pcm,track03.img	1	sector-size	6.1 8.3(1)	track 1 has the audio mode 07 with sector size 2048
+broken.tar.gz	bad-mode-unknown.nrg	partial	track01.img,track03.img	1	mode	6.1 8.3(1) 16.13	track 2 has mode 09
+broken.tar.gz	bad-mode-unknown-all.nrg	no-entries	-	3	mode	6.1 10.4	modes 01, 20 and FF: the image opens and lists nothing
+broken.tar.gz	bad-empty-track.nrg	partial	track01.img,track03.img	1	empty	8.3(4)	track 2 ends at its index 1
+broken.tar.gz	bad-short-track.nrg	partial	track01.img,track02.pcm	1	empty	8.3(4)	track 3 is one byte short of a sector
+broken.tar.gz	bad-tao-mode-high.nrg	partial	track01.img	1	mode	8.1 8.3(1)	ETN2 track 2 has the 32-bit mode 01000007
+broken.tar.gz	bad-overlap.nrg	no-entries	-	3	layout	8.2 16.7	track 2 has index 0 one sector before the end of track 1
+broken.tar.gz	bad-end-before-start.nrg	no-entries	-	3	layout	8.2	track 1 ends one byte before its index 1
+broken.tar.gz	bad-index0-after-index1.nrg	no-entries	-	3	layout	8.2	track 2 has index 0 one byte after its index 1
+broken.tar.gz	bad-order.nrg	no-entries	-	3	layout	8.2	the entries of tracks 1 and 2 are exchanged
+broken.tar.gz	bad-duplicate-session.nrg	no-entries	-	6	layout	8.2 16.7	the DAOX chunk is there twice: six tracks, the fourth starts before the third ends
+broken.tar.gz	bad-amplify.nrg	no-entries	-	99	layout	8.2 16.7	99 tracks that all cover the same four sectors
+broken.tar.gz	bad-tao-overflow.nrg	no-entries	-	2	layout	8.2 16.4	ETN2 track 2: offset FFFFFFFFFFFFF000 plus length 2000 overflows 64 bits
+broken.tar.gz	bad-tao-overlap.nrg	no-entries	-	2	layout	8.2 16.7	ETN2 track 2 starts one sector before the end of track 1

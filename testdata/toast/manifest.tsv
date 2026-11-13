@@ -1,0 +1,386 @@
+fixture	kind	path	size	fnv64	format
+hfs-bare.toast	top	.	819200	6d42d20ca959cb48	hfs
+hfs-bare.toast	data	Read Me	900	db2957533e16f288	TEXT/ttxt
+hfs-bare.toast	data	Docs/Notes/nested.txt	300	7dced38375a81d88	TEXT/ttxt
+hfs-bare.toast	data	Docs/counter.bin	3000	c19760a6cf9907f5	BINA/hDmp
+hfs-bare.toast	data	Docs/big.txt	9000	a1fc613e4247e2a3	TEXT/R*ch
+hfs-bare.toast	empty	empty	0	cbf29ce484222325	TEXT/ttxt
+hfs-bare.toast	data	App/Sample App	0	cbf29ce484222325	APPL/Smpl
+hfs-bare.toast	rsrc	App/Sample App	1935	875b666e7a0f7f39	-
+hfs-bare.toast	res	App/Sample App/..namedfork/rsrc/CODE/#0	24	f319166e175bd2d5	-
+hfs-bare.toast	res	App/Sample App/..namedfork/rsrc/CODE/#1	1500	b5ddb9e4e43b5971	-
+hfs-bare.toast	res	App/Sample App/..namedfork/rsrc/STR#/#128	16	636c5dbdbecb332a	-
+hfs-bare.toast	res	App/Sample App/..namedfork/rsrc/vers/#1	21	e4ff07ca72670425	-
+hfs-bare.toast	data	Forks/both.bin	2500	b4b97cf445883ffd	BINA/hDmp
+hfs-bare.toast	rsrc	Forks/both.bin	1038	0ff51e0513b9782a	-
+hfs-bare.toast	res	Forks/both.bin/..namedfork/rsrc/TEXT/#128	12	4d1986bcaabdef33	-
+hfs-bare.toast	res	Forks/both.bin/..namedfork/rsrc/TEXT/#129	700	d25b0dc011301c2b	-
+hfs-bare.toast	data	Names/Café Menu.txt	120	d67696df573406d9	TEXT/ttxt
+apm-hfs.toast	top	.	825344	90b4537f047d23fe	apm
+apm-hfs.toast	image	Toast 5.0.2 HFS Builder	819200	6d42d20ca959cb48	hfs
+apm-hfs.toast	data	Toast 5.0.2 HFS Builder/Read Me	900	db2957533e16f288	TEXT/ttxt
+apm-hfs.toast	data	Toast 5.0.2 HFS Builder/Docs/Notes/nested.txt	300	7dced38375a81d88	TEXT/ttxt
+apm-hfs.toast	data	Toast 5.0.2 HFS Builder/Docs/counter.bin	3000	c19760a6cf9907f5	BINA/hDmp
+apm-hfs.toast	data	Toast 5.0.2 HFS Builder/Docs/big.txt	9000	a1fc613e4247e2a3	TEXT/R*ch
+apm-hfs.toast	empty	Toast 5.0.2 HFS Builder/empty	0	cbf29ce484222325	TEXT/ttxt
+apm-hfs.toast	data	Toast 5.0.2 HFS Builder/App/Sample App	0	cbf29ce484222325	APPL/Smpl
+apm-hfs.toast	rsrc	Toast 5.0.2 HFS Builder/App/Sample App	1935	875b666e7a0f7f39	-
+apm-hfs.toast	res	Toast 5.0.2 HFS Builder/App/Sample App/..namedfork/rsrc/CODE/#0	24	f319166e175bd2d5	-
+apm-hfs.toast	res	Toast 5.0.2 HFS Builder/App/Sample App/..namedfork/rsrc/CODE/#1	1500	b5ddb9e4e43b5971	-
+apm-hfs.toast	res	Toast 5.0.2 HFS Builder/App/Sample App/..namedfork/rsrc/STR#/#128	16	636c5dbdbecb332a	-
+apm-hfs.toast	res	Toast 5.0.2 HFS Builder/App/Sample App/..namedfork/rsrc/vers/#1	21	e4ff07ca72670425	-
+apm-hfs.toast	data	Toast 5.0.2 HFS Builder/Forks/both.bin	2500	b4b97cf445883ffd	BINA/hDmp
+apm-hfs.toast	rsrc	Toast 5.0.2 HFS Builder/Forks/both.bin	1038	0ff51e0513b9782a	-
+apm-hfs.toast	res	Toast 5.0.2 HFS Builder/Forks/both.bin/..namedfork/rsrc/TEXT/#128	12	4d1986bcaabdef33	-
+apm-hfs.toast	res	Toast 5.0.2 HFS Builder/Forks/both.bin/..namedfork/rsrc/TEXT/#129	700	d25b0dc011301c2b	-
+apm-hfs.toast	data	Toast 5.0.2 HFS Builder/Names/Café Menu.txt	120	d67696df573406d9	TEXT/ttxt
+apm-ddm2048.toast	top	.	839680	1069cc1fa2bc95ef	apm
+apm-ddm2048.toast	file	Macintosh	8192	380a1d80eddaf325	-
+apm-ddm2048.toast	image	Toast 5.2.3 HFS Builder	819200	6d42d20ca959cb48	hfs
+apm-ddm2048.toast	data	Toast 5.2.3 HFS Builder/Read Me	900	db2957533e16f288	TEXT/ttxt
+apm-ddm2048.toast	data	Toast 5.2.3 HFS Builder/Docs/Notes/nested.txt	300	7dced38375a81d88	TEXT/ttxt
+apm-ddm2048.toast	data	Toast 5.2.3 HFS Builder/Docs/counter.bin	3000	c19760a6cf9907f5	BINA/hDmp
+apm-ddm2048.toast	data	Toast 5.2.3 HFS Builder/Docs/big.txt	9000	a1fc613e4247e2a3	TEXT/R*ch
+apm-ddm2048.toast	empty	Toast 5.2.3 HFS Builder/empty	0	cbf29ce484222325	TEXT/ttxt
+apm-ddm2048.toast	data	Toast 5.2.3 HFS Builder/App/Sample App	0	cbf29ce484222325	APPL/Smpl
+apm-ddm2048.toast	rsrc	Toast 5.2.3 HFS Builder/App/Sample App	1935	875b666e7a0f7f39	-
+apm-ddm2048.toast	res	Toast 5.2.3 HFS Builder/App/Sample App/..namedfork/rsrc/CODE/#0	24	f319166e175bd2d5	-
+apm-ddm2048.toast	res	Toast 5.2.3 HFS Builder/App/Sample App/..namedfork/rsrc/CODE/#1	1500	b5ddb9e4e43b5971	-
+apm-ddm2048.toast	res	Toast 5.2.3 HFS Builder/App/Sample App/..namedfork/rsrc/STR#/#128	16	636c5dbdbecb332a	-
+apm-ddm2048.toast	res	Toast 5.2.3 HFS Builder/App/Sample App/..namedfork/rsrc/vers/#1	21	e4ff07ca72670425	-
+apm-ddm2048.toast	data	Toast 5.2.3 HFS Builder/Forks/both.bin	2500	b4b97cf445883ffd	BINA/hDmp
+apm-ddm2048.toast	rsrc	Toast 5.2.3 HFS Builder/Forks/both.bin	1038	0ff51e0513b9782a	-
+apm-ddm2048.toast	res	Toast 5.2.3 HFS Builder/Forks/both.bin/..namedfork/rsrc/TEXT/#128	12	4d1986bcaabdef33	-
+apm-ddm2048.toast	res	Toast 5.2.3 HFS Builder/Forks/both.bin/..namedfork/rsrc/TEXT/#129	700	d25b0dc011301c2b	-
+apm-ddm2048.toast	data	Toast 5.2.3 HFS Builder/Names/Café Menu.txt	120	d67696df573406d9	TEXT/ttxt
+apm-hfsplus.toast	top	.	921600	c8bc830c1615a677	apm
+apm-hfsplus.toast	image	DiscRecording 9.0.3d5	47104	7780169267e9e28b	hfs
+apm-hfsplus.toast	data	DiscRecording 9.0.3d5/Read Me	900	106800b5f5e59568	TEXT/ttxt
+apm-hfsplus.toast	data	DiscRecording 9.0.3d5/Docs/Notes/nested.txt	300	b6797f07d01ade0a	TEXT/ttxt
+apm-hfsplus.toast	data	DiscRecording 9.0.3d5/Docs/counter.bin	3000	c19760a6cf9907f5	BINA/hDmp
+apm-hfsplus.toast	data	DiscRecording 9.0.3d5/Docs/big.txt	9000	7a80d3fab6eae8bf	TEXT/R*ch
+apm-hfsplus.toast	empty	DiscRecording 9.0.3d5/empty	0	cbf29ce484222325	TEXT/ttxt
+apm-hfsplus.toast	data	DiscRecording 9.0.3d5/App/Sample App	0	cbf29ce484222325	APPL/Smpl
+apm-hfsplus.toast	rsrc	DiscRecording 9.0.3d5/App/Sample App	1935	1c258b9a3b58fef9	-
+apm-hfsplus.toast	res	DiscRecording 9.0.3d5/App/Sample App/..namedfork/rsrc/CODE/#0	24	f319166e175bd2d5	-
+apm-hfsplus.toast	res	DiscRecording 9.0.3d5/App/Sample App/..namedfork/rsrc/CODE/#1	1500	b5ddb9e4e43b5971	-
+apm-hfsplus.toast	res	DiscRecording 9.0.3d5/App/Sample App/..namedfork/rsrc/STR#/#128	16	13e811cf6608b686	-
+apm-hfsplus.toast	res	DiscRecording 9.0.3d5/App/Sample App/..namedfork/rsrc/vers/#1	21	e4ff07ca72670425	-
+apm-hfsplus.toast	data	DiscRecording 9.0.3d5/Forks/both.bin	2500	b4b97cf445883ffd	BINA/hDmp
+apm-hfsplus.toast	rsrc	DiscRecording 9.0.3d5/Forks/both.bin	1038	27cfb4d7ff4b8fe9	-
+apm-hfsplus.toast	res	DiscRecording 9.0.3d5/Forks/both.bin/..namedfork/rsrc/TEXT/#128	12	c568effa8f88a15d	-
+apm-hfsplus.toast	res	DiscRecording 9.0.3d5/Forks/both.bin/..namedfork/rsrc/TEXT/#129	700	1f9d95462cd11ef6	-
+apm-hfsplus.toast	data	DiscRecording 9.0.3d5/Names/Café Menu.txt	120	c15ff6b2bc03d22d	TEXT/ttxt
+hfsplus-bare.toast	top	.	47104	7780169267e9e28b	hfs
+hfsplus-bare.toast	data	Read Me	900	106800b5f5e59568	TEXT/ttxt
+hfsplus-bare.toast	data	Docs/Notes/nested.txt	300	b6797f07d01ade0a	TEXT/ttxt
+hfsplus-bare.toast	data	Docs/counter.bin	3000	c19760a6cf9907f5	BINA/hDmp
+hfsplus-bare.toast	data	Docs/big.txt	9000	7a80d3fab6eae8bf	TEXT/R*ch
+hfsplus-bare.toast	empty	empty	0	cbf29ce484222325	TEXT/ttxt
+hfsplus-bare.toast	data	App/Sample App	0	cbf29ce484222325	APPL/Smpl
+hfsplus-bare.toast	rsrc	App/Sample App	1935	1c258b9a3b58fef9	-
+hfsplus-bare.toast	res	App/Sample App/..namedfork/rsrc/CODE/#0	24	f319166e175bd2d5	-
+hfsplus-bare.toast	res	App/Sample App/..namedfork/rsrc/CODE/#1	1500	b5ddb9e4e43b5971	-
+hfsplus-bare.toast	res	App/Sample App/..namedfork/rsrc/STR#/#128	16	13e811cf6608b686	-
+hfsplus-bare.toast	res	App/Sample App/..namedfork/rsrc/vers/#1	21	e4ff07ca72670425	-
+hfsplus-bare.toast	data	Forks/both.bin	2500	b4b97cf445883ffd	BINA/hDmp
+hfsplus-bare.toast	rsrc	Forks/both.bin	1038	27cfb4d7ff4b8fe9	-
+hfsplus-bare.toast	res	Forks/both.bin/..namedfork/rsrc/TEXT/#128	12	c568effa8f88a15d	-
+hfsplus-bare.toast	res	Forks/both.bin/..namedfork/rsrc/TEXT/#129	700	1f9d95462cd11ef6	-
+hfsplus-bare.toast	data	Names/Café Menu.txt	120	c15ff6b2bc03d22d	TEXT/ttxt
+apm-map2048.toast	top	.	102400	437bfa7aa93bf935	apm
+apm-map2048.toast	image	Mac_OS_X	47104	7780169267e9e28b	hfs
+apm-map2048.toast	data	Mac_OS_X/Read Me	900	106800b5f5e59568	TEXT/ttxt
+apm-map2048.toast	data	Mac_OS_X/Docs/Notes/nested.txt	300	b6797f07d01ade0a	TEXT/ttxt
+apm-map2048.toast	data	Mac_OS_X/Docs/counter.bin	3000	c19760a6cf9907f5	BINA/hDmp
+apm-map2048.toast	data	Mac_OS_X/Docs/big.txt	9000	7a80d3fab6eae8bf	TEXT/R*ch
+apm-map2048.toast	empty	Mac_OS_X/empty	0	cbf29ce484222325	TEXT/ttxt
+apm-map2048.toast	data	Mac_OS_X/App/Sample App	0	cbf29ce484222325	APPL/Smpl
+apm-map2048.toast	rsrc	Mac_OS_X/App/Sample App	1935	1c258b9a3b58fef9	-
+apm-map2048.toast	res	Mac_OS_X/App/Sample App/..namedfork/rsrc/CODE/#0	24	f319166e175bd2d5	-
+apm-map2048.toast	res	Mac_OS_X/App/Sample App/..namedfork/rsrc/CODE/#1	1500	b5ddb9e4e43b5971	-
+apm-map2048.toast	res	Mac_OS_X/App/Sample App/..namedfork/rsrc/STR#/#128	16	13e811cf6608b686	-
+apm-map2048.toast	res	Mac_OS_X/App/Sample App/..namedfork/rsrc/vers/#1	21	e4ff07ca72670425	-
+apm-map2048.toast	data	Mac_OS_X/Forks/both.bin	2500	b4b97cf445883ffd	BINA/hDmp
+apm-map2048.toast	rsrc	Mac_OS_X/Forks/both.bin	1038	27cfb4d7ff4b8fe9	-
+apm-map2048.toast	res	Mac_OS_X/Forks/both.bin/..namedfork/rsrc/TEXT/#128	12	c568effa8f88a15d	-
+apm-map2048.toast	res	Mac_OS_X/Forks/both.bin/..namedfork/rsrc/TEXT/#129	700	1f9d95462cd11ef6	-
+apm-map2048.toast	data	Mac_OS_X/Names/Café Menu.txt	120	c15ff6b2bc03d22d	TEXT/ttxt
+iso-joliet.toast	top	.	102400	c538448ac0600574	iso9660
+iso-joliet.toast	file	Read Me	900	d3f89929d30102a0	-
+iso-joliet.toast	file	Docs/Notes/nested.txt	300	699ac27a7a996068	-
+iso-joliet.toast	file	Docs/counter.bin	3000	c19760a6cf9907f5	-
+iso-joliet.toast	file	Docs/big.txt	9000	e7a1aacd5f3123ab	-
+iso-joliet.toast	file	empty	0	cbf29ce484222325	-
+iso-joliet.toast	file	Forks/both.bin	2500	b4b97cf445883ffd	-
+iso-joliet.toast	file	Names/Café Menu.txt	120	896acf16c9d21f95	-
+udf.toast	top	.	1148928	b017c6a37ec17c93	udf
+udf.toast	file	Read Me	900	bb7fda23b7d837b8	-
+udf.toast	file	Docs/Notes/nested.txt	300	c18564174bee0554	-
+udf.toast	file	Docs/counter.bin	3000	c19760a6cf9907f5	-
+udf.toast	file	Docs/big.txt	9000	65da8f7f409fbbdb	-
+udf.toast	file	empty	0	cbf29ce484222325	-
+udf.toast	file	Forks/both.bin	2500	b4b97cf445883ffd	-
+udf.toast	file	Names/Café Menu.txt	120	02d7139b7197457d	-
+udf-bridge.toast	top	.	1148928	5afda58ea5117b22	iso9660
+udf-bridge.toast	file	Read Me	900	8b15ae16d207b7cb	-
+udf-bridge.toast	file	Docs/Notes/nested.txt	300	bf36dfa47ba224e2	-
+udf-bridge.toast	file	Docs/counter.bin	3000	c19760a6cf9907f5	-
+udf-bridge.toast	file	Docs/big.txt	9000	e7f7591e7da1ae0b	-
+udf-bridge.toast	file	empty	0	cbf29ce484222325	-
+udf-bridge.toast	file	Forks/both.bin	2500	b4b97cf445883ffd	-
+udf-bridge.toast	file	Names/Café Menu.txt	120	9dd7b8603bcf8958	-
+hybrid-shared.toast	top	.	921600	d674a92c74462eee	apm
+hybrid-shared.toast	image	DiscRecording 9.0.3d5	49152	c94958ca466cf160	hfs
+hybrid-shared.toast	data	DiscRecording 9.0.3d5/Read Me	900	83e804255eaa245b	TEXT/ttxt
+hybrid-shared.toast	data	DiscRecording 9.0.3d5/Docs/Notes/nested.txt	300	95fd3dc9a91bf0e2	TEXT/ttxt
+hybrid-shared.toast	data	DiscRecording 9.0.3d5/Docs/counter.bin	3000	c19760a6cf9907f5	BINA/hDmp
+hybrid-shared.toast	data	DiscRecording 9.0.3d5/Docs/big.txt	9000	fbae9b23ff35508f	TEXT/R*ch
+hybrid-shared.toast	empty	DiscRecording 9.0.3d5/empty	0	cbf29ce484222325	TEXT/ttxt
+hybrid-shared.toast	data	DiscRecording 9.0.3d5/App/Sample App	0	cbf29ce484222325	APPL/Smpl
+hybrid-shared.toast	rsrc	DiscRecording 9.0.3d5/App/Sample App	1935	62e26740d1b17f93	-
+hybrid-shared.toast	res	DiscRecording 9.0.3d5/App/Sample App/..namedfork/rsrc/CODE/#0	24	f319166e175bd2d5	-
+hybrid-shared.toast	res	DiscRecording 9.0.3d5/App/Sample App/..namedfork/rsrc/CODE/#1	1500	b5ddb9e4e43b5971	-
+hybrid-shared.toast	res	DiscRecording 9.0.3d5/App/Sample App/..namedfork/rsrc/STR#/#128	16	fc158462e61e27fc	-
+hybrid-shared.toast	res	DiscRecording 9.0.3d5/App/Sample App/..namedfork/rsrc/vers/#1	21	e4ff07ca72670425	-
+hybrid-shared.toast	data	DiscRecording 9.0.3d5/Forks/both.bin	2500	b4b97cf445883ffd	BINA/hDmp
+hybrid-shared.toast	rsrc	DiscRecording 9.0.3d5/Forks/both.bin	1038	584459015f8ac9b8	-
+hybrid-shared.toast	res	DiscRecording 9.0.3d5/Forks/both.bin/..namedfork/rsrc/TEXT/#128	12	026e1fff291f0949	-
+hybrid-shared.toast	res	DiscRecording 9.0.3d5/Forks/both.bin/..namedfork/rsrc/TEXT/#129	700	634b2418d79aa52f	-
+hybrid-shared.toast	data	DiscRecording 9.0.3d5/Names/Café Menu.txt	120	a1b227f2c1d33238	TEXT/ttxt
+hybrid-shared.toast	iso	Read Me	900	83e804255eaa245b	-
+hybrid-shared.toast	iso	Docs/Notes/nested.txt	300	95fd3dc9a91bf0e2	-
+hybrid-shared.toast	iso	Docs/counter.bin	3000	c19760a6cf9907f5	-
+hybrid-shared.toast	iso	Docs/big.txt	9000	fbae9b23ff35508f	-
+hybrid-shared.toast	iso	empty	0	cbf29ce484222325	-
+hybrid-shared.toast	iso	Forks/both.bin	2500	b4b97cf445883ffd	-
+hybrid-shared.toast	iso	Names/Café Menu.txt	120	a1b227f2c1d33238	-
+hybrid-shared.toast	iso	PC/README.TXT	500	c183cbe023e2f726	-
+hybrid-shared.toast	iso	PC/WIN/SETUP.DAT	4000	d7eb3ce0fc3d4ba5	-
+hybrid-shared.toast	iso	PC/WIN/DRIVERS/Long Driver Name.inf	260	d797998904585035	-
+hybrid-shared.toast	iso	PC/AUTORUN.INF	31	9395e5b70079e5d8	-
+hybrid-shared.toast	iso	PC/EMPTY.TXT	0	cbf29ce484222325	-
+hybrid-concat.toast	top	.	1208320	0a3bd7ba1492606e	apm
+hybrid-concat.toast	image	p1.img	819200	ade45a67db4ed946	hfs
+hybrid-concat.toast	data	p1.img/Read Me	900	ae06887153039e92	TEXT/ttxt
+hybrid-concat.toast	data	p1.img/Docs/Notes/nested.txt	300	46195af48091bb87	TEXT/ttxt
+hybrid-concat.toast	data	p1.img/Docs/counter.bin	3000	c19760a6cf9907f5	BINA/hDmp
+hybrid-concat.toast	data	p1.img/Docs/big.txt	9000	0be7cb4169b08a3e	TEXT/R*ch
+hybrid-concat.toast	empty	p1.img/empty	0	cbf29ce484222325	TEXT/ttxt
+hybrid-concat.toast	data	p1.img/App/Sample App	0	cbf29ce484222325	APPL/Smpl
+hybrid-concat.toast	rsrc	p1.img/App/Sample App	1935	a55bf79b6f4dff4d	-
+hybrid-concat.toast	res	p1.img/App/Sample App/..namedfork/rsrc/CODE/#0	24	f319166e175bd2d5	-
+hybrid-concat.toast	res	p1.img/App/Sample App/..namedfork/rsrc/CODE/#1	1500	b5ddb9e4e43b5971	-
+hybrid-concat.toast	res	p1.img/App/Sample App/..namedfork/rsrc/STR#/#128	16	167a519df8a057a2	-
+hybrid-concat.toast	res	p1.img/App/Sample App/..namedfork/rsrc/vers/#1	21	e4ff07ca72670425	-
+hybrid-concat.toast	data	p1.img/Forks/both.bin	2500	b4b97cf445883ffd	BINA/hDmp
+hybrid-concat.toast	rsrc	p1.img/Forks/both.bin	1038	983372479be462f2	-
+hybrid-concat.toast	res	p1.img/Forks/both.bin/..namedfork/rsrc/TEXT/#128	12	6e997815cdafde11	-
+hybrid-concat.toast	res	p1.img/Forks/both.bin/..namedfork/rsrc/TEXT/#129	700	3f665296429c1825	-
+hybrid-concat.toast	data	p1.img/Names/Café Menu.txt	120	e45b404bb8d7108d	TEXT/ttxt
+hybrid-concat.toast	iso	README.TXT	500	25a036a8ab39cb8e	-
+hybrid-concat.toast	iso	WIN/SETUP.DAT	4000	d7eb3ce0fc3d4ba5	-
+hybrid-concat.toast	iso	WIN/DRIVERS/Long Driver Name.inf	260	4d97d2bff73aeb6f	-
+hybrid-concat.toast	iso	AUTORUN.INF	31	9395e5b70079e5d8	-
+hybrid-concat.toast	iso	EMPTY.TXT	0	cbf29ce484222325	-
+hybrid-nomap.toast	top	.	1210368	0420d4ccadb34671	hfs
+hybrid-nomap.toast	data	Mac/Read Me	900	b29da7f1b912bc4c	TEXT/ttxt
+hybrid-nomap.toast	data	Mac/Docs/Notes/nested.txt	300	2e05853faed690de	TEXT/ttxt
+hybrid-nomap.toast	data	Mac/Docs/counter.bin	3000	c19760a6cf9907f5	BINA/hDmp
+hybrid-nomap.toast	data	Mac/Docs/big.txt	9000	c73a0af9b01aa676	TEXT/R*ch
+hybrid-nomap.toast	empty	Mac/empty	0	cbf29ce484222325	TEXT/ttxt
+hybrid-nomap.toast	data	Mac/App/Sample App	0	cbf29ce484222325	APPL/Smpl
+hybrid-nomap.toast	rsrc	Mac/App/Sample App	1935	9ca17ec1a93a745d	-
+hybrid-nomap.toast	res	Mac/App/Sample App/..namedfork/rsrc/CODE/#0	24	f319166e175bd2d5	-
+hybrid-nomap.toast	res	Mac/App/Sample App/..namedfork/rsrc/CODE/#1	1500	b5ddb9e4e43b5971	-
+hybrid-nomap.toast	res	Mac/App/Sample App/..namedfork/rsrc/STR#/#128	16	bd3cd192deca2cfa	-
+hybrid-nomap.toast	res	Mac/App/Sample App/..namedfork/rsrc/vers/#1	21	e4ff07ca72670425	-
+hybrid-nomap.toast	data	Mac/Forks/both.bin	2500	b4b97cf445883ffd	BINA/hDmp
+hybrid-nomap.toast	rsrc	Mac/Forks/both.bin	1038	31928ad3a8a8bcbf	-
+hybrid-nomap.toast	res	Mac/Forks/both.bin/..namedfork/rsrc/TEXT/#128	12	6a2b7433edc05b53	-
+hybrid-nomap.toast	res	Mac/Forks/both.bin/..namedfork/rsrc/TEXT/#129	700	9cf81e1c84f91336	-
+hybrid-nomap.toast	data	Mac/Names/Caf_ Menu.txt	120	57736e9edad107ce	TEXT/ttxt
+hybrid-nomap.toast	data	Desktop DB	8192	35c2fad74f326ca6	BTFL/DMGR
+hybrid-nomap.toast	empty	Desktop DF	0	cbf29ce484222325	DTFL/DMGR
+hybrid-nomap.toast	iso	PC/README.TXT	500	88130765fa649652	-
+hybrid-nomap.toast	iso	PC/WIN/SETUP.DAT	4000	d7eb3ce0fc3d4ba5	-
+hybrid-nomap.toast	iso	PC/WIN/DRIVERS/Long Driver Name.inf	260	a274c81a2f43f8fe	-
+hybrid-nomap.toast	iso	PC/AUTORUN.INF	31	9395e5b70079e5d8	-
+hybrid-nomap.toast	iso	PC/EMPTY.TXT	0	cbf29ce484222325	-
+apm-hfs.m1.toast	top	.	947856	8f730939551cbdeb	apm
+apm-hfs.m1.toast	cooked	.	825344	90b4537f047d23fe	apm
+apm-hfs.m1.toast	image	Toast 5.0.2 HFS Builder	819200	6d42d20ca959cb48	hfs
+apm-hfs.m1.toast	data	Toast 5.0.2 HFS Builder/Read Me	900	db2957533e16f288	TEXT/ttxt
+apm-hfs.m1.toast	data	Toast 5.0.2 HFS Builder/Docs/Notes/nested.txt	300	7dced38375a81d88	TEXT/ttxt
+apm-hfs.m1.toast	data	Toast 5.0.2 HFS Builder/Docs/counter.bin	3000	c19760a6cf9907f5	BINA/hDmp
+apm-hfs.m1.toast	data	Toast 5.0.2 HFS Builder/Docs/big.txt	9000	a1fc613e4247e2a3	TEXT/R*ch
+apm-hfs.m1.toast	empty	Toast 5.0.2 HFS Builder/empty	0	cbf29ce484222325	TEXT/ttxt
+apm-hfs.m1.toast	data	Toast 5.0.2 HFS Builder/App/Sample App	0	cbf29ce484222325	APPL/Smpl
+apm-hfs.m1.toast	rsrc	Toast 5.0.2 HFS Builder/App/Sample App	1935	875b666e7a0f7f39	-
+apm-hfs.m1.toast	res	Toast 5.0.2 HFS Builder/App/Sample App/..namedfork/rsrc/CODE/#0	24	f319166e175bd2d5	-
+apm-hfs.m1.toast	res	Toast 5.0.2 HFS Builder/App/Sample App/..namedfork/rsrc/CODE/#1	1500	b5ddb9e4e43b5971	-
+apm-hfs.m1.toast	res	Toast 5.0.2 HFS Builder/App/Sample App/..namedfork/rsrc/STR#/#128	16	636c5dbdbecb332a	-
+apm-hfs.m1.toast	res	Toast 5.0.2 HFS Builder/App/Sample App/..namedfork/rsrc/vers/#1	21	e4ff07ca72670425	-
+apm-hfs.m1.toast	data	Toast 5.0.2 HFS Builder/Forks/both.bin	2500	b4b97cf445883ffd	BINA/hDmp
+apm-hfs.m1.toast	rsrc	Toast 5.0.2 HFS Builder/Forks/both.bin	1038	0ff51e0513b9782a	-
+apm-hfs.m1.toast	res	Toast 5.0.2 HFS Builder/Forks/both.bin/..namedfork/rsrc/TEXT/#128	12	4d1986bcaabdef33	-
+apm-hfs.m1.toast	res	Toast 5.0.2 HFS Builder/Forks/both.bin/..namedfork/rsrc/TEXT/#129	700	d25b0dc011301c2b	-
+apm-hfs.m1.toast	data	Toast 5.0.2 HFS Builder/Names/Café Menu.txt	120	d67696df573406d9	TEXT/ttxt
+apm-hfs.m2.toast	top	.	947856	759efb16ec2406ee	apm
+apm-hfs.m2.toast	cooked	.	825344	90b4537f047d23fe	apm
+apm-hfs.m2.toast	image	Toast 5.0.2 HFS Builder	819200	6d42d20ca959cb48	hfs
+apm-hfs.m2.toast	data	Toast 5.0.2 HFS Builder/Read Me	900	db2957533e16f288	TEXT/ttxt
+apm-hfs.m2.toast	data	Toast 5.0.2 HFS Builder/Docs/Notes/nested.txt	300	7dced38375a81d88	TEXT/ttxt
+apm-hfs.m2.toast	data	Toast 5.0.2 HFS Builder/Docs/counter.bin	3000	c19760a6cf9907f5	BINA/hDmp
+apm-hfs.m2.toast	data	Toast 5.0.2 HFS Builder/Docs/big.txt	9000	a1fc613e4247e2a3	TEXT/R*ch
+apm-hfs.m2.toast	empty	Toast 5.0.2 HFS Builder/empty	0	cbf29ce484222325	TEXT/ttxt
+apm-hfs.m2.toast	data	Toast 5.0.2 HFS Builder/App/Sample App	0	cbf29ce484222325	APPL/Smpl
+apm-hfs.m2.toast	rsrc	Toast 5.0.2 HFS Builder/App/Sample App	1935	875b666e7a0f7f39	-
+apm-hfs.m2.toast	res	Toast 5.0.2 HFS Builder/App/Sample App/..namedfork/rsrc/CODE/#0	24	f319166e175bd2d5	-
+apm-hfs.m2.toast	res	Toast 5.0.2 HFS Builder/App/Sample App/..namedfork/rsrc/CODE/#1	1500	b5ddb9e4e43b5971	-
+apm-hfs.m2.toast	res	Toast 5.0.2 HFS Builder/App/Sample App/..namedfork/rsrc/STR#/#128	16	636c5dbdbecb332a	-
+apm-hfs.m2.toast	res	Toast 5.0.2 HFS Builder/App/Sample App/..namedfork/rsrc/vers/#1	21	e4ff07ca72670425	-
+apm-hfs.m2.toast	data	Toast 5.0.2 HFS Builder/Forks/both.bin	2500	b4b97cf445883ffd	BINA/hDmp
+apm-hfs.m2.toast	rsrc	Toast 5.0.2 HFS Builder/Forks/both.bin	1038	0ff51e0513b9782a	-
+apm-hfs.m2.toast	res	Toast 5.0.2 HFS Builder/Forks/both.bin/..namedfork/rsrc/TEXT/#128	12	4d1986bcaabdef33	-
+apm-hfs.m2.toast	res	Toast 5.0.2 HFS Builder/Forks/both.bin/..namedfork/rsrc/TEXT/#129	700	d25b0dc011301c2b	-
+apm-hfs.m2.toast	data	Toast 5.0.2 HFS Builder/Names/Café Menu.txt	120	d67696df573406d9	TEXT/ttxt
+apm-map2048.m1.toast	top	.	117600	2d908a4a194d7999	apm
+apm-map2048.m1.toast	cooked	.	102400	437bfa7aa93bf935	apm
+apm-map2048.m1.toast	image	Mac_OS_X	47104	7780169267e9e28b	hfs
+apm-map2048.m1.toast	data	Mac_OS_X/Read Me	900	106800b5f5e59568	TEXT/ttxt
+apm-map2048.m1.toast	data	Mac_OS_X/Docs/Notes/nested.txt	300	b6797f07d01ade0a	TEXT/ttxt
+apm-map2048.m1.toast	data	Mac_OS_X/Docs/counter.bin	3000	c19760a6cf9907f5	BINA/hDmp
+apm-map2048.m1.toast	data	Mac_OS_X/Docs/big.txt	9000	7a80d3fab6eae8bf	TEXT/R*ch
+apm-map2048.m1.toast	empty	Mac_OS_X/empty	0	cbf29ce484222325	TEXT/ttxt
+apm-map2048.m1.toast	data	Mac_OS_X/App/Sample App	0	cbf29ce484222325	APPL/Smpl
+apm-map2048.m1.toast	rsrc	Mac_OS_X/App/Sample App	1935	1c258b9a3b58fef9	-
+apm-map2048.m1.toast	res	Mac_OS_X/App/Sample App/..namedfork/rsrc/CODE/#0	24	f319166e175bd2d5	-
+apm-map2048.m1.toast	res	Mac_OS_X/App/Sample App/..namedfork/rsrc/CODE/#1	1500	b5ddb9e4e43b5971	-
+apm-map2048.m1.toast	res	Mac_OS_X/App/Sample App/..namedfork/rsrc/STR#/#128	16	13e811cf6608b686	-
+apm-map2048.m1.toast	res	Mac_OS_X/App/Sample App/..namedfork/rsrc/vers/#1	21	e4ff07ca72670425	-
+apm-map2048.m1.toast	data	Mac_OS_X/Forks/both.bin	2500	b4b97cf445883ffd	BINA/hDmp
+apm-map2048.m1.toast	rsrc	Mac_OS_X/Forks/both.bin	1038	27cfb4d7ff4b8fe9	-
+apm-map2048.m1.toast	res	Mac_OS_X/Forks/both.bin/..namedfork/rsrc/TEXT/#128	12	c568effa8f88a15d	-
+apm-map2048.m1.toast	res	Mac_OS_X/Forks/both.bin/..namedfork/rsrc/TEXT/#129	700	1f9d95462cd11ef6	-
+apm-map2048.m1.toast	data	Mac_OS_X/Names/Café Menu.txt	120	c15ff6b2bc03d22d	TEXT/ttxt
+apm-map2048.m2.toast	top	.	117600	f36be890042cc1c4	apm
+apm-map2048.m2.toast	cooked	.	102400	437bfa7aa93bf935	apm
+apm-map2048.m2.toast	image	Mac_OS_X	47104	7780169267e9e28b	hfs
+apm-map2048.m2.toast	data	Mac_OS_X/Read Me	900	106800b5f5e59568	TEXT/ttxt
+apm-map2048.m2.toast	data	Mac_OS_X/Docs/Notes/nested.txt	300	b6797f07d01ade0a	TEXT/ttxt
+apm-map2048.m2.toast	data	Mac_OS_X/Docs/counter.bin	3000	c19760a6cf9907f5	BINA/hDmp
+apm-map2048.m2.toast	data	Mac_OS_X/Docs/big.txt	9000	7a80d3fab6eae8bf	TEXT/R*ch
+apm-map2048.m2.toast	empty	Mac_OS_X/empty	0	cbf29ce484222325	TEXT/ttxt
+apm-map2048.m2.toast	data	Mac_OS_X/App/Sample App	0	cbf29ce484222325	APPL/Smpl
+apm-map2048.m2.toast	rsrc	Mac_OS_X/App/Sample App	1935	1c258b9a3b58fef9	-
+apm-map2048.m2.toast	res	Mac_OS_X/App/Sample App/..namedfork/rsrc/CODE/#0	24	f319166e175bd2d5	-
+apm-map2048.m2.toast	res	Mac_OS_X/App/Sample App/..namedfork/rsrc/CODE/#1	1500	b5ddb9e4e43b5971	-
+apm-map2048.m2.toast	res	Mac_OS_X/App/Sample App/..namedfork/rsrc/STR#/#128	16	13e811cf6608b686	-
+apm-map2048.m2.toast	res	Mac_OS_X/App/Sample App/..namedfork/rsrc/vers/#1	21	e4ff07ca72670425	-
+apm-map2048.m2.toast	data	Mac_OS_X/Forks/both.bin	2500	b4b97cf445883ffd	BINA/hDmp
+apm-map2048.m2.toast	rsrc	Mac_OS_X/Forks/both.bin	1038	27cfb4d7ff4b8fe9	-
+apm-map2048.m2.toast	res	Mac_OS_X/Forks/both.bin/..namedfork/rsrc/TEXT/#128	12	c568effa8f88a15d	-
+apm-map2048.m2.toast	res	Mac_OS_X/Forks/both.bin/..namedfork/rsrc/TEXT/#129	700	1f9d95462cd11ef6	-
+apm-map2048.m2.toast	data	Mac_OS_X/Names/Café Menu.txt	120	c15ff6b2bc03d22d	TEXT/ttxt
+apm-map2048.m2-2336.toast	top	.	116800	61ce3c6ff4f47ffd	apm
+apm-map2048.m2-2336.toast	cooked	.	102400	437bfa7aa93bf935	apm
+apm-map2048.m2-2336.toast	image	Mac_OS_X	47104	7780169267e9e28b	hfs
+apm-map2048.m2-2336.toast	data	Mac_OS_X/Read Me	900	106800b5f5e59568	TEXT/ttxt
+apm-map2048.m2-2336.toast	data	Mac_OS_X/Docs/Notes/nested.txt	300	b6797f07d01ade0a	TEXT/ttxt
+apm-map2048.m2-2336.toast	data	Mac_OS_X/Docs/counter.bin	3000	c19760a6cf9907f5	BINA/hDmp
+apm-map2048.m2-2336.toast	data	Mac_OS_X/Docs/big.txt	9000	7a80d3fab6eae8bf	TEXT/R*ch
+apm-map2048.m2-2336.toast	empty	Mac_OS_X/empty	0	cbf29ce484222325	TEXT/ttxt
+apm-map2048.m2-2336.toast	data	Mac_OS_X/App/Sample App	0	cbf29ce484222325	APPL/Smpl
+apm-map2048.m2-2336.toast	rsrc	Mac_OS_X/App/Sample App	1935	1c258b9a3b58fef9	-
+apm-map2048.m2-2336.toast	res	Mac_OS_X/App/Sample App/..namedfork/rsrc/CODE/#0	24	f319166e175bd2d5	-
+apm-map2048.m2-2336.toast	res	Mac_OS_X/App/Sample App/..namedfork/rsrc/CODE/#1	1500	b5ddb9e4e43b5971	-
+apm-map2048.m2-2336.toast	res	Mac_OS_X/App/Sample App/..namedfork/rsrc/STR#/#128	16	13e811cf6608b686	-
+apm-map2048.m2-2336.toast	res	Mac_OS_X/App/Sample App/..namedfork/rsrc/vers/#1	21	e4ff07ca72670425	-
+apm-map2048.m2-2336.toast	data	Mac_OS_X/Forks/both.bin	2500	b4b97cf445883ffd	BINA/hDmp
+apm-map2048.m2-2336.toast	rsrc	Mac_OS_X/Forks/both.bin	1038	27cfb4d7ff4b8fe9	-
+apm-map2048.m2-2336.toast	res	Mac_OS_X/Forks/both.bin/..namedfork/rsrc/TEXT/#128	12	c568effa8f88a15d	-
+apm-map2048.m2-2336.toast	res	Mac_OS_X/Forks/both.bin/..namedfork/rsrc/TEXT/#129	700	1f9d95462cd11ef6	-
+apm-map2048.m2-2336.toast	data	Mac_OS_X/Names/Café Menu.txt	120	c15ff6b2bc03d22d	TEXT/ttxt
+apm-map2048.xa2056.toast	top	.	102800	d6df59e2c1debe25	apm
+apm-map2048.xa2056.toast	cooked	.	102400	437bfa7aa93bf935	apm
+apm-map2048.xa2056.toast	image	Mac_OS_X	47104	7780169267e9e28b	hfs
+apm-map2048.xa2056.toast	data	Mac_OS_X/Read Me	900	106800b5f5e59568	TEXT/ttxt
+apm-map2048.xa2056.toast	data	Mac_OS_X/Docs/Notes/nested.txt	300	b6797f07d01ade0a	TEXT/ttxt
+apm-map2048.xa2056.toast	data	Mac_OS_X/Docs/counter.bin	3000	c19760a6cf9907f5	BINA/hDmp
+apm-map2048.xa2056.toast	data	Mac_OS_X/Docs/big.txt	9000	7a80d3fab6eae8bf	TEXT/R*ch
+apm-map2048.xa2056.toast	empty	Mac_OS_X/empty	0	cbf29ce484222325	TEXT/ttxt
+apm-map2048.xa2056.toast	data	Mac_OS_X/App/Sample App	0	cbf29ce484222325	APPL/Smpl
+apm-map2048.xa2056.toast	rsrc	Mac_OS_X/App/Sample App	1935	1c258b9a3b58fef9	-
+apm-map2048.xa2056.toast	res	Mac_OS_X/App/Sample App/..namedfork/rsrc/CODE/#0	24	f319166e175bd2d5	-
+apm-map2048.xa2056.toast	res	Mac_OS_X/App/Sample App/..namedfork/rsrc/CODE/#1	1500	b5ddb9e4e43b5971	-
+apm-map2048.xa2056.toast	res	Mac_OS_X/App/Sample App/..namedfork/rsrc/STR#/#128	16	13e811cf6608b686	-
+apm-map2048.xa2056.toast	res	Mac_OS_X/App/Sample App/..namedfork/rsrc/vers/#1	21	e4ff07ca72670425	-
+apm-map2048.xa2056.toast	data	Mac_OS_X/Forks/both.bin	2500	b4b97cf445883ffd	BINA/hDmp
+apm-map2048.xa2056.toast	rsrc	Mac_OS_X/Forks/both.bin	1038	27cfb4d7ff4b8fe9	-
+apm-map2048.xa2056.toast	res	Mac_OS_X/Forks/both.bin/..namedfork/rsrc/TEXT/#128	12	c568effa8f88a15d	-
+apm-map2048.xa2056.toast	res	Mac_OS_X/Forks/both.bin/..namedfork/rsrc/TEXT/#129	700	1f9d95462cd11ef6	-
+apm-map2048.xa2056.toast	data	Mac_OS_X/Names/Café Menu.txt	120	c15ff6b2bc03d22d	TEXT/ttxt
+iso-joliet.m1.toast	top	.	117600	185e208908bcd3a5	iso9660
+iso-joliet.m1.toast	cooked	.	102400	c538448ac0600574	iso9660
+iso-joliet.m1.toast	file	Read Me	900	d3f89929d30102a0	-
+iso-joliet.m1.toast	file	Docs/Notes/nested.txt	300	699ac27a7a996068	-
+iso-joliet.m1.toast	file	Docs/counter.bin	3000	c19760a6cf9907f5	-
+iso-joliet.m1.toast	file	Docs/big.txt	9000	e7a1aacd5f3123ab	-
+iso-joliet.m1.toast	file	empty	0	cbf29ce484222325	-
+iso-joliet.m1.toast	file	Forks/both.bin	2500	b4b97cf445883ffd	-
+iso-joliet.m1.toast	file	Names/Café Menu.txt	120	896acf16c9d21f95	-
+iso-joliet.m2.toast	top	.	117600	42b8495c0e8db02c	iso9660
+iso-joliet.m2.toast	cooked	.	102400	c538448ac0600574	iso9660
+iso-joliet.m2.toast	file	Read Me	900	d3f89929d30102a0	-
+iso-joliet.m2.toast	file	Docs/Notes/nested.txt	300	699ac27a7a996068	-
+iso-joliet.m2.toast	file	Docs/counter.bin	3000	c19760a6cf9907f5	-
+iso-joliet.m2.toast	file	Docs/big.txt	9000	e7a1aacd5f3123ab	-
+iso-joliet.m2.toast	file	empty	0	cbf29ce484222325	-
+iso-joliet.m2.toast	file	Forks/both.bin	2500	b4b97cf445883ffd	-
+iso-joliet.m2.toast	file	Names/Café Menu.txt	120	896acf16c9d21f95	-
+iso-joliet.m2-2336.toast	top	.	116800	41e86f22dd302865	iso9660
+iso-joliet.m2-2336.toast	cooked	.	102400	c538448ac0600574	iso9660
+iso-joliet.m2-2336.toast	file	Read Me	900	d3f89929d30102a0	-
+iso-joliet.m2-2336.toast	file	Docs/Notes/nested.txt	300	699ac27a7a996068	-
+iso-joliet.m2-2336.toast	file	Docs/counter.bin	3000	c19760a6cf9907f5	-
+iso-joliet.m2-2336.toast	file	Docs/big.txt	9000	e7a1aacd5f3123ab	-
+iso-joliet.m2-2336.toast	file	empty	0	cbf29ce484222325	-
+iso-joliet.m2-2336.toast	file	Forks/both.bin	2500	b4b97cf445883ffd	-
+iso-joliet.m2-2336.toast	file	Names/Café Menu.txt	120	896acf16c9d21f95	-
+iso-joliet.xa2056.toast	top	.	102800	8b33e2edb7fe6344	iso9660
+iso-joliet.xa2056.toast	cooked	.	102400	c538448ac0600574	iso9660
+iso-joliet.xa2056.toast	file	Read Me	900	d3f89929d30102a0	-
+iso-joliet.xa2056.toast	file	Docs/Notes/nested.txt	300	699ac27a7a996068	-
+iso-joliet.xa2056.toast	file	Docs/counter.bin	3000	c19760a6cf9907f5	-
+iso-joliet.xa2056.toast	file	Docs/big.txt	9000	e7a1aacd5f3123ab	-
+iso-joliet.xa2056.toast	file	empty	0	cbf29ce484222325	-
+iso-joliet.xa2056.toast	file	Forks/both.bin	2500	b4b97cf445883ffd	-
+iso-joliet.xa2056.toast	file	Names/Café Menu.txt	120	896acf16c9d21f95	-
+archived.toast.zip	top	.	6509	34d8066af054bf7e	zip
+archived.toast.zip	image	apm-map2048.toast	102400	437bfa7aa93bf935	apm
+archived.toast.zip	image	apm-map2048.toast/Mac_OS_X	47104	7780169267e9e28b	hfs
+archived.toast.zip	data	apm-map2048.toast/Mac_OS_X/Read Me	900	106800b5f5e59568	TEXT/ttxt
+archived.toast.zip	data	apm-map2048.toast/Mac_OS_X/Docs/Notes/nested.txt	300	b6797f07d01ade0a	TEXT/ttxt
+archived.toast.zip	data	apm-map2048.toast/Mac_OS_X/Docs/counter.bin	3000	c19760a6cf9907f5	BINA/hDmp
+archived.toast.zip	data	apm-map2048.toast/Mac_OS_X/Docs/big.txt	9000	7a80d3fab6eae8bf	TEXT/R*ch
+archived.toast.zip	empty	apm-map2048.toast/Mac_OS_X/empty	0	cbf29ce484222325	TEXT/ttxt
+archived.toast.zip	data	apm-map2048.toast/Mac_OS_X/App/Sample App	0	cbf29ce484222325	APPL/Smpl
+archived.toast.zip	rsrc	apm-map2048.toast/Mac_OS_X/App/Sample App	1935	1c258b9a3b58fef9	-
+archived.toast.zip	res	apm-map2048.toast/Mac_OS_X/App/Sample App/..namedfork/rsrc/CODE/#0	24	f319166e175bd2d5	-
+archived.toast.zip	res	apm-map2048.toast/Mac_OS_X/App/Sample App/..namedfork/rsrc/CODE/#1	1500	b5ddb9e4e43b5971	-
+archived.toast.zip	res	apm-map2048.toast/Mac_OS_X/App/Sample App/..namedfork/rsrc/STR#/#128	16	13e811cf6608b686	-
+archived.toast.zip	res	apm-map2048.toast/Mac_OS_X/App/Sample App/..namedfork/rsrc/vers/#1	21	e4ff07ca72670425	-
+archived.toast.zip	data	apm-map2048.toast/Mac_OS_X/Forks/both.bin	2500	b4b97cf445883ffd	BINA/hDmp
+archived.toast.zip	rsrc	apm-map2048.toast/Mac_OS_X/Forks/both.bin	1038	27cfb4d7ff4b8fe9	-
+archived.toast.zip	res	apm-map2048.toast/Mac_OS_X/Forks/both.bin/..namedfork/rsrc/TEXT/#128	12	c568effa8f88a15d	-
+archived.toast.zip	res	apm-map2048.toast/Mac_OS_X/Forks/both.bin/..namedfork/rsrc/TEXT/#129	700	1f9d95462cd11ef6	-
+archived.toast.zip	data	apm-map2048.toast/Mac_OS_X/Names/Café Menu.txt	120	c15ff6b2bc03d22d	TEXT/ttxt
+archived.toast.zip	image	iso-joliet.toast	102400	c538448ac0600574	iso9660
+archived.toast.zip	file	iso-joliet.toast/Read Me	900	d3f89929d30102a0	-
+archived.toast.zip	file	iso-joliet.toast/Docs/Notes/nested.txt	300	699ac27a7a996068	-
+archived.toast.zip	file	iso-joliet.toast/Docs/counter.bin	3000	c19760a6cf9907f5	-
+archived.toast.zip	file	iso-joliet.toast/Docs/big.txt	9000	e7a1aacd5f3123ab	-
+archived.toast.zip	file	iso-joliet.toast/empty	0	cbf29ce484222325	-
+archived.toast.zip	file	iso-joliet.toast/Forks/both.bin	2500	b4b97cf445883ffd	-
+archived.toast.zip	file	iso-joliet.toast/Names/Café Menu.txt	120	896acf16c9d21f95	-

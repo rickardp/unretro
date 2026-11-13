@@ -1,4 +1,3 @@
-#![cfg(feature = "next")]
 //! UFS1 and NeXT disklabel fixtures from `testdata/ufs/` (see its README for
 //! how they were made), and real media from `$UNRETRO_SPECIMENS/next/` and
 //! `$UNRETRO_SPECIMENS/ufs/` when present.
@@ -6,6 +5,7 @@
 //! Expected paths, sizes, FNV-1a hashes and modes are in `manifest.tsv` and
 //! in the manifests next to the specimens, written from what other readers
 //! (The Sleuth Kit, the Linux `ufs` driver) found, not taken from this crate.
+#![cfg(feature = "next")]
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::Read;

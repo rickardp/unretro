@@ -1361,7 +1361,18 @@ Nothing in this section is to be imitated.
    (type 1). The record layout, the meaning of the identifiers and the
    thread records rest on the Apple source (and, for the 48-byte size,
    on Aaru). A specimen made by the Workshop 3.0 with real
-   subdirectories would confirm section 8.2.
+   subdirectories would confirm section 8.2. None was found in the 120
+   images of the bitsavers Lisa collection or elsewhere. Three released
+   diskettes do hold leftovers of directories from the machines they
+   were mastered on, in catalog node space that is no longer in use:
+   `LOS_800K-DRIVER` (thread records for identifiers 1 and 4, named
+   `Label` and `temp`, both with parent 0, and two file records keyed
+   with parent 4) and the Toolkit 3.0 diskettes `TK_Sources_1` and
+   `ToolKit_V3.0_4` (file records keyed with parents 2 and 7). These
+   OBSERVED leftovers agree with section 8.2 on the thread record (type
+   8, parent identifier at 0x26, name as a length-prefixed string after
+   it) and on a file's key carrying the identifier of its directory. No
+   directory record (type 1) survives in them.
 4. **File-map continuation pages** (more than 10 extents on versions 15
    and 17, more than 84 on version 14): APPLE-SOURCE only. A heavily
    fragmented hard-disk specimen would confirm section 7.3.
@@ -1461,3 +1472,37 @@ examined volumes.
 10. `-` and `+` as path delimiters that cannot occur in names (10).
 11. The 16-level limit of the tree (17.3).
 12. The bit names of the `flags` word (20, item 9).
+
+### 21.5 What other sources say about the statements of 21.4
+
+Checked after this document was written, against Apple's published
+manuals and against disk images. The manuals are the *Operating System
+Reference Manual for the Lisa* (1983, 029-0414-A), the *Release 3.0
+Notes* to it, and the Workshop 3.0 release notes bound with the
+*Development System Internals Documentation* (February 1984), all as
+scanned by bitsavers. None of them describes the on-disk layout, so they
+back meanings and names, never offsets.
+
+| Item of 21.4 | Other source | What remains from the Apple source only |
+|:--|:--|:--|
+| 1. In-memory page label | None. | All of it. A reader does not need it: the on-disk tags are CONFIRMED. |
+| 2. File ID 32767 as temporary | LisaEm and Aaru give 32767 as erased blocks. | The "temporary S-file" meaning. Not needed. |
+| 3. Reason for the hard-disk volume start | None. The start itself is CONFIRMED on real disks. | The reason. Not needed. |
+| 4. Meaning of unused MDDF fields | The reference manual's volume information record names and explains the same attributes (dates of creation, backup and scavenging, password, master copy identifier, scavenge flag). | Which offset holds which attribute. |
+| 5. Hint-entry fields, passwords | The Release 3.0 Notes list the per-file attributes (creation and modification dates, size, physical size, file system overhead, the six flags). Password protection of files is described in the Workshop 3.0 notes. | Which offset holds which attribute; that the password is stored scrambled and checked at open time. |
+| 6. File-map continuation pages | None, and no specimen. | All of it. This is the only item that changes what a reader can read: without it a file with more extents than one map page holds is skipped. |
+| 7. Entry types 1, 2, 6; file type 16 | The Release 3.0 Notes give two object types for a lookup, file entry and catalog entry, and say pipes were removed in 3.0. Type 8 is OBSERVED. | Types 2 and 6 and file type 16. A reader lists none of them. |
+| 8. Key ordering, ASCII-only folding | The Release 3.0 Notes limit names to 32 characters. | The comparison rule. A reader enumerates every record and never compares keys. |
+| 9. Directory records | The Release 3.0 Notes describe `MAKE_CATALOG` and the directory hierarchy. The leftovers of section 20 item 3 show, on real disks, a thread record per directory identifier and file keys that carry it. | The directory record (type 1) itself: no copy survives on any disk examined. |
+| 10. `-` and `+` as delimiters | Both are in the Release 3.0 Notes: the dash separates the parts of a path name, and a plus stands for it to name the parent directory. The Workshop 3.0 notes call the dash "the catalog delimiter". | Nothing. |
+| 11. 16-level limit | None. | The number. As a bound on the reader's own work it could equally be a DECISION. |
+| 12. Names of the `flags` bits | The Release 3.0 Notes name and explain all six: master, protected, safety, left open (after a crash), scavenged, closed by the Operating System. | Which bit is which. |
+
+Items 10 and 12 no longer depend on the Apple source for anything a
+reader shows. Items 1, 2, 3 and 11 can be deleted or restated without
+changing the reader. Items 4, 5, 7, 8 and 9 keep an Apple-source part
+that a lister does not use. Item 6 is the one rule a reader implements
+that has no other backing.
+The owner has decided to keep it (2026-11-13): the reader follows
+continuation pages as section 7.3 describes, and the rule stays labelled
+APPLE-SOURCE until a specimen or another document confirms it.

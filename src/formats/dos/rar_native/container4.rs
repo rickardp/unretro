@@ -6,7 +6,9 @@
 
 use core::ops::Range;
 
-use crate::compat::{String, Vec, format};
+#[cfg(test)]
+use crate::compat::format;
+use crate::compat::{String, Vec};
 use crate::error::{Error, Result};
 
 const SIGNATURE: [u8; 7] = [0x52, 0x61, 0x72, 0x21, 0x1A, 0x07, 0x00];
@@ -32,6 +34,7 @@ const ARCHIVE_COMMENT: u16 = 0x0002;
 /// Archive header flag: solid (decides chains below unpack version 20).
 pub(crate) const ARCHIVE_SOLID: u16 = 0x0008;
 /// Archive header flag: volumes use the `partN` naming scheme.
+#[cfg(test)]
 pub(crate) const ARCHIVE_NEW_NAMING: u16 = 0x0010;
 const ARCHIVE_ENCRYPTED_HEADERS: u16 = 0x0080;
 const ARCHIVE_FIRST_VOLUME: u16 = 0x0100;
@@ -59,28 +62,6 @@ const METHOD_STORED: u8 = 0x30;
 // Checksums
 // =============================================================================
 
-const CRC_TABLE: [u32; 256] = crc_table();
-
-const fn crc_table() -> [u32; 256] {
-    let mut table = [0u32; 256];
-    let mut byte = 0;
-    while byte < 256 {
-        let mut register = byte as u32;
-        let mut bit = 0;
-        while bit < 8 {
-            register = if register & 1 == 1 {
-                (register >> 1) ^ 0xEDB8_8320
-            } else {
-                register >> 1
-            };
-            bit += 1;
-        }
-        table[byte] = register;
-        byte += 1;
-    }
-    table
-}
-
 /// Incremental CRC-32 (rar4-container.md 1.3).
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct Crc32(u32);
@@ -91,11 +72,7 @@ impl Crc32 {
     }
 
     pub(crate) fn update(&mut self, data: &[u8]) {
-        let mut register = self.0;
-        for &byte in data {
-            register = (register >> 8) ^ CRC_TABLE[((register ^ u32::from(byte)) & 0xFF) as usize];
-        }
-        self.0 = register;
+        self.0 = crate::formats::common::crc32::crc32_update(self.0, data);
     }
 
     pub(crate) const fn finish(self) -> u32 {
@@ -176,6 +153,7 @@ pub(crate) enum SkipReason {
 }
 
 impl SkipReason {
+    #[cfg(test)]
     pub(crate) fn message(self) -> String {
         match self {
             Self::MissingVolumePart => "missing volume part".into(),
@@ -197,8 +175,9 @@ impl SkipReason {
 pub(crate) enum Content {
     /// Directory: no contents.
     None,
-    /// Packed member below unpack version 20 with unpacked size 0: empty,
-    /// never handed to a decoder.
+    /// Empty file that is not handed to a decoder: a packed member below
+    /// unpack version 20 with unpacked size 0, or one of version 20 and above
+    /// with unpacked size 0 whose chain cannot be continued.
     Empty,
     /// The pieces are the contents.
     Stored,
@@ -269,6 +248,7 @@ pub(crate) enum Note {
 }
 
 impl Note {
+    #[cfg(test)]
     pub(crate) const fn message(self) -> &'static str {
         match self {
             Self::CorruptHeader => "corrupt header",
@@ -297,6 +277,7 @@ pub(crate) struct Finding {
 }
 
 impl Finding {
+    #[cfg(test)]
     pub(crate) fn message(&self) -> String {
         match self.offset {
             Some(offset) => format!(
@@ -309,12 +290,12 @@ impl Finding {
     }
 }
 
+// The whole header is described; `rar.rs` reads part of it.
+#[cfg_attr(not(test), allow(dead_code))]
 #[derive(Clone, Debug)]
 pub(crate) struct Member {
     /// Decoded name as stored: separators are backslashes (see [`Member::path`]).
     pub name: String,
-    /// The name field of the header, for callers with another legacy code page.
-    pub raw_name: Vec<u8>,
     pub kind: EntryKind,
     pub content: Content,
     pub unpacked_size: u64,
@@ -341,6 +322,8 @@ pub(crate) struct Member {
     pub pieces: Vec<Piece>,
     pub chain: Option<ChainLink>,
     pub notes: Vec<Note>,
+    /// The first part found continues a part that was not read.
+    pub head_missing: bool,
     archive_solid: bool,
 }
 
@@ -431,6 +414,7 @@ pub(crate) struct CommentRef {
     pub utf16: bool,
 }
 
+#[cfg_attr(not(test), allow(dead_code))]
 #[derive(Clone, Debug)]
 pub(crate) struct Archive {
     /// The volumes that were walked, in order.
@@ -1036,7 +1020,7 @@ enum Outcome {
     Truncated,
 }
 
-fn build_member(parts: &[Part<'_>], outcome: Outcome) -> Option<Member> {
+fn build_member(parts: &[Part<'_>], outcome: Outcome, head_missing: bool) -> Option<Member> {
     let last = parts.last()?;
     let mut pieces = Vec::new();
     let mut packed_size = 0u64;
@@ -1120,7 +1104,6 @@ fn build_member(parts: &[Part<'_>], outcome: Outcome) -> Option<Member> {
     let [modified, created, accessed, archived] = last.times;
     Some(Member {
         name,
-        raw_name: last.name.to_vec(),
         kind,
         content,
         unpacked_size,
@@ -1141,6 +1124,7 @@ fn build_member(parts: &[Part<'_>], outcome: Outcome) -> Option<Member> {
         pieces,
         chain: None,
         notes,
+        head_missing,
         archive_solid: last.archive_solid,
     })
 }
@@ -1156,7 +1140,8 @@ struct Joiner<'a> {
 impl<'a> Joiner<'a> {
     fn close(&mut self, outcome: Outcome) {
         let parts = core::mem::take(&mut self.open);
-        self.members.extend(build_member(&parts, outcome));
+        self.members
+            .extend(build_member(&parts, outcome, self.orphan));
         self.orphan = false;
     }
 
@@ -1215,7 +1200,13 @@ fn plan_chains(members: &mut [Member], earlier_volumes_missing: bool) {
                 Some(_) => None,
             };
             if let Some(reason) = reason {
-                member.content = Content::Skipped(reason);
+                // 15.2: an empty member stays an empty file whatever happens
+                // to its packed bytes; its chain is broken all the same.
+                member.content = if member.unpacked_size == 0 {
+                    Content::Empty
+                } else {
+                    Content::Skipped(reason)
+                };
                 usable = false;
             }
         }
@@ -1392,6 +1383,7 @@ pub(crate) fn read_archive(volumes: &[&[u8]]) -> Result<Archive> {
 // =============================================================================
 
 // Start of the file name within a path, and the position of its last dot.
+#[cfg(test)]
 fn extension_dot(name: &str) -> Option<usize> {
     let file_start = name.rfind(['/', '\\']).map_or(0, |index| index + 1);
     let dot = name.get(file_start..)?.rfind('.')? + file_start;
@@ -1400,6 +1392,7 @@ fn extension_dot(name: &str) -> Option<usize> {
 
 /// Name of volume `number` (0 is the first) of an old-scheme set whose first
 /// volume is `first`: `.r00` to `.z99` (D21).
+#[cfg(test)]
 pub(crate) fn old_scheme_volume_name(first: &str, number: u32) -> Option<String> {
     if number == 0 {
         return Some(String::from(first));
@@ -1421,6 +1414,7 @@ pub(crate) fn old_scheme_volume_name(first: &str, number: u32) -> Option<String>
 /// Name of the volume after `name` by the old scheme. A name whose extension
 /// is not a letter from `r` to `z` with two digits is taken as the first
 /// volume.
+#[cfg(test)]
 pub(crate) fn next_old_scheme_name(name: &str) -> Option<String> {
     let dot = extension_dot(name)?;
     let stem = name.get(..dot)?;
@@ -1444,6 +1438,7 @@ pub(crate) fn next_old_scheme_name(name: &str) -> Option<String> {
 /// Name of the volume after `name` by the new scheme: the last run of digits
 /// before the extension plus one, with the extension `rar`. `None` when the
 /// name has no such digits.
+#[cfg(test)]
 pub(crate) fn next_new_scheme_name(name: &str) -> Option<String> {
     let dot = extension_dot(name)?;
     let file_start = name.rfind(['/', '\\']).map_or(0, |index| index + 1);
@@ -1489,6 +1484,7 @@ pub(crate) fn next_new_scheme_name(name: &str) -> Option<String> {
 /// `archive_flags`. The flag is advice (D28): a name that does not fit the
 /// new scheme is continued by the old one, and a caller that does not find
 /// the predicted file may try the other scheme's function.
+#[cfg(test)]
 pub(crate) fn next_volume_name(name: &str, archive_flags: u16) -> Option<String> {
     if archive_flags & ARCHIVE_NEW_NAMING != 0 {
         next_new_scheme_name(name).or_else(|| next_old_scheme_name(name))
@@ -2562,6 +2558,45 @@ mod tests {
             archive.members[3].content,
             Content::Skipped(SkipReason::DependsOnUnreadable)
         );
+    }
+
+    #[test]
+    fn empty_member_of_a_broken_chain_stays_readable() {
+        // C1 with `P1` turned into a continuation part and U of `P2` and
+        // `PA` set to 0 (15.2: the entry is an empty file whatever the
+        // decoder does with its bytes).
+        let mut data = hex(C1);
+        data[23] = 0x01;
+        for header in [20, 130, 480] {
+            if header != 20 {
+                data[header + 11..header + 15].fill(0);
+            }
+            let crc = crc16(&data[header + 2..header + 34]).to_le_bytes();
+            data[header..header + 2].copy_from_slice(&crc);
+        }
+        let archive = read(&[data.as_slice()]);
+        assert!(archive.findings.is_empty());
+        let got = plan(&archive);
+        let unreadable = Content::Skipped(SkipReason::DependsOnUnreadable);
+        // Predecessor unreadable at plan level.
+        assert_eq!(got[3], ("P2".into(), Content::Empty, Some((true, Some(0)))));
+        // The chain stays broken behind the empty member.
+        assert_eq!(got[4].1, unreadable);
+        assert_eq!(got[5].1, unreadable);
+        // Predecessor decodable: handed over with its packed bytes.
+        let packed = Content::Packed(DecoderKind::Rar29);
+        assert_eq!(got[11], ("Z0".into(), packed, Some((true, Some(10)))));
+        assert_eq!(got[12], ("PA".into(), packed, Some((true, Some(11)))));
+
+        // Predecessor of another decoder (`P3`, version 20, after `P2`).
+        let mut data = hex(C1);
+        data[168 + 11..168 + 15].fill(0);
+        let crc = crc16(&data[170..202]).to_le_bytes();
+        data[168..170].copy_from_slice(&crc);
+        let archive = read(&[data.as_slice()]);
+        let got = plan(&archive);
+        assert_eq!(got[4], ("P3".into(), Content::Empty, Some((true, Some(3)))));
+        assert_eq!(got[5].1, unreadable);
     }
 
     #[test]

@@ -293,3 +293,23 @@ fn stuffit_header_claiming_4gib_does_not_allocate_it() {
         assert!(entries.iter().all(|(_, data)| data.len() <= 4096));
     }
 }
+
+// A file of 2056- or 2336-byte sectors has no signature: whether it holds a
+// volume is decided from its leading sectors, not from a copy of all of it.
+#[test]
+fn xa_sector_probe_does_not_copy_an_image_without_a_volume() {
+    // Held throughout: the images themselves are large allocations.
+    let _guard = MEASURING.lock().unwrap_or_else(|e| e.into_inner());
+    // A multiple of both sector sizes.
+    let zeros = vec![0u8; 600_352 * 64];
+    let mut sub_headers = vec![0u8; 2056 * 16_384];
+    for sector in sub_headers.chunks_exact_mut(2056) {
+        sector[..8].copy_from_slice(&[0, 0, 8, 0, 0, 0, 8, 0]);
+    }
+    for (image, name) in [(zeros, "zeros-xa.bin"), (sub_headers, "subhdr-2056.bin")] {
+        LARGEST_REQUEST.store(0, Ordering::Relaxed);
+        assert_eq!(unretro::detect_format(name, Some(&image)), None, "{name}");
+        let largest = LARGEST_REQUEST.load(Ordering::Relaxed);
+        assert!(largest < 1024 * 1024, "{name}: {largest} bytes requested");
+    }
+}

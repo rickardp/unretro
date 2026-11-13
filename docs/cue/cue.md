@@ -1019,7 +1019,8 @@ The entry's path is the container's prefix, a slash, and the entry name.
   - From a `CDG` track: the first 2352 bytes of each 2448-byte stored
     sector, treated as above; the sub-channel bytes are dropped.
 - Nothing is decoded, resampled or wrapped. A `.pcm` entry is not a
-  container and is not descended into.
+  container and is not descended into. This holds whatever the samples
+  look like: content detection is not run on the entry.
 
 ### 10.4 Tracks that cannot be read
 

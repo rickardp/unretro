@@ -2670,3 +2670,32 @@ reason and no diagnostic, and all 51 stored members of the larger
 archive pass their CRC-32 when read back. `lsar` recognises all three
 as RAR 5. No compressed member was decoded (that is the decoder's
 module).
+
+### Notes from the black-box comparison
+
+- **9.1, symbolic links and junctions.** The first version of the
+  caller dropped them without a word, because the library it serves
+  has no entry kind for a link. That made a member disappear and
+  disagreed with the RAR 1.50 to 4.x reader, where a link is a file
+  whose contents are its target (`rar4-container.md` 6.5). The caller
+  now yields a symbolic link or junction as a file whose contents are
+  the target bytes of the redirection record (after the zero-byte cut
+  of 7.6, otherwise as stored; the junction of C4 gives the 8 bytes
+  `\??\C:\x`), also when the directory flag is set. A target of
+  more than 4,096 bytes is not delivered and is reported, as decision
+  D11 of the other document does; this document sets no limit, and a
+  sentence in 7.6 or 17 would settle it. Nothing is ever followed.
+  G6 now yields four entries: `sym.lnk` holds `h.txt`.
+- **11.5, self-extracting sets.** `name.part1.sfx` and
+  `name.part1.exe` now have `name.part2.rar` as their next name (the
+  REFERENCE-ONLY rule; item 12 above already allowed for it but the
+  caller never asked). See item 22 of the feedback in
+  `rar4-container.md` for the reverse direction.
+- **5.2 and 11.4 seen from outside.** The comparison counted as losses
+  twelve crafted archives whose file header fails its checksum (E2,
+  E6, E14, E20 and relatives) and two crafted sets whose first volume
+  says that no volume follows (11.4) while a file is still open: the
+  reference tool, or the reader this one replaces, delivers entries
+  there. Both rules were kept as specified. No genuine archive of the
+  corpus is affected.
+

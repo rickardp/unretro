@@ -45,7 +45,7 @@ Boot catalog contents as `xorriso -report_el_torito plain` reports them. "Entry"
 | `et-floppy-nojoliet` | 0 | BIOS, 1.44 MB | 0 | 30 | 1474560 | no, in the primary tree only (see below) | `..eltorito/0.img` |
 | `et-harddisk` | 0 | BIOS, hard disk | 2048 | 30 | 1048576 | no, in the primary tree only (512 blocks of 2048) | `..eltorito/0.img` |
 | `et-harddisk-hidden` | 0 | BIOS, hard disk | 1 | 34 | 1048576 | no, in no tree | `..eltorito/0.img` |
-| `et-multi` | 0 | BIOS, none | 4 | 214 | 2048 | no: `boot/bios.bin` starts there but is 4096 bytes | `..eltorito/0.img` |
+| `et-multi` | 0 | BIOS, none | 4 | 214 | 2048 | the first 2048 bytes of `boot/bios.bin` (4096 bytes), which starts there | not listed: a no-emulation image that starts a longer listed file |
 | `et-multi` | 1 | UEFI, none | 720 | 34 | 368640 | no, in no tree | `..eltorito/1.img` |
 | `et-floppies` | 0 | BIOS, 1.2 MB | 1 | 34 | 1228800 | no, in no tree | `..eltorito/0.img` |
 | `et-floppies` | 1 | BIOS, 2.88 MB | 1 | 634 | 2949120 | no, in no tree | `..eltorito/1.img` |
@@ -56,7 +56,7 @@ Boot catalog contents as `xorriso -report_el_torito plain` reports them. "Entry"
 - `hdiutil` cannot leave its boot image out of the disc (hiding it from every tree makes it write an empty file). In `et-floppy-nojoliet` and `et-harddisk` the boot image is hidden from the Joliet tree only (`-hide-joliet`): the primary tree still has `IMAGES/BOOT144.IMG` or `HARDDISK.IMG` at the catalog's start sector with the image's length, but the Joliet tree is the one presented (see Names). `7z`, which also shows the Joliet tree, lists the image only as `[BOOT]`; here it is expected once, as `..eltorito/0.img`.
 - In `et-harddisk-hidden`, `et-multi` and `et-floppies` the hidden images and the boot catalog (`-hide`, `-hide-joliet`) are in no directory at all.
 - `et-harddisk-hidden` is the disc that tells the size rules for hard disk emulation apart: sector count times 512 is 512 bytes, which is what `7z` extracts; the partition table gives 1048576, which is what `xorriso -report_el_torito` reports (`hdsiz/512: 2048`) and what is expected. In `et-harddisk` both rules give 1048576.
-- `et-multi` entry 0 covers the first 2048 bytes of the visible 4096-byte `boot/bios.bin`. Start and length are not both those of the file, so it is expected both as `boot/bios.bin` and as `..eltorito/0.img`.
+- `et-multi` entry 0 covers the first 2048 bytes of the visible 4096-byte `boot/bios.bin`: a no-emulation image that starts where a longer listed file starts. It is expected only as `boot/bios.bin`; entry 1 keeps its number.
 - The boot catalog is never an expected entry.
 
 Boot image contents:

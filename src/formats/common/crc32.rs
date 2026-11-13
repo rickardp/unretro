@@ -37,7 +37,12 @@ const fn crc_tables() -> [[u32; 256]; 8] {
 }
 
 pub(crate) fn crc32(data: &[u8]) -> u32 {
-    let mut register = u32::MAX;
+    !crc32_update(u32::MAX, data)
+}
+
+// Feeds `data` to a running CRC-32. The register starts as `u32::MAX` and
+// its complement is the checksum.
+pub(crate) fn crc32_update(mut register: u32, data: &[u8]) -> u32 {
     let mut chunks = data.chunks_exact(8);
     for chunk in &mut chunks {
         let [a, b, c, d, e, f, g, h] = *chunk else {
@@ -56,7 +61,7 @@ pub(crate) fn crc32(data: &[u8]) -> u32 {
     for &byte in chunks.remainder() {
         register = (register >> 8) ^ CRC_TABLES[0][((register ^ u32::from(byte)) & 0xFF) as usize];
     }
-    !register
+    register
 }
 
 #[cfg(test)]

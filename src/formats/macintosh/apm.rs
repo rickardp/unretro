@@ -149,6 +149,11 @@ pub fn is_apm_image(data: &[u8]) -> bool {
     })
 }
 
+// `is_apm_image` for the leading bytes of a cooked image of `total_len` bytes.
+pub(crate) fn has_partition_map(head: &[u8], total_len: usize) -> bool {
+    !parse_partitions(head, total_len).is_empty()
+}
+
 /// Container listing the partitions of an Apple Partition Map.
 pub struct ApmContainer {
     prefix: String,

@@ -6,7 +6,7 @@
 //! - **macintosh** - Classic Macintosh formats (`HFS`, `StuffIt`, `BinHex`, `MacBinary`)
 //! - **amiga** - Amiga formats (`LHA`, `ADF`)
 //! - **game** - Game-specific formats (`SCUMM`)
-//! - **dos** - DOS/PC formats (`FAT`, `MBR`, `GPT`, `ISO 9660`, `RAR`, `ARJ`, `CUE/BIN`)
+//! - **dos** - DOS/PC formats (`FAT`, `MBR`, `GPT`, `ISO 9660`, `RAR`, `ARJ`, `CUE/BIN`, `NRG`)
 //! - **next** - NeXT / BSD formats (NeXT disklabel, `UFS`)
 //! - **beos** - BeOS formats (`BFS`)
 //! - **lisa** - Apple Lisa formats (Lisa file system)
@@ -36,6 +36,9 @@ pub mod lisa;
 
 #[cfg(any(feature = "macintosh", feature = "dos"))]
 pub(crate) mod cd_sector;
+
+#[cfg(all(feature = "macintosh", feature = "dos"))]
+pub(crate) mod hybrid;
 
 use crate::compat::FastMap;
 

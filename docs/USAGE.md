@@ -255,7 +255,8 @@ HFS and MFS; there is no separate format value.
   the checksums, which DART keeps in the resource fork, are not verified.
 - Hybrid ISO 9660 / HFS Plus discs open as HFS, as hybrid HFS discs do, or as
   `ContainerFormat::Apm` with the volume as a partition entry when they carry an Apple
-  Partition Map.
+  Partition Map. With the `dos` feature the ISO 9660 volume of such a disc is listed as
+  one more partition, `iso9660.img`; see "Toast Images".
 - Names are converted from the stored UTF-16 to UTF-8 as stored: decomposed, without
   normalisation. An unpaired surrogate becomes U+FFFD. `/` (a `:` typed in the Finder
   shows as `/` in POSIX and is stored that way), `:` and control characters in a name
@@ -298,7 +299,8 @@ Read-only, `macintosh` feature (`ContainerFormat::Apm`).
   least one listed partition that starts inside the image. The map is read with
   512-byte blocks or with the block size the driver descriptor declares, whichever
   holds its first entry (some CDs declare 2048-byte blocks around a 512-byte map). Raw
-  2352-byte CD sector dumps are converted to user data first.
+  2352-byte CD sector dumps are converted to user data first, and so are images of
+  2056- or 2336-byte CD-ROM XA sectors (see "Toast Images").
 - Probed before HFS: an image that used to open as its first HFS partition now opens
   as its partition map, and the volume's files are one level deeper, under the
   partition entry.
@@ -323,9 +325,15 @@ Read-only, `macintosh` feature (`ContainerFormat::Apm`).
 Read-only, `dos` feature (`ContainerFormat::Iso9660`).
 
 - Detected by a `CD001` primary volume descriptor at sector 16, in cooked 2048-byte
-  images and in raw 2352-byte sector dumps (MODE1 and MODE2/XA `.bin`/`.img`).
+  images and in raw 2352-byte sector dumps (MODE1 and MODE2/XA `.bin`/`.img`). Images
+  of 2056- or 2336-byte CD-ROM XA sectors (no sync pattern or header) are read through
+  their user data when nothing else claims the file; see "Toast Images".
 - Probe order: HFS (hybrid Mac discs), FAT, GPT and MBR are tried first and keep
-  winning, so isohybrid images open as their partition table. A UDF bridge disc (ISO
+  winning, so isohybrid images open as their partition table. A hybrid Mac disc lists
+  its ISO 9660 volume as the partition `iso9660.img` beside the Macintosh side (see
+  "Toast Images").
+  A Nero NRG image is tried
+  before all of them (see "Nero NRG Images"). A UDF bridge disc (ISO
   9660 and UDF over the same files) opens as ISO 9660; see "UDF Disc Images".
 - Names: Rock Ridge `NM` names are used when present (including `CL`/`RE` relocated
   directories; symlinks and device nodes are not listed); otherwise the Joliet tree;
@@ -354,7 +362,9 @@ Read-only, `dos` feature (`ContainerFormat::Iso9660`).
   An image that is a file already listed is not listed twice: same start sector, and
   the file's length, rounded up either to the 512-byte sectors the catalog counts in
   or to a whole logical block (as xorriso records a no-emulation boot file), equals
-  the image's. A boot image hidden from the presented tree but recorded in the other
+  the image's. A no-emulation image that starts where a longer listed file starts is
+  not listed either: its sector count only says how much of that loader the BIOS reads
+  (isolinux records four sectors). A boot image hidden from the presented tree but recorded in the other
   one (primary or Joliet) is listed under `..eltorito/`. The catalog's validation
   entry must have its key bytes and a zero checksum, otherwise no boot image is listed.
 - Multi-session: when one image file holds several sessions, the tree of the last
@@ -456,7 +466,8 @@ and `wasm32` builds; the reader was written from the format specification in
   - audio tracks (`AUDIO`, `CDG`) as `trackNN.pcm`: raw PCM, not decoded and without a
     header (16-bit little-endian stereo samples at 44.1 kHz, 2352 bytes per sector).
     Samples of a `MOTOROLA` file are byte-swapped; the 96 sub-channel bytes of a `CDG`
-    sector are dropped.
+    sector are dropped. A `.pcm` entry is always a leaf: it is not detected by content
+    and not descended into, whatever its samples look like.
 - A track runs from its `INDEX 01` to the first index of the next track in the same
   file, or to the end of the file; a trailing partial sector is ignored. The gap between
   `INDEX 00` and `INDEX 01` is in no entry. Entries carry no metadata; titles and
@@ -498,6 +509,127 @@ and `wasm32` builds; the reader was written from the format specification in
   one recoverable `ContainerEntriesSkipped` diagnostic naming the first problem and
   counting the rest.
 
+## Nero NRG Images
+
+Read-only, `dos` feature (`ContainerFormat::Nrg`). Read natively, also in `no_std` and
+`wasm32` builds; the reader was written from the format specification in
+[docs/nrg/](nrg/README.md).
+
+- Detected by content under any file name; the extension `.nrg` is not required and
+  proves nothing. The file must end with a version 2 footer (`NER5` and a 64-bit chain
+  offset, the last 12 bytes) or a version 1 footer (`NERO` and a 32-bit offset, the last
+  8 bytes), and the chain of chunks between that offset and the footer must be valid:
+  at most 1 MiB and 256 chunks, printable four-character identifiers, every chunk
+  inside the chain, an `END!` chunk, and 1 to 99 track entries. A file with bytes after
+  the footer, or cut short, is not an NRG image.
+- Probe order: this test runs before every other format, whatever the extension. An NRG
+  image has no header: it starts with whatever its first track holds, so a track-at-once
+  image of a data disc and every DVD image are also valid ISO 9660 images with a few
+  bytes appended. They open as `Nrg` all the same, with the volume one level down in
+  `track01.img`. A `.nrg` file without a valid footer and chain (a plain sector dump
+  under that name, say) is left to the other detectors.
+- Used: the track chunks `DAOX` and `DAOI` (disc-at-once; 64- and 32-bit offsets),
+  `ETN2`, `ETNF` and `TINF` (track-at-once). The identifier decides a chunk's layout,
+  not the footer version. Everything else is skipped: `CUEX`/`CUES`, `SINF`, `MTYP`,
+  `CDTX`, `DINF`, `TOCT`, `RELO`, `AFNM`, `VOLM` and unknown chunks.
+- One entry per readable track, numbered from 1 in chain order across all sessions and
+  named after the track number only, exactly like the entries of a CUE/BIN image:
+  - data tracks as `trackNN.img`, cooked to the 2048 user bytes of every sector (mode
+    codes `00`, `02`, `03`, `05`, `06`, `0F`, `11`; stored sectors of 2048, 2336, 2352
+    or 2448 bytes). In a disc-at-once entry the sector size field gives the size and the
+    mode code only the kind. In 2352- and 2448-byte sectors the sector's own mode byte
+    chooses between user data at byte 16 and byte 24; the mode code is used for sectors
+    without a sync pattern. The track is detected by content like any other file, so it
+    opens as the file system or partition map it holds (ISO 9660, UDF, HFS, ...);
+  - audio tracks (mode codes `07`, `08`, `10`) as `trackNN.pcm`: raw PCM, not decoded
+    and without a header (16-bit little-endian stereo samples at 44.1 kHz, 2352 bytes
+    per sector). A `.pcm` entry is always a leaf: it is not detected by content and
+    not descended into, whatever its samples look like.
+  - The 96 sub-channel bytes of a 2448-byte sector are dropped.
+- A track runs from its index 1 to its end. An end beyond the data area is cut at the
+  chain offset; a trailing partial sector is ignored. Pregaps (index 0 to index 1,
+  usually 150 sectors before the first track of a disc-at-once session) and bytes that
+  no track covers are in no entry, so `track01.img` of a data CD starts with the
+  volume's first sector. Entries carry no metadata; catalogue numbers, ISRC codes,
+  CD-TEXT and source file names are not used.
+- Sessions are not modelled: a multi-session image lists the tracks of all sessions in
+  order. A data track of the first session is a complete volume. A later session's data
+  track is handed out like the track file of a cue sheet (see "ISO 9660 CD-ROM
+  Images"): files recorded in that session are read, files it kept from an earlier
+  session lie outside the track and are reported.
+- Limits: 99 tracks; one track at most 4 GiB (so the single track of a larger DVD image
+  is reported, not listed); all tracks together at most the size of the image (at least
+  16 MiB, at most 4 GiB). Tracks never overlap, so an image cannot yield more data than
+  it holds.
+- Not supported: the audio in a pregap, sub-channel data, CD-TEXT, and disc addresses
+  for later sessions. Mode 2 Form 2 sectors contribute their first 2048 bytes only, so
+  the video streams of a Video CD are not recoverable. EDC and ECC are not checked.
+- Damage: a track is left out when its mode code is unknown, its sector size is not
+  one of the four (or not 2352 or 2448 for audio), it starts beyond the data area, it is
+  empty or over a size limit. Offsets that go backwards anywhere in the chain (tracks
+  or pregaps that overlap, a track-at-once length that overflows) leave out every
+  track. The image still opens, every readable track is yielded and the traversal
+  reports one recoverable `ContainerEntriesSkipped` diagnostic naming the first problem
+  and counting the rest.
+
+## Toast Images
+
+A `.toast` file (Roxio Toast and its predecessors) is not a format of its own but a
+dump of the sectors of one data track, without header or trailer. It opens as what it
+holds; the extension only puts the Macintosh probes first, and the same bytes open the
+same way under any name and inside any archive. The layouts found in real files, and
+the measurements behind this section, are in [docs/toast/](toast/README.md).
+
+| The file holds | Opens as |
+|---|---|
+| An Apple Partition Map (Toast's own `MRKS` map, or any other; map in 512- or 2048-byte units) | `Apm`, one entry per partition; the Macintosh volume opens as `Hfs` |
+| A bare HFS or HFS Plus volume | `Hfs` |
+| ISO 9660 only (Toast's "ISO 9660" and "Joliet" discs) | `Iso9660` |
+| ISO 9660 and UDF over the same files (DVD projects) | `Iso9660`, as any bridge disc |
+| UDF only | `Udf` |
+| A Macintosh volume and an ISO 9660 volume (hybrid disc) | `Apm` or `Hfs`, with the ISO 9660 volume as one more partition entry, `iso9660.img`, which opens as `Iso9660` |
+| Any of these in an archive (`.toast.sit`, `.toast.zip`) | the archive, with the image as an entry that opens as above |
+
+- Sector framings: cooked 2048-byte sectors (every real file seen), raw 2352-byte
+  sectors (Mode 1, or Mode 2 Form 1; told by the sync pattern), and CD-ROM XA sectors
+  without sync and header, 2056 bytes (sub-header and user data) or 2336 bytes
+  (sub-header, user data, error detection and correction) each. The last two have no
+  signature, so they are accepted only when no format matches the file as it is, the
+  length is a whole number of at least 17 such sectors, each of the first 17 sectors
+  repeats its four sub-header bytes, and the 2048 bytes at offset 8 of every sector
+  together hold a partition map, a Macintosh volume, ISO 9660 or UDF. In an image of
+  more than 320 sectors the first 320 must already show that volume, so that a file
+  without one is never copied in full to find out, and the user data must fit the 4 GiB
+  limit for a single output. 2056 is tried before 2336. A Form 2 sector contributes the first 2048 of its 2324 bytes, as for
+  CUE/BIN. This applies to such images under any name, not only `.toast`.
+- Hybrid discs: an image that opens as `Apm` or `Hfs` and also has an ISO 9660 volume
+  with a readable root directory lists that volume as one more partition entry, after
+  the partitions of the map (`dos` and `macintosh` features together). The entry is
+  named `iso9660.img`, has the size of the (cooked) image and holds its bytes with the
+  first 16 sectors blanked, so that it opens as `Iso9660` and not as the partition map
+  again; ISO 9660 addresses count from the start of the disc, so the volume cannot be
+  cut any shorter. Below it is what the same bytes list when opened as ISO 9660 (same
+  Joliet and Rock Ridge rules, `..eltorito/` included; one tree per volume, so a file
+  that only the Joliet tree of a volume with Rock Ridge names holds is not listed).
+  The Macintosh side is unchanged. Where both file systems describe the same file it
+  is listed on both sides; where the ISO 9660 volume precedes the Macintosh partition
+  or hides files from it, `iso9660.img/` is the only way to them.
+  A partition whose map name is `iso9660.img` is left out and reported as skipped.
+  A hybrid without a partition map opens as `Hfs` and has no partition list, so the
+  entry sits at the root of the volume under the reserved name `..iso9660.img`; a
+  Macintosh file or folder of that name there is left out and reported as skipped.
+  The entry is absent when the ISO 9660 root lists no file, and it is not derived
+  from a partition of type `ISO` (which stays an opaque entry). The UDF tree of a
+  disc that also has an ISO 9660 tree is not listed separately. The entry counts as
+  one more copy of the image against memory.
+- A partition whose map name cannot be a path component is listed as `p<n>.img`; that
+  includes Toast's own `Toast … HFS/Joliet Builder` and `HFS+/Joliet Builder` names.
+- Bytes after the last volume (Toast often appends about 150 empty sectors) are
+  ignored.
+- Not supported: Toast's audio CD images (`.Sd2f`: headerless audio whose track table
+  is in a resource fork) are not containers. No `.toast` file with several tracks is
+  known; Toast exports those as CUE/BIN.
+
 ## ARJ Archives
 
 Read-only, `dos` feature (`ContainerFormat::Arj`), decoded natively (also in `no_std`
@@ -534,28 +666,35 @@ and `wasm32` builds).
 
 ## RAR Archives
 
-Read-only, `dos` feature with `std` (`ContainerFormat::Rar`). Directories are not listed.
+Read-only, `dos` feature (`ContainerFormat::Rar`). Read and decoded natively, also in
+`no_std` and `wasm32` builds; the reader was written from the format specifications in
+[docs/rar/](rar/README.md). Directories are not listed.
 
 - Supported: the RAR 1.3/1.4 container (signature `RE~^`), the RAR 1.50 to 4.x format
-  (`Rar!\x1a\x07\x00`) and RAR 5. In the RAR 1.50 to 4.x format the decoder is chosen
+  (`Rar!\x1a\x07\x00`) and the RAR 5 format (`Rar!\x1a\x07\x01\x00`) with both of
+  its algorithms (RAR 5 and RAR 7). In the RAR 1.50 to 4.x format the decoder is chosen
   per file by its unpack version: 13 and 15 (RAR 1.5), 20 and 26 (RAR 2.0, including
-  multimedia compression), 29 and 36 (RAR 2.9 to 4.x). Solid archives of every
+  multimedia compression), 29 and 36 (RAR 2.9 to 4.x: LZ, PPMd and filters, the six
+  standard filters as well as other filter programs). Solid archives of every
   generation are read.
 - Self-extracting archives are read: in a DOS, Windows or OS/2 executable (`MZ`), an
   ELF or a Mach-O file the archive is searched for in the first 1 MiB, and a signature
   counts only when a sound archive header follows it. Other files have to start with
   the archive.
-- Not supported: encrypted files and archives with encrypted headers; other unpack
-  versions; RAR 2.9 to 4.x filters other than the six standard ones (x86 calls, x86
-  calls and jumps, Itanium, delta, RGB, audio), whose files fail their checksum and are
-  left out.
+- Not supported: encrypted files; archives with encrypted headers, which open with
+  nothing listed and are reported; other unpack versions and methods. A RAR 5 file
+  with a dictionary above 1 GiB is decoded as long as no match reaches back further
+  than 1 GiB.
 - A RAR 1.50 to 4.x archive whose archive header fails its checksum is rejected as
-  corrupt.
+  corrupt. A file header that fails its checksum (RAR 1.50 to 4.x and RAR 5) is damage:
+  the listing ends there.
 - Every file is verified before it is yielded: its length against the declared size
-  and its contents against the stored checksum (CRC-32; the 16-bit checksum of the
-  RAR 1.3/1.4 container; for a file split across volumes, the checksum of its last
-  part). A RAR 5 file that carries no CRC-32, only a BLAKE2sp hash or nothing, is
-  yielded unchecked.
+  and its contents against the stored checksum (CRC-32; in RAR 5 also the BLAKE2sp
+  hash when one is recorded; the 16-bit checksum of the RAR 1.3/1.4 container). For a
+  file split across volumes the last part carries the checksum of the file, and the
+  checksums the other parts carry of their own packed bytes are verified too. A RAR 5
+  file that carries neither a CRC-32 nor a BLAKE2sp hash is yielded unchecked, and so
+  is an empty file of the RAR 1.50 to 4.x format.
 - A file that is encrypted, of an unknown unpack version or method, corrupt (decoding
   error, wrong length, checksum mismatch) or incomplete is left out; the other files
   are still yielded and the traversal reports one recoverable
@@ -563,20 +702,31 @@ Read-only, `dos` feature with `std` (`ContainerFormat::Rar`). Directories are no
   counts the further ones. In a solid archive a file that cannot be decoded, or a split
   file whose pieces are not all there, also takes the later files that depend on it
   with it (in RAR 1.x every later compressed file of the archive); a file that merely
-  fails its checksum does not. A damaged or truncated block header ends the listing
-  there, keeps the files found so far, is reported, and in the RAR 1.50 to 4.x format
-  also ends the volume set.
+  fails its checksum does not. An empty file is yielded as an empty file whatever
+  happened to the files before it. A damaged or truncated block header ends the listing
+  there, keeps the files found so far, is reported, and in the RAR 1.50 to 4.x and RAR 5
+  formats also ends the volume set.
 - In the RAR 1.50 to 4.x format an entry is a directory by its header flags alone
   (unpack version 20 and above) or by its DOS or OS/2 directory attribute (below 20);
   an empty entry that merely has a directory attribute is yielded as an empty file.
+- Links: a Unix symbolic link of the RAR 1.50 to 4.x format is yielded as a file whose
+  contents are the link target, as stored. So is a RAR 5 symbolic link or junction (a
+  target over 4,096 bytes is left out and reported); a RAR 5 hard link or file copy is
+  yielded with the contents of the file it refers to, and one whose file could not be
+  read is left out and reported. Links are never followed.
+- An old version of a file kept in a RAR 5 archive is yielded under its name followed
+  by `;` and the version number (`hello.txt;1`).
 - The compression-ratio limit (1000:1, measured over at least 64 packed bytes) applies
-  to RAR 2.9 to 5 files; for a solid archive it is applied to the files of one solid
-  group together, since a file that repeats earlier ones packs to almost nothing.
-- File names of the RAR 1.3/1.4 container, and of DOS and OS/2 files in the later
-  format when they are not UTF-8, are read as code page 437.
+  to RAR 2.9 to 7 files; for a solid archive it is applied to the files of one solid
+  group together, since a file that repeats earlier ones packs to almost nothing. A
+  RAR 5 file of undeclared size may decode to as much as that limit allows.
+- File names of the RAR 1.3/1.4 container, and names of the RAR 1.50 to 4.x format that
+  have no Unicode form and are not UTF-8, are read as code page 437.
 - Multi-volume sets are read through their first volume, which lists the files of every
   volume and joins files split across them. Both naming schemes are followed:
   `name.part1.rar`, `name.part2.rar`, ... and `name.rar`, `name.r00`, `name.r01`, ....
+  A self-extracting first volume (`name.part1.exe` or `name.part1.sfx`, `name.exe` or
+  `name.sfx`) is followed by `name.part2.rar` or `name.r00` in the same way.
   Later volumes are looked up next to the first one — in the same directory for a file
   on disk, in the same parent container when nested — and are not listed again when
   a volume that reaches them (the one before, or an earlier one across up to eight
@@ -587,6 +737,7 @@ Read-only, `dos` feature with `std` (`ContainerFormat::Rar`). Directories are no
   yielded (in a solid set only from the next file that starts a solid group). A volume
   without its predecessor opens on its own and carries the rest of the set. Data passed as bytes has no siblings, so a file
   that continues in another volume is left out and reported rather than truncated.
+  The volumes of a set are held in memory together while it is read.
 
 ## LHA / LZH Archives
 
@@ -948,6 +1099,7 @@ Examples with `archive.zip` containing `inner.sit` containing `a` and `b`:
 - `archive.zip` -> traverse full archive tree.
 - `archive.zip/inner.sit` -> traversal scoped to `inner.sit` subtree.
 - `archive.zip/inner.sit/a` -> scoped to one internal target path.
+- `disc.toast/iso9660.img/SETUP.EXE` -> a file of the ISO 9660 volume of a hybrid disc.
 
 ## CLI Usage
 

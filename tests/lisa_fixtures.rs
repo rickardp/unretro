@@ -1,4 +1,3 @@
-#![cfg(feature = "lisa")]
 //! Real Apple Lisa disk images from `$UNRETRO_SPECIMENS/lisa/`, when present.
 //!
 //! No Lisa image is redistributable, so none is in the repository; the
@@ -6,6 +5,7 @@
 //! specimen `X` here has `X.info.txt` (what it is and who must claim it) and
 //! `X.manifest.tsv` (paths, sizes and FNV-1a hashes written down from other
 //! readers, not taken from this crate).
+#![cfg(feature = "lisa")]
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};

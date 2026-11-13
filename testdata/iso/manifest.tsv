@@ -27,7 +27,6 @@ et-harddisk-hidden.iso	inside	..eltorito/0.img/*/dos/driver.bin	7000	9c2acaa3fb8
 et-multi.iso	file	README	148	109494c4def8697e	-
 et-multi.iso	file	boot/bios.bin	4096	b576e89664d59f25	-
 et-multi.iso	file	docs/Rock Ridge name that is rather long.txt	357	4f3deae4c77a2104	-
-et-multi.iso	file	..eltorito/0.img	2048	eadc332231455125	-
 et-multi.iso	image	..eltorito/1.img	368640	c36b84acf0cfdfbc	fat
 et-multi.iso	inside	..eltorito/1.img/startup.nsh	52	aac184277aa3026e	-
 et-multi.iso	inside	..eltorito/1.img/efi/boot/bootx64.efi	6000	f75c9071dcd81165	-

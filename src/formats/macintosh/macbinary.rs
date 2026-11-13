@@ -4,6 +4,7 @@ use crate::format::ContainerFormat;
 use crate::sanitize_path_component;
 use crate::{Container, ContainerInfo, Entry, Metadata};
 
+use super::encoding::decode_mac_roman;
 use super::resource_fork::ResourceFork;
 
 // =============================================================================
@@ -45,6 +46,14 @@ pub fn is_macbinary_file(data: &[u8]) -> bool {
     // MacBinary I
     let filename_len = header[1];
     if !(1..=63).contains(&filename_len) {
+        return false;
+    }
+    // No checksum guards this version, and a Mac file name holds no control
+    // characters; small binary records otherwise pass for a header.
+    if header[2..2 + filename_len as usize]
+        .iter()
+        .any(|&b| b < 0x20 || b == 0x7F)
+    {
         return false;
     }
 
@@ -96,7 +105,7 @@ impl MacBinaryContainer {
 
         let filename_len = (header[1] as usize).min(63);
         let filename = if filename_len > 0 {
-            String::from_utf8_lossy(&header[2..2 + filename_len]).to_string()
+            decode_mac_roman(&header[2..2 + filename_len])
         } else {
             "untitled".to_string()
         };
@@ -257,7 +266,12 @@ fn parse_apple_single(data: &[u8]) -> Result<AppleSingleParts> {
                 resource_fork = data[offset..offset + length].to_vec();
             }
             ENTRY_REAL_NAME => {
-                filename = String::from_utf8_lossy(&data[offset..offset + length]).to_string();
+                // Classic writers store Mac OS Roman, Mac OS X writes UTF-8.
+                let raw = &data[offset..offset + length];
+                filename = match core::str::from_utf8(raw) {
+                    Ok(name) => name.to_string(),
+                    Err(_) => decode_mac_roman(raw),
+                };
             }
             // Finder Info: first 4 bytes = type, next 4 = creator
             ENTRY_FINDER_INFO if length >= 8 => {
@@ -341,6 +355,24 @@ impl Container for AppleSingleContainer {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn macbinary_one_needs_a_printable_name() {
+        // A Finder FOBJ resource from an MFS desktop file: name length 8,
+        // every other checked byte zero.
+        let mut record = vec![0u8; 158];
+        record[1] = 8;
+        record[7] = 1;
+        record[9] = 0x83;
+        assert!(!is_macbinary_file(&record));
+
+        let mut named = vec![0u8; 128];
+        named[1] = 4;
+        named[2..6].copy_from_slice(&[b'C', b'a', b'f', 0x8E]);
+        assert!(is_macbinary_file(&named));
+        let container = MacBinaryContainer::from_bytes(&named, "x".to_string(), 8).unwrap();
+        assert_eq!(container.filename, "Caf\u{e9}");
+    }
 
     #[test]
     fn apple_single_and_double_are_never_macbinary() {

@@ -2440,3 +2440,66 @@ and does not apply the trailing-separator rule of item 4.
     flags and times (to 100 ns against 7-Zip) agree, no findings. The
     six-volume set read from its second volume, and with its second
     volume left out, gives the expected "missing volume part" entries.
+20. **Section 15.2 and 15.3, an empty packed member behind an unreadable
+    one.** 15.2 says a packed member of version 20 or above with U = 0
+    "is an empty file whatever the decoder does with those bytes" and
+    that a decoder error on it leaves the entry readable; 15.3 says
+    every member that continues an unreadable one is skipped. The text
+    does not say which wins when the chain is already unusable before
+    any decoder runs (predecessor absent, incomplete, encrypted,
+    unsupported, or of another decoder). Chosen: 15.2 wins. Such a
+    member is described as an empty file, is not handed to a decoder,
+    and still counts as an unreadable member of the sequence, so the
+    members that continue it are "depends on an unreadable earlier
+    entry". An empty member that is itself stopped by rows 1, 2, 4, 7
+    or 8 of 13.4 stays skipped for that reason. Found by an end-to-end
+    test: a genuine five-volume solid set read without its first volume
+    has an empty member (version 29, 8 packed bytes) behind the member
+    whose first part is missing; `lsar -t` on the same four volumes
+    reports it good with 0 bytes. A sentence in 15.3 would settle it.
+21. **Section 15.3 gives up members that the reference tool extracts.**
+    Two cases from the end-to-end comparison, both read as the document
+    says and both left that way: (a) an archive cut so that its first
+    packed member (version 29) carries the chain bit with nothing
+    before it: that member is "solid predecessor unavailable" and the
+    next one "depends on an unreadable earlier entry", while `unar`
+    extracts both with matching CRC-32 (23,298 and 23,207 bytes);
+    (b) a genuine nine-volume solid set read from its second volume:
+    three members of 192,054 to 300,000 bytes behind the incomplete
+    one are skipped, and `lsar -t` reports them good. In both cases the
+    members happen not to refer to anything their predecessor left
+    behind. The rule is safe and was kept. If the specification wants
+    these members, it would have to say with what state a decoder is
+    started for a continuing member whose predecessor is unavailable
+    (`rar29-lz.md` decision L20 says such a member is an error and is
+    not decoded), and that the result counts only when it is
+    exactly U bytes with a matching CRC-32; with U = 0 nothing would
+    verify such an attempt, which is one more reason for item 20 not to
+    run the decoder.
+22. **Section 12.2, a self-extracting first volume.** The name vectors
+    `a.part1.exe`, `a.part1.sfx` to `a.part2.rar` and `SET.EXE` to
+    `SET.R00` were not implemented at first: only names ending in `rar`
+    or in a letter and two digits had a next name, so a set whose first
+    volume is a self-extracting module was read as its first volume
+    alone. They are implemented now. A first volume with the extension
+    `exe` or `sfx` (any letter case) is followed by `.rar` volumes in
+    the new scheme and by `.r00` in the old one, in upper case when the
+    extension of the first volume has no lower-case letter. In the
+    other direction, a later volume is taken as already read through a
+    self-extracting first volume only when a file of that name exists
+    next to it **and** holds a RAR archive: an unrelated program that
+    happens to be called `set.exe` must not hide `set.r00`. A set of
+    two volumes built from vector V1 with 512 bytes of `MZ` module in
+    front of the first one is read whole under either extension.
+23. **D4 seen from outside.** A black-box comparison with `unar` and
+    with the reader this one replaces counted R1 and its relatives
+    (four crafted archives) as entries lost, because both of those
+    list files behind a header whose checksum is wrong. The rule was
+    kept as specified: the sizes in such a header are not trustworthy,
+    so nothing behind it can be located safely. No genuine archive of
+    the corpus (about 2,000 files) has a wrong header checksum. If the
+    specification ever wants to recover the members behind a damaged
+    header it would have to say how the next header is found (for
+    instance by searching forward for a block whose checksum
+    verifies).
+

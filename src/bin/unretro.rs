@@ -936,6 +936,25 @@ fn print_list_tsv(path: &str, numeric: bool) -> Result<VisitReport, Box<dyn std:
     Ok(report)
 }
 
+// `text` as a JSON string literal.
+fn json_string(text: &str) -> String {
+    let mut out = String::with_capacity(text.len() + 2);
+    out.push('"');
+    for c in text.chars() {
+        match c {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            c if u32::from(c) < 0x20 => out.push_str(&format!("\\u{:04x}", u32::from(c))),
+            c => out.push(c),
+        }
+    }
+    out.push('"');
+    out
+}
+
 fn print_list_json(path: &str, numeric: bool) -> Result<VisitReport, Box<dyn std::error::Error>> {
     use std::collections::HashMap;
     use std::fs;
@@ -955,7 +974,7 @@ fn print_list_json(path: &str, numeric: bool) -> Result<VisitReport, Box<dyn std
             let pad = "  ".repeat(indent);
             let pad1 = "  ".repeat(indent + 1);
 
-            let mut parts = vec![format!("{}\"name\": {:?}", pad1, self.name)];
+            let mut parts = vec![format!("{}\"name\": {}", pad1, json_string(&self.name))];
             parts.push(format!("{}\"size\": {}", pad1, self.size));
 
             if let Some(ref fmt) = self.format {
@@ -963,14 +982,7 @@ fn print_list_json(path: &str, numeric: bool) -> Result<VisitReport, Box<dyn std
             }
 
             if let Some(ref meta) = self.metadata {
-                // Escape for JSON
-                let escaped = meta
-                    .replace('\\', "\\\\")
-                    .replace('"', "\\\"")
-                    .replace('\n', "\\n")
-                    .replace('\r', "\\r")
-                    .replace('\t', "\\t");
-                parts.push(format!("{}\"metadata\": \"{}\"", pad1, escaped));
+                parts.push(format!("{}\"metadata\": {}", pad1, json_string(meta)));
             }
 
             if !self.children.is_empty() {
@@ -1163,13 +1175,30 @@ fn print_usage(program: &str) {
     eprintln!("    archive.zip/inner.sit/a  extracts just file 'a'");
     eprintln!();
     eprintln!(" Supported formats:");
-    eprintln!("  ZIP, LHA, TAR, GZIP, BZIP2, BinHex (.hqx), StuffIt (.sit), MacBinary,");
-    eprintln!("  AppleSingle, AppleDouble, HFS disk images, Mac Resource Forks, SCUMM");
+    eprintln!("  ZIP, TAR, gzip, bzip2, XZ/LZMA, compress (.Z), LHA, ARJ, RAR, StuffIt (.sit),");
+    eprintln!("  Compact Pro, BinHex (.hqx), MacBinary, AppleSingle, AppleDouble, Mac resource");
+    eprintln!("  forks; disk and disc images: HFS/HFS+/MFS, Apple Partition Map, Toast,");
+    eprintln!("  DiskCopy, Lisa, Amiga ADF, FAT, MBR, GPT, ISO 9660, UDF, CUE/BIN, Nero NRG,");
+    eprintln!("  NeXT/UFS, BeOS BFS; game data: SCUMM, DOOM WAD, Quake PAK, Wolf3D.");
+    eprintln!("  What is built in depends on the enabled features; see docs/USAGE.md.");
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{normalize_output_relative_path, shell_escape_single_quoted};
+    use super::{json_string, normalize_output_relative_path, shell_escape_single_quoted};
+
+    #[test]
+    fn json_strings_keep_text_and_escape_only_what_json_requires() {
+        assert_eq!(
+            json_string("Cafe\u{301} Menu.txt"),
+            "\"Cafe\u{301} Menu.txt\""
+        );
+        assert_eq!(json_string("a\"b\\c"), r#""a\"b\\c""#);
+        assert_eq!(
+            json_string("Icon\r\n\t\u{1}\u{7f}"),
+            "\"Icon\\r\\n\\t\\u0001\u{7f}\""
+        );
+    }
 
     #[test]
     fn normalize_path_rejects_parent_components() {
