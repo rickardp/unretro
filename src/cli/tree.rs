@@ -369,6 +369,8 @@ fn format_name(format: &ContainerFormat) -> &'static str {
         #[cfg(feature = "macintosh")]
         ContainerFormat::Hfs => "HFS",
         #[cfg(feature = "macintosh")]
+        ContainerFormat::Apm => "APM",
+        #[cfg(feature = "macintosh")]
         ContainerFormat::ResourceFork => "Resource Fork",
         #[cfg(feature = "game")]
         ContainerFormat::Scumm => "SCUMM",
@@ -396,6 +398,8 @@ fn format_name(format: &ContainerFormat) -> &'static str {
         ContainerFormat::Arj => "ARJ",
         #[cfg(feature = "dos")]
         ContainerFormat::CueBin => "CUE/BIN",
+        #[cfg(feature = "dos")]
+        ContainerFormat::Udf => "UDF",
         #[cfg(feature = "next")]
         ContainerFormat::NextDisklabel => "NeXT Disklabel",
         #[cfg(feature = "next")]

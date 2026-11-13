@@ -13,6 +13,7 @@
 //! - **`AppleDouble`** - Resource-fork sidecars (paired during visitation) and standalone files
 //! - **`Resource Fork`** - Native Mac resource-fork parser and container
 
+pub mod apm;
 pub mod apple_double;
 pub mod binhex;
 pub mod compactpro;

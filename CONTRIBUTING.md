@@ -49,6 +49,9 @@ cargo test --no-default-features --features std,common
 cargo test --no-default-features --features std,xz
 cargo test --no-default-features --features std,macintosh
 cargo test --no-default-features --features std,amiga
+cargo test --no-default-features --features std,next
+cargo test --no-default-features --features std,beos
+cargo test --no-default-features --features std,lisa
 cargo clippy --all-targets --all-features
 cargo fmt --all -- --check
 cargo check --lib --target wasm32-unknown-unknown --no-default-features --features no_std,wasm
@@ -124,6 +127,42 @@ macOS with `manifest.tsv` (expected paths, sizes and FNV-1a 64 hashes; see its
 `README.md`); `tests/hfsplus_fixtures.rs` checks them through the public API, and the
 unit tests in `hfsplus.rs` and `hfs.rs` cover synthetic and hostile volumes.
 
+The UDF reader (`src/formats/dos/udf.rs`) and the High Sierra, El Torito and
+multi-session support of the ISO 9660 reader (`src/formats/dos/iso9660.rs`) are
+clean-room as well: they are written from ECMA-167, the OSTA UDF specifications,
+ECMA-119, the El Torito specification 1.0 and the High Sierra Group working paper of
+May 1986, and from black-box experiments with `hdiutil makehybrid`, `newfs_udf` on
+regular files, `xorriso` and `7z`, without consulting the source of any implementation
+of these formats. Keep it that way. `testdata/udf/` and `testdata/iso/` hold the images
+with a `manifest.tsv` each (expected paths, sizes and FNV-1a 64 hashes; see their
+`README.md`; the `syn-*` UDF images and the High Sierra images are synthetic, written
+by `make_synthetic.py` and `make_highsierra.py` next to them); `tests/udf_fixtures.rs` and `tests/iso_extension_fixtures.rs` check them
+through the public API, and the unit tests in `udf.rs` and `iso9660.rs` cover synthetic
+and hostile volumes. Do not mount or attach a UDF image on macOS to make or check a
+fixture: use tools that write to and read from regular files.
+
+## RAR Reader
+
+The decoders for RAR 1.5, RAR 2.0 and RAR 2.9 (`rar15.rs`, `rar20.rs`, `rar29.rs` and
+its PPMd model `ppmd.rs` under `src/formats/dos/rar_stream/decompress/`) and the RAR
+1.3/1.4 container, the block walk of the RAR 1.50 to 4.x container, the search for
+self-extracting archives, the unpack-version dispatch and the checksum rules in
+`src/formats/dos/rar.rs` are clean-room: they are written only from the prose
+specifications in `docs/rar/` (see its `README.md`). Do not consult the source of any
+RAR implementation when changing them; if a specification is unclear or wrong against
+real archives, settle it by black-box experiment and record the outcome in the
+"Clean-room feedback" section of the specification. The header parsers, the RAR 2.9
+filter programs (`vm.rs`) and the RAR 5 decoder next to them are vendored code
+(`rar_stream/LICENSE`) and are not part of this rule.
+
+- Unit tests in `rar.rs`, `rar15.rs`, `rar20.rs`, `rar29.rs` and `ppmd.rs` use the
+  specifications' test vectors and hand-built archives. Real archives are never
+  committed.
+- The RAR 1.5 tests also check a local corpus of real archives when
+  `UNRETRO_RAR_CORPUS` names its directory, and skip silently otherwise; the RAR 2.0
+  corpus test is `#[ignore]`d (`cargo test --lib rar20 -- --include-ignored`). A green
+  default run therefore says nothing about real archives.
+
 ## LHA Reader
 
 The LHA reader (`src/formats/amiga/lzh/`) is a clean-room implementation too: it is
@@ -147,6 +186,64 @@ UNRETRO_LHA_ORACLE=/path/to/oracle cargo test --all-features --lib lzh::
 
 - Check the `no_std` build with
   `cargo check --no-default-features --features no_std,amiga`.
+
+## Compress, CUE/BIN, NeXT/UFS, BFS and Lisa Readers
+
+These readers are clean-room implementations too, each written only from the prose
+specification in its `docs/` directory. Do not consult the source of other
+implementations of these formats when changing them; if a specification is unclear or
+wrong against the test data, fix the specification first.
+
+| Reader | Source | Specification | Fixtures and tests |
+|---|---|---|---|
+| Unix `compress` | `src/formats/common/compress.rs` | `docs/compress/` | `testdata/compress/`, `tests/compress_fixtures.rs` |
+| CUE/BIN | `src/formats/dos/cue.rs` (track-file lookup in `src/loader.rs`) | `docs/cue/` | `testdata/cue/`, `tests/cue_fixtures.rs` |
+| NeXT disk label, UFS1 | `src/formats/next/` | `docs/ufs/` | `testdata/ufs/`, `tests/ufs_fixtures.rs` |
+| Be File System | `src/formats/beos/bfs.rs` | `docs/bfs/` | `testdata/bfs/`, `tests/bfs_fixtures.rs` |
+| Lisa file system and tagged images, DiskCopy 4.2 and DART | `src/formats/lisa/` (DiskCopy 4.2 header rule also in `src/formats/macintosh/hfs.rs`) | `docs/lisa/` | `tests/lisa_fixtures.rs`, `tests/diskcopy_specimens.rs`, unit tests |
+
+- Each `testdata/` directory holds generated images or streams with a `manifest.tsv`
+  (expected paths, sizes and FNV-1a 64 hashes, confirmed by independent tools, not
+  taken from this crate; see its `README.md` for the columns and how the fixtures were
+  made).
+  The fixture tests check them through the public API; forms that no fixture holds and
+  hostile inputs are built byte by byte in the unit tests next to each reader.
+- No Lisa image is committed: without specimens the Lisa reader is covered by unit tests
+  on synthetic structures (`src/formats/lisa/lisafs_tests.rs`, `image.rs`) and by the
+  hand-built DiskCopy 4.2 and DART cases in `tests/diskcopy_specimens.rs`.
+- Real-world images are never committed. They live in a local directory (so far
+  `~/.cache/unretro-specimens/`) that the tests check when `UNRETRO_SPECIMENS` names it.
+  When it is unset, or an image is missing, the specimen tests return without a message
+  and pass, so a green default run says nothing about real media:
+
+```bash
+UNRETRO_SPECIMENS=~/.cache/unretro-specimens cargo test --test ufs_fixtures --test bfs_fixtures \
+  --test cue_fixtures --test lisa_fixtures --test diskcopy_specimens -- --nocapture
+UNRETRO_SPECIMENS=~/.cache/unretro-specimens cargo test --lib lisa::
+```
+
+- Layout of that directory: one subdirectory per family, each with a `SOURCES.tsv`
+  (where every image came from: its URL, SHA-256 and a description; the tests do not
+  read it) and the expected results next to the images:
+  - `next/` and `beos/`: `<image>.manifest.tsv` beside each image, in the column layout
+    of the committed `manifest.tsv` of `testdata/ufs/` and `testdata/bfs/`.
+  - `ufs/`: `<stem>.manifest.tsv` beside `<stem>.img` (`path`, `kind`, `mode`, `size`,
+    `sha256`, no header line; path, size and mode are checked).
+  - `lisa/` and `diskcopy/`: `<image>.info.txt` (`key: value` lines; `expect` is `lisa`,
+    `mac` or `reject`, `wrapper` is `diskcopy42`, `dart` or `raw532`) and
+    `<image>.manifest.tsv` (`path`, `kind`, `size`, `fnv64`, `note`). Images are found
+    by their `.info.txt` file.
+  - `cue/`: one subdirectory per disc holding its `.cue` files. Only detection and
+    opening are checked, since the track files are not kept.
+  - The image names the NeXT, UFS and BFS tests look for are listed in the test files.
+- The single-feature runs (`--features std,next`, `std,beos`, `std,lisa`) compile each
+  reader without the other families. Tests that reach a fixture through another layer
+  are gated on that layer's feature (`common` for the gzip-packed BFS fixtures and the
+  nested checks, `dos` for the MBR cases, `macintosh` for `tests/diskcopy_specimens.rs`),
+  so the complete fixture checks run under the default features.
+- Check the `no_std` builds with
+  `cargo check --no-default-features --features no_std,next`, `no_std,beos`,
+  `no_std,lisa`, and `no_std,common` / `no_std,dos` for the compress and CUE/BIN readers.
 
 ## Adding a New Format
 

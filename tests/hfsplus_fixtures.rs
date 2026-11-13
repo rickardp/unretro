@@ -233,29 +233,38 @@ fn inner_image(file: &str) -> Vec<u8> {
 #[cfg(feature = "common")]
 #[track_caller]
 fn assert_gzipped_volume(file: &str, set: &str) -> Vec<Seen> {
+    assert_gzipped_image(file, set, None)
+}
+
+// `partition`: the entry of the Apple Partition Map that holds the volume, for
+// an image that opens as its partition map.
+#[cfg(feature = "common")]
+#[track_caller]
+fn assert_gzipped_image(file: &str, set: &str, partition: Option<&str>) -> Vec<Seen> {
     let name = file.strip_suffix(".gz").unwrap();
     assert_eq!(
         detect_format(file, Some(&fixture(file))),
         Some(ContainerFormat::Gzip)
     );
     let image = inner_image(file);
-    assert_eq!(
-        detect_format(name, Some(&image)),
-        Some(ContainerFormat::Hfs)
-    );
-    assert_eq!(
-        detect_format("no-extension", Some(&image)),
-        Some(ContainerFormat::Hfs)
-    );
+    let format = if partition.is_some() {
+        ContainerFormat::Apm
+    } else {
+        ContainerFormat::Hfs
+    };
+    assert_eq!(detect_format(name, Some(&image)), Some(format));
+    assert_eq!(detect_format("no-extension", Some(&image)), Some(format));
+    let inside =
+        |outer: &str| partition.map_or_else(|| outer.to_string(), |p| format!("{outer}/{p}"));
 
     // The bare image gives the same listing as the gzip-wrapped one.
     let want = expected(set);
-    let (leaves, report) = visit(image, name, name, EntryType::Leaves);
+    let (leaves, report) = visit(image, name, &inside(name), EntryType::Leaves);
     assert_clean(&report, name);
-    assert_eq!(report.root_format, Some(ContainerFormat::Hfs));
+    assert_eq!(report.root_format, Some(format));
     assert_same(&by_path(&leaves), &want.leaves, name);
 
-    assert_volume(file, &format!("{file}/{name}"), set)
+    assert_volume(file, &inside(&format!("{file}/{name}")), set)
 }
 
 #[track_caller]
@@ -407,7 +416,7 @@ fn resource_forks() {
 #[test]
 fn journaled_volume_in_an_apple_partition_map() {
     // Partition type Apple_HFS, 512-byte allocation blocks, an empty journal.
-    let leaves = assert_gzipped_volume("apm.img.gz", "apm");
+    let leaves = assert_gzipped_image("apm.img.gz", "apm", Some("disk image"));
     assert_eq!(content(&leaves, "data.bin").size, 20_000);
     // `Icon\r`: the control character is sanitised.
     assert_eq!(content(&leaves, "Icon_").size, 0);
@@ -421,7 +430,7 @@ fn journaled_volume_in_an_apple_partition_map() {
 #[test]
 fn hfsx_volume_in_an_apple_partition_map() {
     // Partition type Apple_HFSX.
-    let leaves = assert_gzipped_volume("hfsx.img.gz", "hfsx");
+    let leaves = assert_gzipped_image("hfsx.img.gz", "hfsx", Some("disk image"));
     assert_case_sensitive_names(&leaves);
 }
 

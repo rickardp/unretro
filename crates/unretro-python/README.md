@@ -132,12 +132,22 @@ Invalid combinations raise `ValueError`:
 - Besides `max_depth`, nested containers are opened only within a cumulative size budget
   per input (64 times its size, at least 8 GiB); see "Max recursion depth" in the usage
   guide.
-- `ContainerFormat.Hfs` covers HFS, MFS, HFS Plus and HFSX volumes (bare, DiskCopy 4.2,
-  Apple Partition Map, UDIF/NDIF, raw CD sector dumps, HFS wrappers). HFS Plus hard links
+- `ContainerFormat.Apm` covers disk images with an Apple Partition Map: every partition
+  is one entry (named after the map, or `p<n>.img`) and is opened by its content, so
+  the files of an HFS or BFS volume sit under its partition entry; see the Apple
+  Partition Map section of the usage guide.
+- `ContainerFormat.Hfs` covers HFS, MFS, HFS Plus and HFSX volumes (bare, DiskCopy 4.2, DART,
+  UDIF/NDIF, raw CD sector dumps, HFS wrappers). HFS Plus hard links
   resolve to their content; the journal is not replayed and files using transparent
   compression (decmpfs) are not decoded; see the HFS Plus section of the usage guide.
 - `ContainerFormat.Iso9660` covers ISO 9660 CD-ROM images (Joliet / Rock Ridge names, raw
-  2352-byte sector dumps); see the ISO 9660 section of the usage guide.
+  2352-byte sector dumps), High Sierra volumes and multi-session images (the last session
+  is presented). El Torito boot images are listed under `..eltorito/<n>.img`; see the
+  ISO 9660 section of the usage guide.
+- `ContainerFormat.Udf` covers UDF disc images (revisions 1.02 to 2.60; physical, VAT,
+  sparable and metadata partitions). A bridge disc with a usable ISO 9660 volume keeps
+  opening as `Iso9660`. Named streams and extended attributes are not read; see the UDF
+  section of the usage guide.
 - `ContainerFormat.Arj` covers ARJ archives (methods 0-4, decoded natively). Garbled
   (password-protected) files are left out and reported; multi-volume sets are joined
   through their first volume when the later volumes sit next to it; see the ARJ
@@ -151,6 +161,30 @@ Invalid combinations raise `ValueError`:
   from the specification in [docs/lha/](../../docs/lha/README.md)). Entries that are
   corrupt or use an unsupported method are left out with a warning; see the LHA
   section of the usage guide.
+- `ContainerFormat.Compress` covers Unix `compress` (`.Z`) files, decoded natively: one
+  payload named after the file without its extension; `.tar.Z` and `.taz` payloads open
+  as TAR. The format has no checksum; see the Unix compress section of the usage guide.
+- `ContainerFormat.CueBin` covers CUE/BIN CD images: a `.cue` sheet lists its tracks as
+  `trackNN.img` (data, cooked to 2048-byte sectors) and `trackNN.pcm` (audio, raw
+  little-endian PCM without a header). Track files are looked up next to the sheet, so
+  a sheet passed as `data=` lists nothing and reports its tracks; `WAVE`, `MP3` and
+  `AIFF` track files are not read. See the CUE/BIN section of the usage guide.
+- `ContainerFormat.NextDisklabel` covers NeXT disk labels (`NeXT`, `dlV2`, `dlV3`) on
+  NeXTSTEP, OPENSTEP and Rhapsody media; each partition is an entry (`p0.img`, or the
+  label's name for a single partition) that opens as the file system it holds.
+- `ContainerFormat.Ufs` covers UFS1 volumes in both byte orders and both the 4.3BSD and
+  4.4BSD layouts, bare or inside a NeXT disk label. `Metadata.mode` carries the
+  permission bits; timestamps and owners are not exposed, symbolic links and device
+  nodes are not listed, and UFS2 is not read. See the UFS section of the usage guide.
+- `ContainerFormat.Bfs` covers Be File System volumes of BeOS (Intel and PowerPC) and
+  Haiku, bare or inside an MBR partition. `Metadata.mode` carries the permission bits;
+  BeOS attributes are not exposed and symbolic links are not listed. See the BeOS
+  section of the usage guide.
+- `ContainerFormat.LisaFs` covers Apple Lisa file system volumes in DiskCopy 4.2 images
+  with tag data, DART images and raw 532-byte-block ProFile dumps (with or without a BLU
+  header). Images without tag data are not Lisa volumes; a Macintosh disk in a `.dc42`
+  file opens as `Hfs`. Entries carry no metadata (no file labels or timestamps); see
+  the Apple Lisa section of the usage guide.
 - `Entry.metadata` exposes optional structured metadata when available.
 - Classic Mac resources are yielded as `<owner>/..namedfork/rsrc/<TYPE>/<name or #id>`
   (`with_numeric_identifiers()` forces `#id`). AppleDouble sidecars in plain directories

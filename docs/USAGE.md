@@ -232,15 +232,30 @@ HFS and MFS; there is no separate format value.
 
 - Detected by the volume header signature and version at byte 1024 of the volume: `H+`
   version 4 (HFS Plus) or `HX` version 5 (HFSX). The volume is found wherever an HFS
-  volume is: a bare image, behind a DiskCopy 4.2 header, in an Apple Partition Map
-  (partition types `Apple_HFS` and `Apple_HFSX`), in a UDIF or NDIF disk image, in a raw
+  volume is: a bare image, behind a DiskCopy 4.2 header, in a DART image, in a partition
+  of an Apple Partition Map, in a UDIF or NDIF disk image, in a raw
   2352-byte CD sector dump, and embedded in an HFS wrapper volume. For a wrapper the
   embedded volume is presented, not the wrapper's own stub files.
 - UDIF images (`.dmg`) may be unpartitioned or carry an Apple Partition Map or a GUID
   partition table; the first HFS/HFS Plus partition is presented. Stored, zero-fill, ADC,
   zlib, bzip2 and LZMA chunks are decoded. A GUID-partitioned image without the UDIF trailer
   opens as `ContainerFormat::Gpt` (`dos` feature) with the volume as a partition entry.
-- Hybrid ISO 9660 / HFS Plus discs open as HFS, as hybrid HFS discs do.
+- DiskCopy 4.2 images (HFS, MFS and HFS Plus alike) are recognised by the whole header,
+  not by its `01 00` magic alone: a name length of at most 63, a data size that is a
+  non-zero multiple of 512, a tag size of 0, 12 or 20 bytes per block, and a file that
+  holds header, data and tags and is less than 2048 bytes longer. The checksums are not
+  verified. The volume is the data bytes only; tag bytes and padding are not part of it.
+  A truncated image does not open. A Lisa disk in a DiskCopy 4.2 image opens as
+  `ContainerFormat::LisaFs` when the `lisa` feature is enabled; see "Apple Lisa Disk
+  Images".
+- DART images (disk kinds 400K, 720K, 800K and 1440K; fast, best and uncompressed chunks)
+  of a disk with an HFS, MFS or HFS Plus volume are decoded when the `lisa` feature is
+  enabled as well, which holds the DART decoder; with `macintosh` alone they are not
+  recognised. They are detected by content. A chunk that does not decode fails the open;
+  the checksums, which DART keeps in the resource fork, are not verified.
+- Hybrid ISO 9660 / HFS Plus discs open as HFS, as hybrid HFS discs do, or as
+  `ContainerFormat::Apm` with the volume as a partition entry when they carry an Apple
+  Partition Map.
 - Names are converted from the stored UTF-16 to UTF-8 as stored: decomposed, without
   normalisation. An unpaired surrogate becomes U+FFFD. `/` (a `:` typed in the Finder
   shows as `/` in POSIX and is stored that way), `:` and control characters in a name
@@ -275,6 +290,34 @@ HFS and MFS; there is no separate format value.
   `ContainerEntriesSkipped` diagnostic. A volume whose forks add up to more than twice
   its size, or whose catalog file is unreadable, fails to open.
 
+## Apple Partition Map Disk Images
+
+Read-only, `macintosh` feature (`ContainerFormat::Apm`).
+
+- Detected by the `ER` driver descriptor at byte 0 and a `PM` partition map with at
+  least one listed partition that starts inside the image. The map is read with
+  512-byte blocks or with the block size the driver descriptor declares, whichever
+  holds its first entry (some CDs declare 2048-byte blocks around a 512-byte map). Raw
+  2352-byte CD sector dumps are converted to user data first.
+- Probed before HFS: an image that used to open as its first HFS partition now opens
+  as its partition map, and the volume's files are one level deeper, under the
+  partition entry.
+- Every partition is one entry holding the partition's bytes, and is then opened by
+  its content (HFS, HFS Plus, BFS, ISO 9660, ...), not by its type string. Partitions
+  of type `Apple_partition_map`, `Apple_Free`, `Apple_Void` and `Apple_Scratch` are not
+  listed; driver and patch partitions are.
+- An entry is named after the partition's name in the map when that name is printable
+  ASCII without `/`, `\` or `:` and no other listed partition has it (compared without
+  regard to case); otherwise, and always with `numeric_identifiers`, it is `p<n>.img`,
+  where `n` is the zero-based position in the map.
+- A partition that reaches past the end of the image is cut off there. A partition of
+  zero length, one that starts at block 0 or past the end, and one that shares bytes
+  with an earlier listed partition are left out, without a diagnostic. Maps declaring
+  more than 128 entries are not recognised.
+- Not covered: a partition map inside a UDIF or NDIF disk image or behind a DiskCopy
+  4.2 header. Those still open as `ContainerFormat::Hfs`, presenting the first HFS
+  partition.
+
 ## ISO 9660 CD-ROM Images
 
 Read-only, `dos` feature (`ContainerFormat::Iso9660`).
@@ -282,19 +325,178 @@ Read-only, `dos` feature (`ContainerFormat::Iso9660`).
 - Detected by a `CD001` primary volume descriptor at sector 16, in cooked 2048-byte
   images and in raw 2352-byte sector dumps (MODE1 and MODE2/XA `.bin`/`.img`).
 - Probe order: HFS (hybrid Mac discs), FAT, GPT and MBR are tried first and keep
-  winning, so isohybrid images open as their partition table.
+  winning, so isohybrid images open as their partition table. A UDF bridge disc (ISO
+  9660 and UDF over the same files) opens as ISO 9660; see "UDF Disc Images".
 - Names: Rock Ridge `NM` names are used when present (including `CL`/`RE` relocated
   directories; symlinks and device nodes are not listed); otherwise the Joliet tree;
-  otherwise plain ISO names with the `;1` version and a trailing `.` removed. A disc
-  whose Rock Ridge names are not valid UTF-8 uses its Joliet tree instead, if it has one.
-  Plain names are presented in lower case, like FAT short names.
+  otherwise plain ISO names with the `;1` version and a trailing `.` removed. Rock
+  Ridge entries without `NM` names (as `hdiutil makehybrid` writes them) do not keep
+  the Joliet tree from being used. A disc whose Rock Ridge names are not valid UTF-8
+  uses its Joliet tree instead, if it has one. Plain names are presented in lower
+  case, like FAT short names. A `/` inside a name is replaced by `_`.
 - Multi-extent files are joined. Associated files (flag `0x04`) are not listed.
-- Not supported: UDF-only discs, El Torito boot image extraction, CD audio tracks,
-  CUE sheets, multi-session discs (only the first session is read), High Sierra.
+- High Sierra: a volume with `CDROM` at byte 9 of sector 16 (the May 1986 working
+  paper that preceded ISO 9660) is read with the High Sierra descriptor and directory
+  record layouts. Names are presented like plain ISO names. Rock Ridge, Joliet, boot
+  catalogs and later sessions are not looked for on such a volume.
+- El Torito: the boot images named by the boot catalog are listed as extra entries
+  under the reserved directory `..eltorito/` at the disc root, as `<n>.img` with `n`
+  counting the catalog's entries from 0 (the default entry first, then the section
+  entries; an entry that is not listed keeps its number). The boot catalog itself is
+  not listed, unless the writer also recorded it as a file. Sizes:
+  - floppy emulation: 1,228,800, 1,474,560 or 2,949,120 bytes (1.2 MB, 1.44 MB,
+    2.88 MB);
+  - hard disk emulation: the extent covered by the partition table in the image's
+    first sector;
+  - no emulation: the catalog's sector count times 512. An entry with sector count 0
+    names no image and is not listed.
+
+  An image that is a file already listed is not listed twice: same start sector, and
+  the file's length, rounded up either to the 512-byte sectors the catalog counts in
+  or to a whole logical block (as xorriso records a no-emulation boot file), equals
+  the image's. A boot image hidden from the presented tree but recorded in the other
+  one (primary or Joliet) is listed under `..eltorito/`. The catalog's validation
+  entry must have its key bytes and a zero checksum, otherwise no boot image is listed.
+- Multi-session: when one image file holds several sessions, the tree of the last
+  session is presented; its directories already include the files of earlier sessions
+  that were kept. There is no table of contents in a plain image, so a later session
+  is looked for only at sector-aligned positions past the previous session's volume
+  space, and is accepted only if its root directory lies in that session and its `.`
+  record points back at it under addressing from the start of the image. An ISO file
+  stored inside the first session is therefore not taken for a session. At most 99
+  sessions are followed.
+  - A later session's data track on its own (as a CUE sheet with one file per track
+    hands it out) opens too, but only the files recorded in that track can be read;
+    files kept from earlier sessions are left out and reported.
+  - An image from which the gaps between sessions were removed does not hold together
+    under absolute addressing; its first session is presented.
+- Not supported: CD audio tracks, interleaved files, High Sierra volumes with
+  descriptors other than the standard file structure descriptor, boot catalog
+  metadata (platform, load segment, selection criteria), and separate access to
+  earlier sessions.
 - Files that cannot be read (interleaved mode, extents outside the image, directory
-  loops, nesting deeper than 32 levels, output above twice the image size) are left
-  out; every readable file is still yielded and the traversal reports one recoverable
-  `ContainerEntriesSkipped` diagnostic.
+  loops, nesting deeper than 32 levels, output above twice the image size) and boot
+  images that do not fit in the disc image, have no partition table to take a size
+  from or use an unknown emulation type are left out; every readable file is still
+  yielded and the traversal reports one recoverable `ContainerEntriesSkipped`
+  diagnostic.
+
+## UDF Disc Images
+
+Read-only, `dos` feature (`ContainerFormat::Udf`, extension `.udf`).
+
+- Detected by an `NSR02` or `NSR03` descriptor in the volume recognition sequence at
+  byte 32768, an anchor volume descriptor pointer at sector 256, N-1, N-257 or 512,
+  and a root directory that can be reached through the main or the reserve volume
+  descriptor sequence. Cooked images with logical blocks of 2048, 512, 1024 or 4096
+  bytes, and raw 2352-byte sector dumps (2048-byte blocks only).
+- Bridge discs: an image that also has an ISO 9660 volume keeps opening as
+  `ContainerFormat::Iso9660`, whatever its extension. UDF is chosen only when there is
+  no ISO 9660 volume or when that volume has no root directory to read (neither the
+  primary nor the Joliet root is where its descriptor says). HFS, FAT, GPT and MBR are
+  tried before both.
+- Revisions 1.02 to 2.60: file entries and extended file entries, ICB strategy 4,
+  indirect entries, short, long and extended allocation descriptors, data embedded in
+  the ICB, continuation extents, and unrecorded or sparse extents, which read as
+  zeros.
+- Partitions: physical (type 1); virtual (UDF 1.50 write-once media, with the VAT in
+  the 1.50 or the 2.00 layout; the newest table is found by searching back from the
+  end of the image); sparable (UDF 1.50, with its sparing table); metadata (UDF 2.50,
+  with the mirror file standing in for unreadable blocks of the main file).
+- Names are converted from OSTA compressed Unicode (8-bit and 16-bit) to UTF-8 as
+  stored; an unpaired surrogate becomes U+FFFD and a `/` inside a name is replaced by
+  `_`. The volume label is the logical volume identifier, or the name in the VAT of a
+  UDF 2.00 write-once volume.
+- Hard links to files are entries with the same content. Empty files are listed.
+- Not listed: directories as such, symbolic links, device nodes, FIFOs and sockets,
+  deleted entries, the parent entry, and the `Non-Allocatable Space` list of a UDF
+  1.50 sparable volume.
+- Not supported:
+  - Named streams and extended attributes; only the main data stream is read.
+  - ICB strategy 4096 and pseudo-overwrite partitions (UDF 2.60).
+  - Raw sector dumps with a logical block size other than 2048.
+  - Earlier states of a write-once volume: only the newest VAT is used.
+  - Timestamps and permissions.
+- Damage: every descriptor must have a valid tag checksum, CRC and recorded location
+  to be trusted, and so must every directory entry (its CRC may cover the entry only).
+  Files with extents outside the image or the partition, with fewer extents than their
+  length needs or with a looping descriptor chain, directories nested deeper than 64
+  levels, larger than 16 MiB or reachable under a second name, and files beyond twice
+  the image size of output (at least 16 MiB) are left out; a single file larger than
+  that budget, such as a huge sparse file, is left out on its own. Reading descriptors
+  and mapping file blocks is bounded by a work budget of twice the image size (at least
+  16 MiB); a volume whose entries alias one another beyond it is cut off there. Every
+  other file is still yielded and the traversal reports one recoverable `ContainerEntriesSkipped`
+  diagnostic.
+
+## CUE/BIN CD Images
+
+Read-only, `dos` feature (`ContainerFormat::CueBin`). Read natively, also in `no_std`
+and `wasm32` builds; the reader was written from the format specification in
+[docs/cue/](cue/README.md).
+
+- Detected only under the extension `.cue` (any case), and then by content: text of at
+  most 1 MiB whose first non-empty line starts with a cue sheet command and which has a
+  `FILE` command followed by a `TRACK` command. Encoding: a UTF-8 or UTF-16 byte order
+  mark decides; otherwise UTF-8 when valid, else one character per byte (ISO 8859-1).
+  LF, CR LF and lone CR end a line; a Ctrl-Z ends the sheet; a NUL disqualifies it.
+  Command words, file types and modes are case-insensitive.
+- Used: `FILE` (types `BINARY` and `MOTOROLA`; no type means `BINARY`), `TRACK` and the
+  first `INDEX 00` and `INDEX 01` of each track. Everything else is ignored: `PREGAP`
+  and `POSTGAP` (they describe sectors that are not in the file), higher indexes,
+  `FLAGS`, `CATALOG`, `ISRC`, `CDTEXTFILE`, `TITLE`, `PERFORMER`, `SONGWRITER`, `REM`
+  and unknown commands.
+- One entry per readable track, in sheet order, named after the track number only:
+  - data tracks as `trackNN.img`, cooked to the 2048 user bytes of every sector
+    (`MODE1/2048`, `MODE2/2048`, `MODE1/2352`, `MODE2/2352`, `CDI/2352`, `MODE2/2336`,
+    `CDI/2336`). In 2352-byte sectors the sector's own mode byte chooses between user
+    data at byte 16 and byte 24; the declared mode is used for sectors without a sync
+    pattern. The track is detected by content like any other file, so it opens as the
+    file system or partition map it holds (ISO 9660, HFS, FAT, ...);
+  - audio tracks (`AUDIO`, `CDG`) as `trackNN.pcm`: raw PCM, not decoded and without a
+    header (16-bit little-endian stereo samples at 44.1 kHz, 2352 bytes per sector).
+    Samples of a `MOTOROLA` file are byte-swapped; the 96 sub-channel bytes of a `CDG`
+    sector are dropped.
+- A track runs from its `INDEX 01` to the first index of the next track in the same
+  file, or to the end of the file; a trailing partial sector is ignored. The gap between
+  `INDEX 00` and `INDEX 01` is in no entry. Entries carry no metadata; titles and
+  performers are not used.
+- Sessions are not modelled: `REM SESSION` is ignored and each track is an entry of its
+  own (for a later session's data track see "ISO 9660 CD-ROM Images").
+- Track files are looked up next to the sheet — in the same directory for a file on
+  disk, in the same parent container when nested — and never outside that directory:
+  `\` is read as `/`, a relative path without `.`/`..` components is tried as written,
+  then the base name as written, in lower case and in upper case. An absolute path, a
+  drive or a `..` component is never followed; only the base name is looked up beside
+  the sheet. A sheet with a single track file also tries its own name with the file's
+  extension and with `.bin`/`.BIN`. On disk, a link that leads out of the sheet's
+  directory is not read. Data passed as bytes has no siblings: the sheet opens, lists
+  nothing and reports every track.
+- When a directory or archive is traversed, a track file that an opened sheet reads a
+  track from is not listed again on its own. A track file that comes before its sheet
+  is held back for it when the sheet has the file's name (`game.bin` and `game.cue`,
+  `game (Track 2).bin` and `game.cue`) or, in a directory on disk, whatever the sheet
+  is called; if that sheet is then not opened, the file is listed after the other
+  entries. Inside an archive, a track file stored before a sheet with an unrelated name
+  is listed on its own as well as through the sheet. A listing that does not descend
+  into containers shows sheet and track files as they are, and a track file addressed
+  directly opens on its own.
+- Limits: 99 `FILE` commands; track numbers 1 to 99, increasing; one track at most
+  4 GiB; all tracks of a sheet together at most the size of the sheet and its track
+  files (at least 16 MiB, at most 4 GiB).
+- Not supported: track files of type `WAVE`, `MP3`, `AIFF` or any other audio container
+  (never looked up), `MODE2/2324` and unknown track modes, separate `.sub` sub-channel
+  files, CD-TEXT, and the audio in a gap before `INDEX 01`. Mode 2 Form 2 sectors
+  contribute their first 2048 bytes only. EDC and ECC are not checked.
+- Damage: a sheet with a `FILE` without a name, a `TRACK` without number or mode, a
+  `TRACK` before the first `FILE`, a track number outside 1 to 99 or not above the one
+  before it, or more than 99 `FILE` commands fails to open. Otherwise a track is left
+  out when its file is missing or of an unsupported type, its mode is unsupported, it
+  follows a track of unknown sector size, it has no `INDEX 01`, it starts beyond the end
+  of its file, it is empty or over a size limit; index times that go backwards leave out
+  every track of that file. Every other track is still yielded and the traversal reports
+  one recoverable `ContainerEntriesSkipped` diagnostic naming the first problem and
+  counting the rest.
 
 ## ARJ Archives
 
@@ -332,18 +534,58 @@ and `wasm32` builds).
 
 ## RAR Archives
 
-Read-only, `dos` feature with `std` (`ContainerFormat::Rar`); RAR 2.9/3.x/4.x and RAR 5
-archives. Encrypted files and directories are not listed.
+Read-only, `dos` feature with `std` (`ContainerFormat::Rar`). Directories are not listed.
 
+- Supported: the RAR 1.3/1.4 container (signature `RE~^`), the RAR 1.50 to 4.x format
+  (`Rar!\x1a\x07\x00`) and RAR 5. In the RAR 1.50 to 4.x format the decoder is chosen
+  per file by its unpack version: 13 and 15 (RAR 1.5), 20 and 26 (RAR 2.0, including
+  multimedia compression), 29 and 36 (RAR 2.9 to 4.x). Solid archives of every
+  generation are read.
+- Self-extracting archives are read: in a DOS, Windows or OS/2 executable (`MZ`), an
+  ELF or a Mach-O file the archive is searched for in the first 1 MiB, and a signature
+  counts only when a sound archive header follows it. Other files have to start with
+  the archive.
+- Not supported: encrypted files and archives with encrypted headers; other unpack
+  versions; RAR 2.9 to 4.x filters other than the six standard ones (x86 calls, x86
+  calls and jumps, Itanium, delta, RGB, audio), whose files fail their checksum and are
+  left out.
+- A RAR 1.50 to 4.x archive whose archive header fails its checksum is rejected as
+  corrupt.
+- Every file is verified before it is yielded: its length against the declared size
+  and its contents against the stored checksum (CRC-32; the 16-bit checksum of the
+  RAR 1.3/1.4 container; for a file split across volumes, the checksum of its last
+  part). A RAR 5 file that carries no CRC-32, only a BLAKE2sp hash or nothing, is
+  yielded unchecked.
+- A file that is encrypted, of an unknown unpack version or method, corrupt (decoding
+  error, wrong length, checksum mismatch) or incomplete is left out; the other files
+  are still yielded and the traversal reports one recoverable
+  `ContainerEntriesSkipped` diagnostic that spells out the first three problems and
+  counts the further ones. In a solid archive a file that cannot be decoded, or a split
+  file whose pieces are not all there, also takes the later files that depend on it
+  with it (in RAR 1.x every later compressed file of the archive); a file that merely
+  fails its checksum does not. A damaged or truncated block header ends the listing
+  there, keeps the files found so far, is reported, and in the RAR 1.50 to 4.x format
+  also ends the volume set.
+- In the RAR 1.50 to 4.x format an entry is a directory by its header flags alone
+  (unpack version 20 and above) or by its DOS or OS/2 directory attribute (below 20);
+  an empty entry that merely has a directory attribute is yielded as an empty file.
+- The compression-ratio limit (1000:1, measured over at least 64 packed bytes) applies
+  to RAR 2.9 to 5 files; for a solid archive it is applied to the files of one solid
+  group together, since a file that repeats earlier ones packs to almost nothing.
+- File names of the RAR 1.3/1.4 container, and of DOS and OS/2 files in the later
+  format when they are not UTF-8, are read as code page 437.
 - Multi-volume sets are read through their first volume, which lists the files of every
   volume and joins files split across them. Both naming schemes are followed:
   `name.part1.rar`, `name.part2.rar`, ... and `name.rar`, `name.r00`, `name.r01`, ....
   Later volumes are looked up next to the first one — in the same directory for a file
   on disk, in the same parent container when nested — and are not listed again when
-  the volume before them is present.
+  a volume that reaches them (the one before, or an earlier one across up to eight
+  missing volumes) is present.
 - A missing volume leaves out the files that need it and is reported as one recoverable
-  `ContainerEntriesSkipped` diagnostic; a volume without its predecessor opens on its
-  own and carries the rest of the set. Data passed as bytes has no siblings, so a file
+  `ContainerEntriesSkipped` diagnostic; when one of the next eight volumes is present,
+  reading continues there, so files that lie entirely in later volumes are still
+  yielded (in a solid set only from the next file that starts a solid group). A volume
+  without its predecessor opens on its own and carries the rest of the set. Data passed as bytes has no siblings, so a file
   that continues in another volume is left out and reported rather than truncated.
 
 ## LHA / LZH Archives
@@ -396,6 +638,219 @@ Read-only, `amiga` feature (`ContainerFormat::Adf`).
   readable file is still yielded and the traversal reports one recoverable
   `ContainerEntriesSkipped` diagnostic.
 
+## NeXT Disk Labels
+
+Read-only, `next` feature (`ContainerFormat::NextDisklabel`). Read natively, also in
+`no_std` and `wasm32` builds; the reader was written from the format specification in
+[docs/ufs/](ufs/README.md). The partition table of NeXTSTEP, OPENSTEP and Rhapsody
+floppies, hard disks and CD-ROMs.
+
+- Detected by a `NeXT`, `dlV2` or `dlV3` label with a valid checksum at byte 0, 7680,
+  8192, 15360, 16384, 23040 or 24576 of the image (the copy positions for 512-, 1024-
+  and 2048-byte device sectors); the first valid copy is used, so a damaged or missing
+  first copy does not matter. The label must also have a sector size of 512, 1024, 2048
+  or 4096, a position field that agrees with where it was found, the uninitialised flag
+  clear, and at least one partition that starts inside the image. No extension is
+  needed or used.
+- Probed before UFS, BFS, Lisa, HFS, FAT, GPT, MBR, ISO 9660 and UDF. A label behind a
+  PC boot sector (Intel floppies and whole-disk Intel installs) is used only when the
+  boot sector's partition table is empty; with a partition in use the image opens as
+  MBR.
+- Labels are big-endian on every platform, Intel media included.
+- Each partition in use is one entry holding the partition's bytes, named `p0.img` to
+  `p7.img` by its index in the label. When the label has a single partition it is named
+  after the label's volume name instead; `with_numeric_identifiers` keeps `p0.img`. In
+  that name `/`, `\`, `:` and bytes outside printable ASCII become `_`.
+- The entry is detected by content like any other file: a UFS volume opens as
+  `ContainerFormat::Ufs` below it. The label's file system type string is ignored, and
+  a partition that holds something unrecognised stays a plain file entry. A labelled
+  image always opens as the label, also with one partition; it never opens directly as
+  UFS.
+- Intel hard disks may keep the label inside a PC partition of type `0xA7`. Such a disk
+  opens as `ContainerFormat::Mbr` (`dos` feature) and the label is found in the
+  partition entry; the label's absolute sector numbers are resolved against the
+  partition. This layout is implemented from documentation and checked against a
+  synthetic image only; no real disk of this kind was available.
+- Not listed: the front porch (boot blocks and label copies) and unused partition
+  entries.
+- Not supported: labels at any other position (the image is never scanned for one), BSD
+  and Sun disk labels.
+- Damage: a copy with a bad checksum is passed over for the next one; an image with no
+  valid copy is not a NeXT disk label. A partition that ends beyond the image is cut
+  at its end; one that starts beyond it, or that contains the label copy describing
+  it, is left out. A partition that overlaps an earlier one is left out and the
+  traversal reports one recoverable `ContainerEntriesSkipped` diagnostic.
+
+## UFS Volumes
+
+Read-only, `next` feature (`ContainerFormat::Ufs`, extension `.ufs`). Read natively,
+also in `no_std` and `wasm32` builds; the reader was written from the format
+specification in [docs/ufs/](ufs/README.md). UFS1, the Berkeley Fast File System, as
+written by NeXTSTEP, OPENSTEP and Rhapsody and by 4.2BSD, 4.3BSD, 4.4BSD and NetBSD.
+
+- Detected by the magic `0x00011954` of the superblock at byte 8192 of the volume, in
+  either byte order, plus consistent superblock fields and a root directory (inode 2)
+  that starts with its own `.` record. The magic alone is not enough. Found as a bare
+  volume image under any name and as a partition of a NeXT disk label; probed right
+  after the label and before BFS, Lisa, HFS, FAT, GPT, MBR, ISO 9660 and UDF.
+- Big-endian and little-endian volumes; the byte order is the volume's, not the
+  machine's (NeXTSTEP and OPENSTEP media for Intel are big-endian). Block sizes from
+  4096 to 65536 bytes, fragment sizes from 512 bytes up to the block size, at most 8
+  fragments per block.
+- Both generations: the 4.2BSD/4.3BSD layout (NeXTSTEP, OPENSTEP) and the 4.4BSD layout
+  (Rhapsody, NetBSD; directory records with a type byte).
+- Regular files are entries, read through direct, single, double and triple indirect
+  blocks; a last block stored as fragments is read to the file's length. Holes read as
+  zeros. Empty files are listed. Entries are yielded sorted by path.
+- Hard links: every name is an entry with the full content.
+- Names are taken as UTF-8; bytes that are not valid UTF-8 become U+FFFD. `\`, `:` and
+  control characters are replaced by `_`. Names that differ only in case are separate
+  entries; they collide when extracted onto a case-insensitive filesystem.
+- `Metadata::mode` holds the permission bits as an `ls`-style string (`-rwxr-xr-x`,
+  with set-user-id, set-group-id and sticky as `s`/`S` and `t`/`T`).
+- Not listed: directories as such (so empty directories do not appear), `.` and `..`,
+  symbolic links (they are not followed either), device nodes, FIFOs, sockets and
+  whiteouts.
+- Not supported:
+  - UFS2: not detected as UFS.
+  - Volumes that do not start at the first byte of the data: BSD and Sun disk labels
+    are not interpreted, and the image is never scanned for a superblock. Backup
+    superblocks are not used.
+  - Timestamps, owners and groups (there is no `Metadata` field for them).
+- Limits: the contents and paths of all listed files together may not exceed twice the
+  volume size (at least 16 MiB, at most 4 GiB); a file that does not fit is left out on
+  its own and smaller files after it are still listed. At most 4,194,304 files and
+  directories. Directories nested more than 63 levels below the root are not entered.
+  A directory reachable under a second name is entered once.
+- Damage: a volume whose superblock or root directory fails the checks is not detected
+  at all. A truncated image is accepted. Left out are files with a block or indirect
+  block outside the volume or the image, names with an inode outside the volume or of
+  an unknown type, names containing `/` or a zero byte, and the rest of a directory
+  from a malformed record, an unallocated block or a block outside the volume on. Every
+  other file is still yielded and the traversal reports one recoverable
+  `ContainerEntriesSkipped` diagnostic.
+
+## BeOS Volumes (BFS)
+
+Read-only, `beos` feature (`ContainerFormat::Bfs`, extension `.bfs`). Read natively,
+also in `no_std` and `wasm32` builds; the reader was written from the format
+specification in [docs/bfs/](bfs/README.md).
+
+- Detected by the `BFS1` superblock at byte 512 of the volume (Intel BeOS and Haiku) or
+  at byte 0 (PowerPC BeOS), tried in that order, in little-endian or big-endian byte
+  order at either position. All three magic numbers and the byte-order mark must match,
+  the block size must be 1024, 2048, 4096 or 8192 bytes and equal the i-node size, the
+  flags word must say clean or dirty, the allocation group fields must agree with the
+  block count, and the root directory run must lead to a live directory i-node. The
+  unrelated SCO / UnixWare "Boot File System" (`mkfs.bfs`) is not detected.
+- Probed after the NeXT disk label and UFS and before Lisa, HFS, FAT, GPT, MBR and
+  ISO 9660, whose signatures the boot area of a volume can imitate.
+- The volume is found as a bare image (a partition dump) and inside an MBR partition,
+  where it is detected by its content, not by the partition type `0xEB`: the disk opens
+  as `ContainerFormat::Mbr` (`dos` feature) and the volume is the partition entry.
+- Apple Partition Map discs (BeOS for PowerPC CDs) open as `ContainerFormat::Apm`
+  (`macintosh` feature) and the volume is the `Be_BFS` partition entry, next to the
+  disc's HFS partition. Without `macintosh` the volume is read only when its partition
+  is opened on its own.
+- Regular files reachable from the root directory are listed as
+  `<image>/<dir>/.../<name>`, sorted by path, with the data stream as content (direct,
+  indirect and double-indirect block runs). Empty files are listed. The volume name is
+  not part of the path. The Trash is an ordinary directory and is listed.
+- Names are taken as UTF-8 as stored: no normalisation and no case folding, so names
+  that differ only in case are separate entries. Bytes that are not valid UTF-8 are
+  written as `%XX`, so that different stored names stay different. `\`, `:` and control
+  characters in a name are replaced by `_`; when that would give two files the same
+  path, the changed name keeps those characters as `%XX` instead (`a:b` beside `a_b` is
+  listed as `a%3Ab`).
+- `Metadata::mode` holds the permission bits as an `ls`-style string (`-rwxr-xr-x`).
+  Owner, group and timestamps are not reported.
+- Not listed: directories as such (an empty folder leaves no trace), symbolic links
+  (never followed), special nodes, deleted files, attribute directories, the index
+  directory and its indices.
+- Not supported:
+  - BeOS attributes, in the i-node's small-data area or in an attribute directory:
+    `BEOS:TYPE` and every other attribute are ignored and are neither entries nor
+    metadata.
+  - Log replay. The volume is read as it is on disk, so an image of a volume that was
+    not unmounted cleanly can show the state before its last changes; nothing is
+    reported.
+  - Directory trees with a node size other than 1024 bytes.
+- Damage: a truncated image, or a volume smaller than the image, still opens. Left out
+  are files whose block runs leave the volume or the image, cover less than the file
+  size (nothing is zero-filled or cut short) or whose size exceeds the volume; entries
+  with an empty name, a name over 255 bytes or one containing a zero byte or `/`;
+  entries that name a free, deleted, attribute or index i-node; a second entry with a
+  path already listed; directories reached a second time (loops and cross-links),
+  nested deeper than 128 levels or with an unreadable tree; and the subtree of a damaged
+  tree node. File data, paths and 64 bytes per file together may not exceed the image
+  size (at least 16 MiB), and neither may the directory trees read; the listing ends
+  where the first limit is reached, or when more i-nodes were read than the volume has
+  blocks. Every other file is still yielded and the traversal reports one recoverable
+  `ContainerEntriesSkipped` diagnostic that counts the skipped items and spells out the
+  first. Only a volume that fails the detection checks fails to open.
+
+## Apple Lisa Disk Images
+
+Read-only, `lisa` feature (`ContainerFormat::LisaFs`, extension `.dc42`). Read natively,
+also in `no_std` and `wasm32` builds; the reader was written from the format
+specification in [docs/lisa/](lisa/README.md).
+
+- Detected by content: one of the first 100 blocks must be tagged as the volume header
+  (file ID 1, relative page 0) and pass the header checks (on-disk version 14, 15 or 17,
+  512-byte blocks, consistent block counts and S-list geometry). The sector tags are
+  required, so an image without tag data is never a Lisa volume.
+- Probed before HFS and MFS. A DiskCopy 4.2 image is a Lisa disk only when it holds that
+  tagged volume header; otherwise it falls through to the Macintosh reader, so a
+  Macintosh disk named `.dc42` still opens as `ContainerFormat::Hfs`.
+- Image forms:
+  - DiskCopy 4.2 with 12 tag bytes per block (diskettes) or 20 (hard disks). The header
+    is checked as described under "HFS Plus and HFSX Volumes"; the checksums are not
+    verified.
+  - Twiggy diskettes (DiskCopy 4.2 encoding byte `54`, 1702 blocks): the second side is
+    put back into logical order, and the drive's bad-block table is applied.
+  - DART images of the tagged disk kinds (400K and 800K), with fast (run-length), best
+    (LZH) or no compression.
+  - Raw ProFile dumps of 532-byte blocks, with or without a BLU header block. The tag
+    may come before or after the data, and the blocks may be in logical order or in the
+    ProFile's 5:1 interleaved device order; the layout is decided from the tags, not
+    from the file name. A dump without a header block must be a multiple of 532 bytes
+    and at least 64 blocks long. DiskCopy 4.2 images with 20-byte tags get the same
+    block-order test.
+- On-disk versions 14, 15 (flat catalog) and 17 (catalog tree).
+- Every file the catalog names is an entry, including system files such as `system.os`
+  and empty files. Entries are sorted by path. Directories of version 17 volumes become
+  path components; a file whose directory chain is broken, loops or is deeper than 16
+  levels is listed directly under the root.
+- Names are converted from the Lisa character set to UTF-8 and keep their stored case:
+  bytes 0x80 to 0xD8 as in Mac Roman, 0x7F as U+2588, bytes below 0x20 and above 0xD8
+  as U+FFFD. A `/` inside a name becomes `-`; `\`, `:` and control characters become
+  `_`, and a name of `..` becomes `_`. Office System disks show their internal names
+  (`{T3}obj`, `{D109T3}`); the desktop names kept in the file labels are not read.
+- Entries carry no metadata: file labels, timestamps, file types and passwords are not
+  surfaced. Password and protection flags are ignored and the contents are delivered as
+  stored.
+- All files together may not exceed twice the image size (at least 16 MiB); a decoded
+  DART image counts against the same limit.
+- Not listed: the boot blocks, volume header, allocation bitmap, S-list and catalog,
+  file leaders, deleted entries, directories as such, and anything reachable only
+  through tags and not through the catalog.
+- Not supported:
+  - Images without tag data, 24-byte tags and 536-byte blocks, and truncated images.
+  - Lisa Monitor (UCSD p-System) and Xenix disks.
+  - MacWorks disks as Lisa volumes: in a DiskCopy 4.2 or DART image they open as
+    `ContainerFormat::Hfs` (`macintosh` feature); a raw 532-byte dump of one is not
+    opened.
+  - The backup volume header: a volume whose primary header is damaged is not
+    recognised.
+- Damage: left out are files whose S-list entry is stale, whose data pages are tagged
+  as another file's, or whose file map has an extent outside the volume; a file whose
+  map is shorter than its length, or whose catalog and S-list sizes differ, is cut to
+  the smaller. An invalid catalog node ends the listing and keeps the files found so
+  far. Once the size limit is reached, or reading unreadable entries has cost more than
+  four times the volume's blocks, the remaining entries are not read. Every other file
+  is still yielded and the traversal reports one recoverable `ContainerEntriesSkipped`
+  diagnostic. A DART image with a chunk that does not decode fails to open.
+
 ## ZIP Archives
 
 `common` feature (`ContainerFormat::Zip`).
@@ -431,6 +886,35 @@ Read-only, `amiga` feature (`ContainerFormat::Adf`).
 - Randomised blocks, written by bzip2 0.9.0 and earlier, are decoded.
 - bzip2-compressed blocks in UDIF disk images (`hdiutil` format `UDBZ`) are decoded with
   the `macintosh` feature alone.
+
+## Unix compress Files
+
+`common` feature (`ContainerFormat::Compress`). Decoded natively, also in `no_std` and
+`wasm32` builds; the reader was written from the format specification in
+[docs/compress/](compress/README.md).
+
+- Detected by content, with or without a `.Z` extension: the `1F 9D` magic, a flags byte
+  with both reserved bits (`0x20`, `0x40`) clear and a maximum code width of 9 to 16, a
+  literal as first code and a second code the format allows. Files with a reserved bit
+  set or another width are not recognised.
+- Yields one entry named after the file without its last extension; `.taz` yields
+  `<name>.tar`, which then opens as TAR like the payload of `.tar.Z`.
+  `Metadata::compression_method` is `lzw`.
+- Maximum code widths 9 to 16 are decoded, in block mode (with CLEAR codes) and in the
+  older format without the block-mode bit. A file of only the three header bytes yields
+  an empty entry; a zero-length file has no magic and is not recognised.
+- The format carries no checksum, length or end marker, so damage that still decodes is
+  not detected. A truncated file yields what the whole codes before the cut decode to,
+  without an error. Bytes after the stream are decoded as further codes; left-over bits
+  short of one code are ignored.
+- A file with an invalid code (a CLEAR code first, a string code with no code before it,
+  a code beyond the string table) or with more than 4 GiB of output is rejected as a
+  whole, without partial output.
+- Not supported: the 9-bit dialect of newer ncompress (`compress -b 9`), which keeps
+  9-bit codes once its 512-entry table is full. Maximum width 9 is read the historical
+  way (10-bit codes from then on) and there is no fallback to the other reading, so such
+  a file decodes correctly only when it ends before the table fills. Files without the
+  magic are not recognised.
 
 ## XZ and LZMA Files
 

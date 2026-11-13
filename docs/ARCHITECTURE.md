@@ -25,7 +25,7 @@ Rust core (src/)
   ├─ Format detection + container open
   ├─ Entry model + metadata + diagnostics
   ├─ Source abstraction (mmap vs loaded bytes)
-  └─ Format implementations (common/macintosh/amiga/game/dos)
+  └─ Format implementations (common/macintosh/amiga/game/dos/next/beos/lisa)
 
 CLI (src/bin/unretro.rs + src/cli/*)
   └─ Argument parsing, list/extract UX, preserve-* behavior
@@ -129,7 +129,8 @@ Root vs recoverable behavior:
 
 Public feature toggles in `Cargo.toml`:
 
-- `std`, `common`, `xz`, `macintosh`, `amiga`, `game`, `dos`, `full`, `all`, `wasm`.
+- `std`, `common`, `xz`, `macintosh`, `amiga`, `game`, `dos`, `next`, `beos`, `lisa`,
+  `full`, `all`, `wasm`.
 
 Internal implementation toggles (not API contract):
 
@@ -140,7 +141,7 @@ What the features add (the internal toggle is enabled by `std`):
 - `common` alone: ZIP, GZIP, BZIP2 and TAR, with native readers (`formats/common/zip.rs`,
   `gzip.rs`, `bzip2_container.rs`, `tar.rs`) over native inflate and bzip2 decoders
   (`formats/common/inflate.rs`, `bzip2.rs`) that have no dependencies and build for
-  `no_std` + `alloc`.
+  `no_std` + `alloc`. Unix `compress` files (`formats/common/compress.rs`) likewise.
 - `common` or `macintosh`: the inflate decoder, the zlib wrapper
   (`formats/common/zlib.rs`) and the bzip2 decoder, which UDIF disk images use for
   zlib- and bzip2-compressed blocks.
@@ -158,6 +159,14 @@ for existing feature lists.
 LHA has no backend toggle either: its reader (`formats/amiga/lzh/`) has no dependencies,
 builds for `no_std` + `alloc` and is part of `amiga`.
 
+`next` (NeXT disk labels and UFS1 volumes), `beos` (Be File System volumes) and `lisa`
+(Apple Lisa file system volumes and the tagged disk images that hold them) have no
+backend toggle either: their readers have no dependencies and build for `no_std` +
+`alloc`. All three are part of `full` and `wasm`. The DART decoder lives in `lisa`
+(`formats/lisa/image.rs`); `macintosh` uses it for DART images of Macintosh disks only
+when `lisa` is enabled too. CUE/BIN (`formats/dos/cue.rs`) is part of `dos` and builds
+for `no_std` + `alloc` as well.
+
 Design intent:
 
 - Public features stay stable and user-facing.
@@ -167,10 +176,17 @@ Design intent:
 
 `src/formats/` is grouped by domain:
 
-- `common/`: directory, zip, gzip, bzip2, tar, xz
-- `macintosh/`: hfs, stuffit, compactpro, binhex, macbinary, apple_double, resource_fork
+- `common/`: directory, zip, gzip, bzip2, tar, xz, compress
+  - `compress.rs` reads Unix `compress` (`.Z`) files: header check and LZW decoder in
+    one file, with the output measured before it is allocated. Written only from the
+    prose specification in `docs/compress/` (clean-room; see its README).
+- `macintosh/`: hfs, apm, stuffit, compactpro, binhex, macbinary, apple_double, resource_fork
+  - `apm.rs` is the Apple Partition Map container: like `dos/mbr.rs` it yields each
+    partition as an entry and leaves the content to the loader's detection. It is
+    probed before HFS; `hfs.rs` keeps its own map lookup for images it decodes first
+    (UDIF/NDIF, DiskCopy 4.2).
   - `hfs.rs` locates the volume (UDIF/NDIF decoding, raw CD sectors, DiskCopy 4.2,
-    partition maps, HFS wrapper), reads HFS and MFS, and is the container for all four
+    DART through `lisa/image.rs` when `lisa` is enabled, partition maps, HFS wrapper), reads HFS and MFS, and is the container for all four
     volume formats. `hfsplus.rs` is the HFS Plus/HFSX volume reader it dispatches to on
     the volume signature (clean-room, from Apple Technical Note TN1150); it has no
     container of its own and shares `ForkBudget` with the HFS reader.
@@ -184,8 +200,57 @@ Design intent:
     method family. `lzh/` is written only from the prose specification in `docs/lha/`
     (clean-room; see its README).
 - `game/`: scumm, wad, pak, wolf3d
-- `dos/`: fat, mbr, gpt, iso9660, rar, arj
-- `cd_sector.rs`: raw 2352-byte CD sector access shared by hfs and iso9660
+- `dos/`: fat, mbr, gpt, iso9660, udf, rar, arj, cue
+  - `iso9660.rs` reads ISO 9660 and High Sierra volumes, picks the last session of a
+    multi-session image and lists El Torito boot images under `..eltorito/`.
+    `udf.rs` reads UDF volumes (ECMA-167 as profiled by OSTA UDF 1.02 to 2.60):
+    partition maps are resolved to image sectors first (physical, VAT, sparable,
+    metadata), then the directory tree is walked from the file set descriptor. Both
+    are clean-room, written from the standards only. The loader probes ISO 9660 before
+    UDF, so bridge discs stay ISO 9660 unless their ISO root directory is unreadable.
+  - `rar.rs` is the container glue for all three RAR layouts (RAR 1.3/1.4, RAR 1.50 to
+    4.x, RAR 5): volume joining, the choice of decoder by unpack version, solid-chain
+    state, size and checksum verification, skipped-entry diagnostics, and the search
+    for the archive inside a self-extracting executable. `rar_stream/` holds the
+    header parsers and the decoders. `decompress/rar15.rs`, `rar20.rs`, `rar29.rs`
+    (RAR 2.9 blocks, window, members and solid groups) and `ppmd.rs` (the PPMd model
+    and range decoder of RAR 2.9), like the RAR 1.3/1.4 container, are written only
+    from the prose specifications in `docs/rar/` (clean-room; see its README). The
+    header parsers, the RAR 2.9 filter programs (`vm.rs`) and the RAR 5 decoder are
+    vendored.
+  - `cue.rs` parses a cue sheet and cuts the track files it names into one entry per
+    track (data cooked to 2048-byte sectors, audio as little-endian PCM). It never opens
+    a file itself: candidate names go to a lookup closure
+    (`CueBinContainer::from_bytes_with_siblings`). For a sheet on disk the loader passes
+    `read_cue_track_file`, confined to the sheet's directory; for a nested sheet it asks
+    the parent container, as for ARJ and RAR volumes. A consumed track file cannot be
+    told from its name, so `visit_container_recursive` keeps a `cue::SheetIndex` per
+    container that holds back and hides the track files of the sheets it opens. Written
+    only from the prose specification in `docs/cue/` (clean-room; see its README).
+- `next/`: disklabel, ufs
+  - `disklabel.rs` finds a checksummed NeXT disk label at one of its fixed offsets and
+    yields each partition's bytes as a plain entry; it knows nothing about file systems,
+    and the loader's content detection opens the entry again. `ufs.rs` validates the
+    UFS1 superblock at byte 8192, walks the directory tree once at open under an output
+    budget and yields regular files; it is reached directly for a bare volume or through
+    a label's partition entry. Both are written only from the prose specifications in
+    `docs/ufs/` (clean-room; see its README).
+- `beos/`: bfs
+  - `bfs.rs` reads Be File System volumes: superblock probe (byte 512 or 0, either byte
+    order), B+tree directory walk by descent and block-run data streams, with budgeted,
+    loop-safe traversal and skipped-entry diagnostics. Written only from the prose
+    specification in `docs/bfs/` (clean-room; see its README).
+- `lisa/`: image, lisafs
+  - `image.rs` recognises the tag-preserving wrappers (DiskCopy 4.2, DART, raw
+    532-byte-block dumps), undoes the Twiggy and ProFile block orders and hands blocks
+    plus tags to `lisafs.rs`, which finds the volume header through the tags and walks
+    the flat catalog or the catalog tree. `image.rs` also holds the only DART decoder,
+    which `macintosh/hfs.rs` calls for DART images of Macintosh disks. Both are written
+    only from the prose specifications in `docs/lisa/` (clean-room; see its README).
+  - The loader probes the NeXT label, UFS, BFS and Lisa (in that order) before HFS and
+    the boot-sector formats (FAT, GPT, MBR), whose signatures their boot areas can
+    imitate; a Lisa disk in a DiskCopy 4.2 wrapper is not an HFS image.
+- `cd_sector.rs`: raw 2352-byte CD sector access shared by hfs, iso9660 and udf
 
 Each implementation provides container open/visit behavior and metadata extraction matching core contracts.
 

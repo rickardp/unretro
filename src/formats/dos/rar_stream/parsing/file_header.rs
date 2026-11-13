@@ -24,6 +24,8 @@ pub struct FileHeader {
     pub name_size: u16,
     pub attributes: u32,
     pub name: String,
+    /// Name as stored, before any decoding.
+    pub name_bytes: Vec<u8>,
     // Parsed flags
     pub continues_from_previous: bool,
     pub continues_in_next: bool,
@@ -162,7 +164,8 @@ impl FileHeaderParser {
                 have: buffer.len(),
             });
         }
-        let name = String::from_utf8_lossy(&buffer[offset..name_end]).to_string();
+        let name_bytes = buffer[offset..name_end].to_vec();
+        let name = String::from_utf8_lossy(&name_bytes).to_string();
         offset = name_end;
 
         // Parse salt if present (8 bytes after filename).
@@ -195,6 +198,7 @@ impl FileHeaderParser {
             name_size,
             attributes,
             name,
+            name_bytes,
             continues_from_previous,
             continues_in_next,
             is_encrypted,

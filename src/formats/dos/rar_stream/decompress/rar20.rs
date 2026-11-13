@@ -22,6 +22,9 @@ const MAX_CHANNELS: usize = 4;
 const TABLE_LENGTHS: usize = CHANNEL_SYMBOLS * MAX_CHANNELS;
 const PRE_SYMBOLS: usize = 19;
 
+// Largest alphabet of any code built here: the RAR 2.9 main code.
+const CODE_SYMBOLS: usize = 299;
+
 const MAX_CODE_LEN: u32 = 15;
 const QUICK_BITS: u32 = 10;
 
@@ -62,7 +65,7 @@ fn bad_stream() -> RarError {
 }
 
 // MSB-first reader. Look-ahead past the end sees zero bits; consuming them fails.
-struct Bits<'a> {
+pub(super) struct Bits<'a> {
     data: &'a [u8],
     pos: usize,
     buf: u64,
@@ -70,13 +73,25 @@ struct Bits<'a> {
 }
 
 impl<'a> Bits<'a> {
-    fn new(data: &'a [u8]) -> Self {
+    pub(super) fn new(data: &'a [u8]) -> Self {
         Self {
             data,
             pos: 0,
             buf: 0,
             avail: 0,
         }
+    }
+
+    // Discards the rest of a partly consumed byte.
+    pub(super) fn align(&mut self) {
+        let partial = self.avail % 8;
+        self.buf <<= partial;
+        self.avail -= partial;
+    }
+
+    // Whole bytes consumed so far; meaningful on a byte boundary.
+    pub(super) fn byte_pos(&self) -> usize {
+        self.pos - (self.avail / 8) as usize
     }
 
     fn refill(&mut self) {
@@ -91,12 +106,12 @@ impl<'a> Bits<'a> {
     }
 
     // `count` is 1..=16.
-    fn peek(&mut self, count: u32) -> u32 {
+    pub(super) fn peek(&mut self, count: u32) -> u32 {
         self.refill();
         (self.buf >> (64 - count)) as u32
     }
 
-    fn consume(&mut self, count: u32) -> Result<()> {
+    pub(super) fn consume(&mut self, count: u32) -> Result<()> {
         if count > self.avail {
             return Err(truncated());
         }
@@ -106,7 +121,7 @@ impl<'a> Bits<'a> {
     }
 
     // `count` is 0..=16.
-    fn read(&mut self, count: u32) -> Result<u32> {
+    pub(super) fn read(&mut self, count: u32) -> Result<u32> {
         if count == 0 {
             return Ok(0);
         }
@@ -118,31 +133,31 @@ impl<'a> Bits<'a> {
 
 // Canonical prefix code, lengths 1..=15, lower symbols first within a length.
 #[derive(Clone)]
-struct Code {
+pub(super) struct Code {
     // (symbol << 4) | length for codes of at most QUICK_BITS bits; 0 = none.
     quick: [u16; 1 << QUICK_BITS],
     // Per length, left-aligned to 15 bits: first code and one past the last.
     base: [u32; MAX_CODE_LEN as usize + 1],
     limit: [u32; MAX_CODE_LEN as usize + 1],
     first: [u16; MAX_CODE_LEN as usize + 1],
-    symbols: [u16; MAIN_SYMBOLS],
+    symbols: [u16; CODE_SYMBOLS],
 }
 
 impl Code {
-    const fn empty() -> Self {
+    pub(super) const fn empty() -> Self {
         Self {
             quick: [0; 1 << QUICK_BITS],
             base: [0; MAX_CODE_LEN as usize + 1],
             limit: [0; MAX_CODE_LEN as usize + 1],
             first: [0; MAX_CODE_LEN as usize + 1],
-            symbols: [0; MAIN_SYMBOLS],
+            symbols: [0; CODE_SYMBOLS],
         }
     }
 
     // Rejects over-subscribed length sets; incomplete and empty ones are accepted.
-    fn build(&mut self, lengths: &[u8]) -> Result<()> {
+    pub(super) fn build(&mut self, lengths: &[u8]) -> Result<()> {
         *self = Self::empty();
-        if lengths.len() > MAIN_SYMBOLS {
+        if lengths.len() > CODE_SYMBOLS {
             return Err(bad_code());
         }
         let mut count = [0u32; MAX_CODE_LEN as usize + 1];
@@ -196,7 +211,7 @@ impl Code {
         Ok(())
     }
 
-    fn decode(&self, bits: &mut Bits<'_>) -> Result<u16> {
+    pub(super) fn decode(&self, bits: &mut Bits<'_>) -> Result<u16> {
         let window = bits.peek(MAX_CODE_LEN);
         let entry = self.quick[(window >> (MAX_CODE_LEN - QUICK_BITS)) as usize];
         if entry != 0 {
@@ -372,6 +387,11 @@ impl Rar20Decoder {
     /// Returns exactly `unpacked_size` bytes. Any malformed input is an
     /// error and leaves the decoder failed until [`reset`](Self::reset).
     pub fn decompress(&mut self, data: &[u8], unpacked_size: u64) -> Result<Vec<u8>> {
+        // An empty continuation member reads nothing, so it does not depend
+        // on the state either, damaged or not.
+        if self.started && unpacked_size == 0 {
+            return Ok(Vec::new());
+        }
         if self.failed {
             return Err(bad_stream());
         }
@@ -796,7 +816,9 @@ mod tests {
         assert!(decoder.decompress(&hex("67"), 13).is_err());
         assert!(decoder.is_failed());
         assert!(decoder.decompress(&hex("67 4f 50"), 13).is_err());
-        assert!(decoder.decompress(&[], 0).is_err());
+        // An empty continuation member is exempt, and changes nothing.
+        assert_eq!(decoder.decompress(&[], 0).unwrap(), b"");
+        assert!(decoder.decompress(&hex("67 4f 50"), 13).is_err());
         decoder.reset();
         assert_eq!(decoder.decompress(&hex(V1), 6).unwrap(), b"abcabc");
     }

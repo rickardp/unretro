@@ -36,6 +36,12 @@ jobs:
         run: cargo test --no-default-features --features std,macintosh
       - name: Run tests (amiga only)
         run: cargo test --no-default-features --features std,amiga
+      - name: Run tests (next only)
+        run: cargo test --no-default-features --features std,next
+      - name: Run tests (beos only)
+        run: cargo test --no-default-features --features std,beos
+      - name: Run tests (lisa only)
+        run: cargo test --no-default-features --features std,lisa
 
   clippy:
     name: Clippy

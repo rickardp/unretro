@@ -64,13 +64,16 @@ Default features are `std` + `full`.
 
 | Feature | Formats |
 |---|---|
-| `common` | ZIP, GZIP, BZIP2, TAR |
+| `common` | ZIP, GZIP, BZIP2, TAR, Unix compress (`.Z`) |
 | `xz` | XZ, legacy LZMA (`.lzma`) |
-| `macintosh` | HFS (incl. MFS, HFS Plus, HFSX), StuffIt, CompactPro, BinHex, MacBinary, AppleSingle, AppleDouble, Resource Fork |
+| `macintosh` | HFS (incl. MFS, HFS Plus, HFSX), Apple Partition Map, StuffIt, CompactPro, BinHex, MacBinary, AppleSingle, AppleDouble, Resource Fork |
 | `amiga` | LHA/LZH, ADF (OFS/FFS disk images) |
 | `game` | SCUMM (incl. `MONSTER.SOU` speech bundles), iMUSE bundles, WAD, PAK, Wolf3D |
-| `dos` | FAT, MBR, GPT, ISO 9660 (Joliet, Rock Ridge, raw 2352-byte sectors), RAR, ARJ |
-| `full` / `all` | `common` + `xz` + `macintosh` + `amiga` + `game` + `dos` |
+| `dos` | FAT, MBR, GPT, ISO 9660 (Joliet, Rock Ridge, High Sierra, El Torito boot images, multi-session, raw 2352-byte sectors), UDF, RAR, ARJ, CUE/BIN CD images |
+| `next` | NeXT disk labels, UFS (UFS1: NeXTSTEP, OPENSTEP, Rhapsody, BSD) |
+| `beos` | Be File System (BFS) |
+| `lisa` | Apple Lisa file system (DiskCopy 4.2 with tags, DART, raw ProFile dumps) |
+| `full` / `all` | `common` + `xz` + `macintosh` + `amiga` + `game` + `dos` + `next` + `beos` + `lisa` |
 
 Feature flags are described in [Cargo.toml](Cargo.toml). ZIP (stored, deflate, bzip2, LZMA
 and XZ entries), GZIP, BZIP2 and TAR are decoded natively and are available wherever `common`
@@ -91,10 +94,59 @@ specification in [docs/lha/](docs/lha/README.md).
 
 HFS Plus and HFSX volumes are read natively wherever `macintosh` is enabled, including
 `no_std` and `wasm32`, through the same `ContainerFormat::Hfs` as HFS and MFS: bare
-images, DiskCopy 4.2, Apple Partition Map, UDIF/NDIF disk images, raw CD sector dumps and
-HFS wrappers. Hard links resolve to their content. The journal is not replayed and files
+images, DiskCopy 4.2, DART (with `lisa` also enabled), UDIF/NDIF
+disk images, raw CD sector dumps and HFS wrappers. A disk image with an Apple Partition
+Map opens as `ContainerFormat::Apm`, which lists its partitions as entries; the volumes
+(HFS, HFS Plus, BFS, ...) are found inside them. Hard links resolve to their content. The journal is not replayed and files
 using transparent compression (decmpfs) are not decoded; see
 [docs/USAGE.md](docs/USAGE.md#hfs-plus-and-hfsx-volumes) for the full list.
+
+UDF disc images (revisions 1.02 to 2.60; physical, virtual/VAT, sparable and metadata
+partitions) are read natively wherever `dos` is enabled, including `no_std` and
+`wasm32`, as `ContainerFormat::Udf`. A bridge disc with a usable ISO 9660 volume keeps
+opening as ISO 9660. ISO 9660 images also cover High Sierra volumes, El Torito boot
+images (listed under `..eltorito/`) and multi-session images (the last session is
+presented); see [docs/USAGE.md](docs/USAGE.md#udf-disc-images) and
+[docs/USAGE.md](docs/USAGE.md#iso-9660-cd-rom-images).
+
+Unix `compress` files (`.Z`, `.tar.Z`, `.taz`; maximum code widths 9 to 16, with and
+without block mode) are decoded natively wherever `common` is enabled, including `no_std`
+and `wasm32`, as `ContainerFormat::Compress`. The reader was written from the format
+specification in [docs/compress/](docs/compress/README.md); see
+[docs/USAGE.md](docs/USAGE.md#unix-compress-files).
+
+CUE/BIN CD images are read natively wherever `dos` is enabled, including `no_std` and
+`wasm32`, as `ContainerFormat::CueBin`: a `.cue` sheet lists one entry per track, data
+tracks cooked to 2048-byte sectors (`trackNN.img`, which open as the file system they
+hold) and audio tracks as headerless little-endian PCM (`trackNN.pcm`). Track files are
+looked up next to the sheet, on disk or in the same archive; `WAVE`, `MP3` and `AIFF`
+track files are not read. The reader was written from the format specification in
+[docs/cue/](docs/cue/README.md); see [docs/USAGE.md](docs/USAGE.md#cuebin-cd-images).
+
+NeXT disk labels (`NeXT`, `dlV2`, `dlV3`) on NeXTSTEP, OPENSTEP and Rhapsody floppies,
+hard disks and CD-ROMs, and UFS1 volumes inside them or on their own (4.2BSD/4.3BSD and
+4.4BSD layouts, big- and little-endian), are read natively wherever `next` is enabled,
+including `no_std` and `wasm32`, as `ContainerFormat::NextDisklabel` and
+`ContainerFormat::Ufs`. Symbolic links and device nodes are not listed and UFS2 is not
+read. The readers were written from the format specifications in
+[docs/ufs/](docs/ufs/README.md); see [docs/USAGE.md](docs/USAGE.md#next-disk-labels) and
+[docs/USAGE.md](docs/USAGE.md#ufs-volumes).
+
+Be File System volumes written by BeOS (Intel and PowerPC) and Haiku (little- and
+big-endian, block sizes 1024 to 8192, bare or inside an MBR partition) are read natively
+wherever `beos` is enabled, including `no_std` and `wasm32`, as `ContainerFormat::Bfs`.
+BeOS attributes and symbolic links are not read and the log is not replayed. The reader
+was written from the format specification in [docs/bfs/](docs/bfs/README.md); see
+[docs/USAGE.md](docs/USAGE.md#beos-volumes-bfs).
+
+Apple Lisa file system volumes (on-disk versions 14, 15 and 17) are read natively
+wherever `lisa` is enabled, including `no_std` and `wasm32`, as
+`ContainerFormat::LisaFs`: DiskCopy 4.2 images with tag data (3.5-inch, Twiggy and
+hard-disk images), DART images, and raw 532-byte-block ProFile dumps with or without a
+BLU header. Images without tag data cannot be read, and timestamps and file labels are
+not surfaced. The reader was written from the format specification in
+[docs/lisa/](docs/lisa/README.md); see
+[docs/USAGE.md](docs/USAGE.md#apple-lisa-disk-images).
 
 Classic Mac resources always appear as `<owner>/..namedfork/rsrc/<TYPE>/<name or #id>`,
 whether the fork comes from MacBinary/AppleSingle/archives/HFS, an AppleDouble sidecar

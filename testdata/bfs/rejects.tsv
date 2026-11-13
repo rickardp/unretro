@@ -1,0 +1,19 @@
+name	base	offset	original	patched	expect	haiku	linux	grub	reason
+magic1	tiny	544	31534642	32534642	reject	refuses	refuses	refuses	magic1 reads BFS2
+magic2	tiny	580	311012dd	311012dc	reject	refuses	refuses	refuses	magic2 0xDC121031 instead of 0xDD121031
+magic3	tiny	624	0e83b615	0e83b614	reject	refuses	refuses	refuses	magic3 0x14B6830E instead of 0x15B6830E
+byteorder-garbage	tiny	548	45474942	58585858	reject	refuses	refuses	lists	byte order field is XXXX
+byteorder-swapped	tiny	548	45474942	42494745	reject	refuses	refuses	lists	byte order field stored as BIGE while every other field is little-endian
+blocksize-1000	tiny	552	00040000	e8030000	reject	refuses	refuses	refuses	block size 1000, not a power of two
+blockshift-11	tiny	556	0a000000	0b000000	reject	refuses	refuses	refuses	block shift 11 with block size 1024
+inodesize-512	tiny	576	00040000	00020000	reject	refuses	mounts	lists	inode size 512 differs from block size 1024
+numags-0	tiny	592	01000000	00000000	reject	refuses	mounts	lists	zero allocation groups
+numags-3	tiny	592	01000000	03000000	reject	refuses	mounts	lists	three allocation groups claimed, 1024 blocks fit in one
+agshift-0	tiny	588	0d000000	00000000	reject	refuses	mounts	lists	allocation group shift 0
+agshift-17	tiny	588	0d000000	11000000	reject	refuses	mounts	lists	allocation group shift 17
+blocksperag-0	tiny	584	01000000	00000000	reject	refuses	mounts	lists	zero bitmap blocks per allocation group
+numblocks-5	tiny	560	0004000000000000	0500000000000000	reject	refuses	mounts	lists	five blocks in the volume
+numblocks-huge	tiny	560	0004000000000000	0000000000000001	reject	refuses	mounts	lists	block count 2^56, far beyond the image
+blocksize-512	tiny	552	000400000a000000	0002000009000000	either	refuses	refuses	refuses	block size 512 with shift 9 (inode size left at 1024)
+root-ag-9	tiny	628	00000000	09000000	either	refuses	refuses	refuses	root directory run in allocation group 9 of 1: superblock sane, volume unusable
+root-not-inode	tiny	632	0202	0100	either	refuses	refuses	refuses	root directory run points at block 1, the block bitmap (no inode magic there)

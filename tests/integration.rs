@@ -2080,20 +2080,38 @@ fn test_arj_volume_set_inside_an_archive_is_joined() {
     assert_eq!(shallow.len(), 5, "{shallow:?}");
 }
 
-// One stored RAR4 volume: (name, bytes of this piece, size of the whole
+#[cfg(feature = "dos")]
+fn rar_crc32(data: &[u8]) -> u32 {
+    !data.iter().fold(!0u32, |crc, &byte| {
+        (0..8).fold(crc ^ u32::from(byte), |crc, _| {
+            (crc >> 1) ^ (0xEDB8_8320 & (crc & 1).wrapping_neg())
+        })
+    })
+}
+
+// One stored RAR4 volume: (name, bytes of this piece, bytes of the whole
 // file, continues from the previous volume, continues in the next).
 #[cfg(feature = "dos")]
-fn build_rar4_volume(pieces: &[(&str, &[u8], usize, bool, bool)], more: bool) -> Vec<u8> {
+type RarPiece<'a> = (&'a str, &'a [u8], &'a [u8], bool, bool);
+
+#[cfg(feature = "dos")]
+fn build_rar4_volume(pieces: &[RarPiece<'_>], more: bool) -> Vec<u8> {
     let mut out = b"Rar!\x1a\x07\x00".to_vec();
-    out.extend_from_slice(&[0, 0, 0x73, 0x11, 0x00, 13, 0, 0, 0, 0, 0, 0, 0]);
+    // The archive header is only accepted with its checksum.
+    let archive_header = [0x73, 0x11, 0x00, 13, 0, 0, 0, 0, 0, 0, 0];
+    out.extend_from_slice(&(rar_crc32(&archive_header) as u16).to_le_bytes());
+    out.extend_from_slice(&archive_header);
     for &(name, data, whole, before, after) in pieces {
         let flags = 0x8000 | u16::from(before) | (u16::from(after) << 1);
         out.extend_from_slice(&[0, 0, 0x74]);
         out.extend_from_slice(&flags.to_le_bytes());
         out.extend_from_slice(&(32 + name.len() as u16).to_le_bytes());
         out.extend_from_slice(&(data.len() as u32).to_le_bytes());
-        out.extend_from_slice(&(whole as u32).to_le_bytes());
-        out.extend_from_slice(&[0; 9]);
+        out.extend_from_slice(&(whole.len() as u32).to_le_bytes());
+        out.push(0);
+        // The reader checks it on the last piece.
+        out.extend_from_slice(&rar_crc32(whole).to_le_bytes());
+        out.extend_from_slice(&[0; 4]);
         out.extend_from_slice(&[29, 0x30]);
         out.extend_from_slice(&(name.len() as u16).to_le_bytes());
         out.extend_from_slice(&0x20u32.to_le_bytes());
@@ -2109,16 +2127,16 @@ fn rar_set() -> [Vec<u8>; 3] {
     [
         build_rar4_volume(
             &[
-                ("a.txt", b"a", 1, false, false),
-                ("big.bin", b"one-", 13, false, true),
+                ("a.txt", b"a", b"a", false, false),
+                ("big.bin", b"one-", b"one-two-three", false, true),
             ],
             true,
         ),
-        build_rar4_volume(&[("big.bin", b"two-", 13, true, true)], true),
+        build_rar4_volume(&[("big.bin", b"two-", b"one-two-three", true, true)], true),
         build_rar4_volume(
             &[
-                ("big.bin", b"three", 13, true, false),
-                ("z.txt", b"z", 1, false, false),
+                ("big.bin", b"three", b"one-two-three", true, false),
+                ("z.txt", b"z", b"z", false, false),
             ],
             false,
         ),
@@ -2179,6 +2197,78 @@ fn test_rar_volume_set_inside_an_archive_is_joined() {
     );
 }
 
+// docs/rar/old-container.md sections 9.1 and 9.2: the same solid pair of
+// RAR 1.5 streams in the RAR 1.3 container and in the RAR4 format.
+#[cfg(feature = "dos")]
+const RAR13_SOLID_PAIR: [u8; 73] = [
+    0x52, 0x45, 0x7E, 0x5E, 0x07, 0x00, 0x08, 0x09, 0x00, 0x00, 0x00, 0x0C, 0x00, 0x00, 0x00, 0xC8,
+    0xE1, 0x1A, 0x00, 0x00, 0xA0, 0x21, 0x1C, 0x20, 0x00, 0x02, 0x05, 0x03, 0x41, 0x2E, 0x54, 0x58,
+    0x54, 0x1B, 0xD4, 0x7A, 0x5F, 0x58, 0x2F, 0x5F, 0x27, 0x87, 0x05, 0x00, 0x00, 0x00, 0x0B, 0x00,
+    0x00, 0x00, 0xF6, 0x70, 0x1A, 0x00, 0x00, 0xA0, 0x21, 0x1C, 0x20, 0x00, 0x02, 0x05, 0x03, 0x42,
+    0x2E, 0x54, 0x58, 0x54, 0xF3, 0xF0, 0xD2, 0xCA, 0x08,
+];
+
+#[cfg(feature = "dos")]
+const RAR15_SOLID_PAIR: [u8; 108] = [
+    0x52, 0x61, 0x72, 0x21, 0x1A, 0x07, 0x00, 0x3B, 0xD0, 0x73, 0x08, 0x00, 0x0D, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x34, 0xF9, 0x74, 0x00, 0x80, 0x25, 0x00, 0x09, 0x00, 0x00, 0x00, 0x0C,
+    0x00, 0x00, 0x00, 0x00, 0x73, 0xA3, 0xB1, 0x9F, 0x00, 0x00, 0x21, 0x21, 0x0F, 0x33, 0x05, 0x00,
+    0x20, 0x00, 0x00, 0x00, 0x41, 0x2E, 0x54, 0x58, 0x54, 0x1B, 0xD4, 0x7A, 0x5F, 0x58, 0x2F, 0x5F,
+    0x27, 0x87, 0x07, 0x71, 0x74, 0x00, 0x80, 0x25, 0x00, 0x05, 0x00, 0x00, 0x00, 0x0B, 0x00, 0x00,
+    0x00, 0x00, 0x46, 0xE0, 0x15, 0x54, 0x00, 0x00, 0x21, 0x21, 0x0F, 0x33, 0x05, 0x00, 0x20, 0x00,
+    0x00, 0x00, 0x42, 0x2E, 0x54, 0x58, 0x54, 0xF3, 0xF0, 0xD2, 0xCA, 0x08,
+];
+
+#[cfg(feature = "dos")]
+#[test]
+fn test_rar_old_versions_are_detected_and_verified() {
+    let pair = |root: &str| {
+        vec![
+            (format!("{root}/A.TXT"), b"hello hello ".to_vec()),
+            (format!("{root}/B.TXT"), b"hello!hellh".to_vec()),
+        ]
+    };
+    // By content: neither name says RAR.
+    for archive in [RAR13_SOLID_PAIR.as_slice(), RAR15_SOLID_PAIR.as_slice()] {
+        assert_eq!(
+            unretro::detect_format("PAIR.DAT", Some(archive)),
+            Some(unretro::ContainerFormat::Rar)
+        );
+        let (leaves, report) = leaves_with_report(archive.to_vec(), "PAIR.DAT");
+        assert!(report.diagnostics.is_empty(), "{:?}", report.diagnostics);
+        assert_eq!(leaves, pair("PAIR.DAT"));
+    }
+    // The signature alone is four printable characters.
+    assert_eq!(
+        unretro::detect_format("NOTE.TXT", Some(b"RE~^ is not an archive".as_slice())),
+        None
+    );
+
+    // A damaged file is left out and reported; the rest is still listed.
+    // Here the damage is in the stream both files depend on.
+    for (archive, at) in [
+        (RAR13_SOLID_PAIR.as_slice(), 34),
+        (RAR15_SOLID_PAIR.as_slice(), 58),
+    ] {
+        let mut damaged = archive.to_vec();
+        damaged[at] ^= 0x40;
+        let (leaves, report) = leaves_with_report(damaged, "PAIR.RAR");
+        assert!(leaves.len() < 2, "{leaves:?}");
+        assert!(!leaves.contains(&pair("PAIR.RAR")[0]));
+        assert!(!report.has_root_failures());
+        assert_eq!(report.diagnostics.len(), 1, "{:?}", report.diagnostics);
+        assert_eq!(
+            report.diagnostics[0].code,
+            TraversalDiagnosticCode::ContainerEntriesSkipped
+        );
+        assert!(
+            report.diagnostics[0].message.contains("'A.TXT'"),
+            "{}",
+            report.diagnostics[0].message
+        );
+    }
+}
+
 #[cfg(all(feature = "dos", feature = "std"))]
 #[test]
 fn test_rar_volume_set_on_disk_is_joined() {
@@ -2210,8 +2300,31 @@ fn test_rar_volume_set_on_disk_is_joined() {
     assert!(report.diagnostics.is_empty(), "{:?}", report.diagnostics);
     assert_eq!(leaves, joined_rar_set(&first_path.display().to_string()));
 
-    // A lone first volume leaves the split file out instead of truncating it.
+    // A missing middle volume leaves the split file out instead of truncating
+    // it; the file that lies entirely in the last volume is still read.
     std::fs::remove_file(dir.0.join("set.part2.rar")).unwrap();
+    let (leaves, report) = leaves_at(&first_path);
+    let names: Vec<_> = leaves
+        .iter()
+        .map(|(path, _)| path.rsplit('/').next().unwrap())
+        .collect();
+    assert_eq!(names, ["a.txt", "z.txt"]);
+    assert_eq!(report.diagnostics.len(), 1, "{:?}", report.diagnostics);
+    assert!(
+        report.diagnostics[0]
+            .message
+            .contains("'big.bin' continues in the next volume"),
+        "{}",
+        report.diagnostics[0].message
+    );
+
+    // The directory still lists the set once: the last volume is reached
+    // from the first.
+    let (leaves, _) = leaves_at(&dir.0);
+    assert_eq!(leaves.len(), 2, "{leaves:?}");
+
+    // A lone first volume.
+    std::fs::remove_file(dir.0.join("set.part3.rar")).unwrap();
     let (leaves, report) = leaves_at(&first_path);
     assert_eq!(leaves.len(), 1, "{leaves:?}");
     assert!(!report.has_root_failures());

@@ -40,6 +40,8 @@ class ContainerFormat:
     Bfs: ContainerFormat
     CueBin: ContainerFormat
     LisaFs: ContainerFormat
+    Udf: ContainerFormat
+    Apm: ContainerFormat
     Unknown: ContainerFormat
 
     @property

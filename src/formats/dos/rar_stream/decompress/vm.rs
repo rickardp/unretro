@@ -5,11 +5,19 @@
 
 use crate::formats::dos::rar_stream::crc32::crc32;
 
+use std::collections::VecDeque;
+
 use super::byte_search;
 
 /// VM memory size (256KB)
 pub const VM_MEMSIZE: usize = 0x40000;
 pub const VM_MEMMASK: u32 = (VM_MEMSIZE - 1) as u32;
+
+/// Longest filter block: the work area of the filter machine.
+const MAX_BLOCK: u32 = 0x3C000;
+
+/// Most filters waiting at once.
+const MAX_QUEUED: usize = 65536;
 
 /// Maximum channels for audio/delta filters
 pub const MAX_UNPACK_CHANNELS: usize = 1024;
@@ -82,8 +90,6 @@ pub struct PreparedFilter {
     pub block_start: u64,
     /// Block length
     pub block_length: u32,
-    /// Window mask for indexing
-    pub window_mask: u32,
 }
 
 /// Stored filter definition (reusable)
@@ -98,12 +104,14 @@ pub struct RarVM {
     mem: Vec<u8>,
     /// Stored filter definitions (by index)
     filters: Vec<StoredFilter>,
-    /// Filter execution stack
-    stack: Vec<PreparedFilter>,
+    /// Filters waiting for their blocks, oldest first
+    stack: VecDeque<PreparedFilter>,
     /// Last used filter index
     last_filter: usize,
     /// Old filter block lengths (for reuse)
     old_lengths: Vec<u32>,
+    /// End of the block queued most recently; blocks arrive in order.
+    last_end: u64,
 }
 
 impl RarVM {
@@ -111,9 +119,10 @@ impl RarVM {
         Self {
             mem: vec![0u8; VM_MEMSIZE + 4],
             filters: Vec::new(),
-            stack: Vec::new(),
+            stack: VecDeque::new(),
             last_filter: 0,
             old_lengths: Vec::new(),
+            last_end: 0,
         }
     }
 
@@ -123,6 +132,7 @@ impl RarVM {
         self.stack.clear();
         self.last_filter = 0;
         self.old_lengths.clear();
+        self.last_end = 0;
     }
 
     /// Identify filter type from VM code using CRC
@@ -301,16 +311,9 @@ impl RarVM {
         }
     }
 
-    /// Add VM code and create filter
-    /// `total_written` is the absolute total bytes written so far (not wrapped)
-    /// `window_mask` is used to wrap block_start for window access
-    pub fn add_code(
-        &mut self,
-        first_byte: u8,
-        code: &[u8],
-        total_written: u64,
-        window_mask: u32,
-    ) -> bool {
+    /// Parses a filter record met at group position `total_written` and
+    /// queues its filter. False: the record is corrupt.
+    pub fn add_code(&mut self, first_byte: u8, code: &[u8], total_written: u64) -> bool {
         let mut bit_pos = 0;
 
         #[cfg(test)]
@@ -324,12 +327,17 @@ impl RarVM {
         let filt_pos = if (first_byte & 0x80) != 0 {
             let pos = Self::read_data(code, &mut bit_pos);
             if pos == 0 {
-                // Reset filters
+                // Reset filters; what is still queued never runs.
                 self.filters.clear();
                 self.old_lengths.clear();
+                self.stack.clear();
+                self.last_end = 0;
             }
             pos.saturating_sub(1) as usize
         } else {
+            if self.filters.is_empty() {
+                return false;
+            }
             self.last_filter
         };
 
@@ -341,9 +349,9 @@ impl RarVM {
         let new_filter = filt_pos == self.filters.len();
 
         // Read block_start (offset from current position)
-        let mut block_start = Self::read_data(code, &mut bit_pos);
+        let mut block_start = u64::from(Self::read_data(code, &mut bit_pos));
         if (first_byte & 0x40) != 0 {
-            block_start = block_start.wrapping_add(258);
+            block_start += 258;
         }
 
         // Read block_length
@@ -376,7 +384,7 @@ impl RarVM {
 
         // Compute absolute block_start (where filter should execute in output stream)
         // block_start from code is an offset from current total_written position
-        let absolute_block_start = total_written + block_start as u64;
+        let absolute_block_start = total_written.saturating_add(block_start);
 
         // Read initial registers
         let mut init_r = [0u32; 7];
@@ -485,232 +493,74 @@ impl RarVM {
             filter_type, absolute_block_start, block_start, total_written, block_length
         );
 
-        let filter = PreparedFilter {
+        let largest = match filter_type {
+            StandardFilter::Delta | StandardFilter::Rgb | StandardFilter::Audio => MAX_BLOCK / 2,
+            _ => MAX_BLOCK,
+        };
+        if block_length > largest
+            || absolute_block_start < self.last_end
+            || self.stack.len() >= MAX_QUEUED
+        {
+            return false;
+        }
+        if block_length == 0 {
+            return true;
+        }
+        self.last_end = absolute_block_start + u64::from(block_length);
+
+        self.stack.push_back(PreparedFilter {
             filter_type,
             init_r,
-            block_start: absolute_block_start as u64,
+            block_start: absolute_block_start,
             block_length,
-            window_mask,
-        };
-
-        self.stack.push(filter);
+        });
         true
     }
 
-    /// Check if there are pending filters
-    pub fn has_pending_filters(&self) -> bool {
-        !self.stack.is_empty()
-    }
-
-    /// Find the earliest filter that is ready to execute (block_end <= total_written)
-    /// Returns the index and block_start of the earliest ready filter
-    pub fn find_ready_filter(&self, total_written: u64) -> Option<(usize, u64)> {
-        let mut earliest_idx = None;
-        let mut earliest_start = u64::MAX;
-
-        for (idx, filter) in self.stack.iter().enumerate() {
-            let block_length = (filter.block_length & VM_MEMMASK) as u64;
-            let block_end = filter.block_start + block_length;
-
-            // Filter is ready if we've written past its end
-            if block_end <= total_written && filter.block_start < earliest_start {
-                #[cfg(test)]
-                if filter.block_start < 1600000 && filter.block_start > 1400000 {
-                    eprintln!(
-                        "  find_ready_filter: found candidate idx={}, start={}, end={}, total_written={}",
-                        idx, filter.block_start, block_end, total_written
-                    );
-                }
-                earliest_start = filter.block_start;
-                earliest_idx = Some(idx);
-            }
-        }
-
-        earliest_idx.map(|idx| (idx, earliest_start))
-    }
-
-    /// Get the next filter's block start position
-    pub fn next_filter_pos(&self) -> Option<u64> {
-        self.stack.first().map(|f| f.block_start)
-    }
-
-    /// Get the earliest filter end position (block_start + block_length)
-    pub fn next_filter_end(&self) -> Option<u64> {
+    /// Start and end position of the oldest queued block.
+    pub fn head(&self) -> Option<(u64, u64)> {
         self.stack
-            .iter()
-            .map(|f| f.block_start + (f.block_length & VM_MEMMASK) as u64)
-            .min()
+            .front()
+            .map(|f| (f.block_start, f.block_start + u64::from(f.block_length)))
     }
 
-    /// Peek at the next filter without removing it
-    pub fn peek_filter(&self) -> Option<&PreparedFilter> {
-        self.stack.first()
+    /// Forgets the queued filters; the stored programs stay.
+    pub fn drop_queue(&mut self) {
+        self.stack.clear();
+        self.last_end = 0;
     }
 
-    /// Execute pending filters on the sliding window buffer.
-    /// total_written is the absolute total bytes written so far.
-    /// window is the circular sliding window (read-only!).
-    /// window_mask is used for wrapping.
-    /// Returns (filter_end_position, filtered_data) if a filter was executed.
-    /// The filtered data should be written directly to output, NOT back to window.
-    pub fn execute_filter_at_index(
-        &mut self,
-        filter_idx: usize,
-        window: &[u8],
-        window_mask: usize,
-        total_written: u64,
-    ) -> Option<(u64, &[u8])> {
-        if filter_idx >= self.stack.len() {
+    /// Runs the oldest queued filter on its block, read from the ring
+    /// `window`; `file_offset` is the block's position in its member.
+    pub fn run_head(&mut self, window: &[u8], file_offset: u32) -> Option<&[u8]> {
+        if window.is_empty() {
+            return None;
+        }
+        let mut filter = self.stack.pop_front()?;
+        filter.init_r[6] = file_offset;
+        let block_length = filter.block_length as usize;
+        if block_length > VM_MEMSIZE || block_length > window.len() {
             return None;
         }
 
-        // Remove and execute the filter at the specified index
-        let filter = self.stack.remove(filter_idx);
-        let block_start = filter.block_start;
-        let block_length = (filter.block_length & VM_MEMMASK) as usize;
-        let block_end = block_start + block_length as u64;
-
-        #[cfg(test)]
-        eprintln!(
-            "EXECUTE filter {:?}: start={}, len={}, total_written={}",
-            filter.filter_type, block_start, block_length, total_written
-        );
-        #[cfg(not(test))]
-        let _ = total_written;
-
-        // Copy data from window to VM memory using bulk copy when possible
-        let copy_len = block_length.min(VM_MEMSIZE);
-        let window_start = (block_start as usize) & window_mask;
-
-        // Check if we can do a contiguous copy (no wrap in window)
-        if window_start + copy_len <= window.len() {
-            self.mem[..copy_len].copy_from_slice(&window[window_start..window_start + copy_len]);
+        let window_start = (filter.block_start % window.len() as u64) as usize;
+        if window_start + block_length <= window.len() {
+            self.mem[..block_length]
+                .copy_from_slice(&window[window_start..window_start + block_length]);
         } else {
-            // Slow path: wrapping copy
             let first_part = window.len() - window_start;
             self.mem[..first_part].copy_from_slice(&window[window_start..]);
-            self.mem[first_part..copy_len].copy_from_slice(&window[..copy_len - first_part]);
+            self.mem[first_part..block_length]
+                .copy_from_slice(&window[..block_length - first_part]);
         }
 
-        #[cfg(test)]
-        {
-            if block_start == 46592 {
-                // Show window contents at filter start
-                eprintln!(
-                    "  WINDOW at filter start: window[46592..46608] = {:02x?}",
-                    (46592..46608)
-                        .map(|p| window[p & window_mask])
-                        .collect::<Vec<_>>()
-                );
-                // Show input bytes
-                eprintln!("  INPUT to filter: mem[0..16] = {:02x?}", &self.mem[0..16]);
-                eprintln!(
-                    "  INPUT to filter: mem[9456..9472] = {:02x?}",
-                    &self.mem[9456..9472]
-                );
-            }
-        }
-
-        #[cfg(test)]
-        {
-            eprintln!("  init_r: {:?}", filter.init_r);
-        }
-
-        // Execute filter
-        let (filtered_data_offset, filtered_size) = self.execute_filter(&filter, block_length);
-
-        #[cfg(test)]
-        eprintln!(
-            "  result: filtered_data_offset={}, filtered_size={}",
-            filtered_data_offset, filtered_size
-        );
-
-        // Return a slice into VM memory — no allocation needed.
-        // The caller must use this before the next execute_filter call.
-        let output_size = filtered_size.max(block_length);
-        let data = if filtered_size > 0 && filtered_size <= output_size {
-            &self.mem[filtered_data_offset..filtered_data_offset + filtered_size]
+        let (offset, size) = self.execute_filter(&filter, block_length);
+        // A filter that declines its block leaves it as it is.
+        Some(if size == block_length {
+            &self.mem[offset..offset + size]
         } else {
-            // Filter failed or no output - return original data
-            &self.mem[0..block_length]
-        };
-
-        Some((block_end, data))
-    }
-
-    /// Execute pending filters on the output buffer
-    /// write_pos is the absolute total bytes written so far
-    /// The buffer is the full output buffer, not the sliding window
-    pub fn execute_filters(
-        &mut self,
-        buffer: &mut [u8],
-        _write_pos: u64,
-    ) -> Option<(usize, usize)> {
-        if self.stack.is_empty() {
-            return None;
-        }
-
-        let filter = &self.stack[0];
-        let block_start = filter.block_start as usize;
-        let block_length = (filter.block_length & VM_MEMMASK) as usize;
-
-        // Check if we've written enough data to cover this filter's range
-        if block_start + block_length > buffer.len() {
-            return None;
-        }
-
-        // Now safe to remove and execute
-        let filter = self.stack.remove(0);
-
-        #[cfg(test)]
-        eprintln!(
-            "EXECUTE filter {:?}: start={}, len={}, buffer.len={}",
-            filter.filter_type,
-            block_start,
-            block_length,
-            buffer.len()
-        );
-
-        // Copy data to VM memory
-        let copy_len = block_length.min(VM_MEMSIZE);
-        self.mem[..copy_len].copy_from_slice(&buffer[block_start..block_start + copy_len]);
-
-        #[cfg(test)]
-        {
-            eprintln!("  init_r: {:?}", filter.init_r);
-            if block_start <= 4096 && block_start + block_length > 4096 {
-                let _offset = 4096 - block_start;
-                eprintln!(
-                    "  BEFORE buffer[4096..4104]: {:02x?}",
-                    &buffer[4096..4104.min(buffer.len())]
-                );
-            }
-        }
-
-        // Execute filter
-        let (filtered_data, filtered_size) = self.execute_filter(&filter, block_length);
-
-        #[cfg(test)]
-        eprintln!(
-            "  result: filtered_data={}, filtered_size={}",
-            filtered_data, filtered_size
-        );
-
-        if filtered_size > 0 && filtered_size <= block_length {
-            // Copy filtered data back
-            buffer[block_start..block_start + filtered_size]
-                .copy_from_slice(&self.mem[filtered_data..filtered_data + filtered_size]);
-
-            #[cfg(test)]
-            if block_start <= 4096 && block_start + block_length > 4096 {
-                eprintln!(
-                    "  AFTER buffer[4096..4104]: {:02x?}",
-                    &buffer[4096..4104.min(buffer.len())]
-                );
-            }
-        }
-
-        Some((block_start, filtered_size.max(block_length)))
+            &self.mem[..block_length]
+        })
     }
 
     /// Execute a single filter

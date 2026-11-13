@@ -47,7 +47,7 @@ to be read by the implementer.
 | Hydrogenaudio Knowledgebase, "Cue sheet" (`https://wiki.hydrogenaudio.org/index.php?title=Cue_sheet`, Internet Archive capture of 2023) | documentation | GFDL / CC BY-SA as stated by the site |
 | Wikipedia, "Cue sheet (computing)" | documentation | CC BY-SA 4.0 |
 | ECMA-130, "Data interchange on read-only 120 mm optical data disks (CD-ROM)", 2nd edition, section 14 (sector structure). Its field sizes were taken as restated in the header comment and constants of libcdio's `include/cdio/sector.h` and then checked on real images. | standard | freely available ECMA standard |
-| libcdio `include/cdio/sector.h` and `lib/driver/image/bincue.c` (release 2.2.0 and the development head of November 2026) | tool source, read for facts | GPL-3.0-or-later |
+| libcdio `include/cdio/sector.h` and `lib/driver/image/bincue.c` (source: development head as fetched in November 2026; tool: release 2.2.0) | tool source, read for facts | GPL-3.0-or-later |
 | bchunk `bchunk.c` (version 1.2.2, `https://github.com/hessu/bchunk`) | tool source, read for facts | GPL-2.0-or-later |
 | MAME `src/lib/util/cdrom.cpp` (cue sheet parsing used by `chdman`) | tool source, read for facts | BSD-3-Clause |
 | DOSBox Staging `src/dos/cdrom_image.cpp` | tool source, read for facts | GPL-2.0-or-later |

@@ -77,6 +77,10 @@ pub enum PyContainerFormat {
     CueBin = 32,
     /// Apple Lisa file system disk image.
     LisaFs = 33,
+    /// UDF disc image (optical discs without a usable ISO 9660 volume).
+    Udf = 34,
+    /// Apple Partition Map disk image (partitions listed as entries).
+    Apm = 35,
     /// Unknown format.
     Unknown = 99,
 }
@@ -121,6 +125,8 @@ impl PyContainerFormat {
             Self::Bfs => "BFS Disk Image",
             Self::CueBin => "CUE/BIN Disc Image",
             Self::LisaFs => "Lisa Disk Image",
+            Self::Udf => "UDF Disc Image",
+            Self::Apm => "Apple Partition Map Disk Image",
             Self::Unknown => "Unknown",
         }
     }
@@ -154,7 +160,9 @@ impl PyContainerFormat {
             | Self::Ufs
             | Self::Bfs
             | Self::CueBin
-            | Self::LisaFs => true,
+            | Self::LisaFs
+            | Self::Udf
+            | Self::Apm => true,
             Self::Gzip
             | Self::Compress
             | Self::Bzip2
@@ -209,6 +217,8 @@ impl From<ContainerFormat> for PyContainerFormat {
             ContainerFormat::Bfs => Self::Bfs,
             ContainerFormat::CueBin => Self::CueBin,
             ContainerFormat::LisaFs => Self::LisaFs,
+            ContainerFormat::Udf => Self::Udf,
+            ContainerFormat::Apm => Self::Apm,
             ContainerFormat::Unknown => Self::Unknown,
             // `ContainerFormat` is `#[non_exhaustive]`; future variants
             // surface as `Unknown` until the Python bindings are extended.

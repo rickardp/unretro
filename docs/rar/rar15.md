@@ -1059,3 +1059,18 @@ None of them blocks an implementation.
 
 - What a genuine unpacker does with symbol 256 (D2); never observed.
 - Stored members inside solid chains (section 11.2).
+
+## Clean-room feedback
+
+Notes from the implementation side (clean room). They record where this
+document was found unclear or inexact; they describe behaviour in prose
+and were not written from any decoder's source.
+
+1. **Section 12, R3 and D7: the bound and its justification do not
+   match.** "At most 266 bytes for more than two bits" gives at most
+   133 bytes per packed bit, that is 1,064 × P. The constant 2,136 is
+   267 × 8, about twice that. It is kept as it stands: as an optional
+   pre-check it only has to be an upper bound, and a looser one rejects
+   nothing a tighter one would accept. The implementation uses 2,136 and
+   says in its comment that the value is deliberately loose. Both figures
+   are far above the largest real ratio the section reports (438).

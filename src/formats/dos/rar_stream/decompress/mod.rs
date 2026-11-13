@@ -7,7 +7,9 @@
 //!
 //! | Decoder | Format | Algorithms |
 //! |---------|--------|------------|
-//! | [`Rar29Decoder`] | RAR 2.9-4.x | LZSS + Huffman, PPMd, VM filters |
+//! | [`rar15::Rar15Decoder`] | RAR 1.3-1.5x | adaptive LZ (clean-room, `docs/rar/rar15.md`) |
+//! | [`rar20::Rar20Decoder`] | RAR 2.0-2.8 | LZ + Huffman, multimedia (clean-room, `docs/rar/rar20.md`) |
+//! | [`Rar29Decoder`] | RAR 2.9-4.x | LZ + Huffman, PPMd, filters (`docs/rar/rar29-lz.md`) |
 //! | [`Rar5Decoder`] | RAR 5.0+ | LZSS + Huffman, byte filters |
 //!
 //! ## Compression Methods
@@ -79,21 +81,14 @@
 //! - Window size is 4MB for RAR4, up to 4GB for RAR5
 //! - PPMd uses significant memory (~100MB for order-8 model)
 
-mod bit_reader;
 pub(crate) mod byte_search;
-mod huffman;
-mod lzss;
-mod ppm;
+mod ppmd;
 pub mod rar15;
 pub mod rar20;
 mod rar29;
 pub mod rar5;
 mod vm;
 
-pub use bit_reader::BitReader;
-pub use huffman::{HuffmanDecoder, HuffmanTable};
-pub use lzss::LzssDecoder;
-pub use ppm::PpmModel;
 pub use rar5::Rar5Decoder;
 pub use rar29::Rar29Decoder;
 pub use vm::RarVM;

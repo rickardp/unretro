@@ -149,6 +149,9 @@ pub enum RarError {
     /// Wraps [`std::io::Error`] for file system operations.
     Io(io::Error),
 
+    /// The packed data of an entry is malformed.
+    Corrupt(crate::formats::dos::rar_stream::decompress::DecompressError),
+
     /// A header CRC32 check failed, indicating corruption or tampering.
     CrcMismatch {
         /// Expected CRC from the header.
@@ -194,6 +197,7 @@ impl fmt::Display for RarError {
                 write!(f, "Invalid offset: {} (file length: {})", offset, length)
             }
             Self::Io(e) => write!(f, "IO error: {}", e),
+            Self::Corrupt(e) => write!(f, "{}", e),
             Self::CrcMismatch { expected, actual } => {
                 write!(
                     f,
@@ -240,7 +244,7 @@ impl From<crate::formats::dos::rar_stream::decompress::DecompressError> for RarE
             crate::formats::dos::rar_stream::decompress::DecompressError::UnsupportedMethod(m) => {
                 Self::DecompressionNotSupported(m)
             }
-            _ => Self::Io(io::Error::new(io::ErrorKind::InvalidData, e.to_string())),
+            _ => Self::Corrupt(e),
         }
     }
 }

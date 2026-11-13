@@ -10,5 +10,14 @@ pub mod lisafs;
 /// Check if data is a disk image, wrapped or raw, holding a Lisa file system.
 #[must_use]
 pub fn is_lisa_image(data: &[u8]) -> bool {
-    image::unwrap_image(data).is_some_and(|image| lisafs::is_lisa_volume(&image))
+    // Asked about every input, ahead of the Macintosh readers: nothing is
+    // copied, and of a DART image only the chunks that can hold the volume
+    // header are decoded.
+    match image::recognise(data) {
+        Some(image::Wrapped::Direct(map)) => lisafs::has_volume(&map),
+        Some(image::Wrapped::Dart(dart)) => dart
+            .prefix(lisafs::MDDF_SEARCH_BLOCKS)
+            .is_some_and(|prefix| lisafs::has_volume(&prefix)),
+        None => false,
+    }
 }

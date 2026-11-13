@@ -184,7 +184,7 @@ const CP437_HIGH: [char; 128] = [
     '≥', '≤', '⌠', '⌡', '÷', '≈', '°', '∙', '·', '√', 'ⁿ', '²', '■', '\u{a0}',
 ];
 
-fn decode_cp437(raw: &[u8]) -> String {
+pub(super) fn decode_cp437(raw: &[u8]) -> String {
     raw.iter()
         .map(|&byte| match byte.checked_sub(0x80) {
             Some(high) => CP437_HIGH[usize::from(high)],

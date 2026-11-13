@@ -13,7 +13,10 @@
 //!
 //! No functional modifications to the upstream sources beyond rewriting
 //! absolute `crate::` paths to the vendored location and stripping test
-//! modules that referenced external fixtures.
+//! modules that referenced external fixtures, except: the RAR4 file header
+//! keeps the raw name bytes, and `decompress/rar15.rs` and
+//! `decompress/rar20.rs` are not upstream code but clean-room decoders written
+//! from `docs/rar/`.
 
 // Vendored upstream code — we do not enforce unretro's stricter lints here.
 #![allow(

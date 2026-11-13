@@ -20,6 +20,7 @@ const MFS_SIGNATURE: u16 = 0xD2D7;
 const HFSPLUS_SIGNATURE: u16 = 0x482B;
 
 const DISKCOPY_MAGIC: u16 = 0x0100;
+const DISKCOPY_HEADER_SIZE: usize = 84;
 
 const UDIF_SIGNATURE: &[u8; 4] = b"koly";
 
@@ -116,7 +117,7 @@ fn charge_chunk(budget: &mut u64, bytes: usize, what: &str) -> Result<()> {
 
 #[must_use]
 pub fn is_hfs_image(data: &[u8]) -> bool {
-    if has_plain_volume(data) {
+    if dart_has_volume(data) || has_plain_volume(data) {
         return true;
     }
 
@@ -131,7 +132,7 @@ pub fn is_hfs_image(data: &[u8]) -> bool {
     // Apple Partition Map (APM): Used by .toast and raw CD images, possibly
     // behind a DiskCopy 4.2 header.
     // Must verify we can actually find an HFS partition inside
-    let apm = &data[get_hfs_data_offset(data)..];
+    let apm = &data[plain_volume_range(data)];
     if let Some(hfs_offset) = find_apm_hfs_partition(apm) {
         if has_mdb_signature(apm, hfs_offset) {
             return true;
@@ -166,7 +167,7 @@ fn has_mdb_signature(data: &[u8], volume_offset: usize) -> bool {
 
 // Bare HFS/MFS/HFS+ volume, or one behind a DiskCopy 4.2 header.
 fn has_plain_volume(data: &[u8]) -> bool {
-    has_mdb_signature(data, 0) || (get_hfs_data_offset(data) > 0 && has_mdb_signature(data, 84))
+    has_mdb_signature(&data[plain_volume_range(data)], 0)
 }
 
 fn find_apm_hfs_partition(data: &[u8]) -> Option<usize> {
@@ -304,7 +305,8 @@ fn raw_cd_has_volume<'a>(sector_count: usize, user_data: impl Fn(usize) -> &'a [
     for sector in 0..sector_count.min(CD_PROBE_SECTORS) {
         head.extend_from_slice(user_data(sector));
     }
-    if has_plain_volume(&head) {
+    // Cooked sectors never start with a DiskCopy 4.2 header.
+    if has_mdb_signature(&head, 0) {
         return true;
     }
 
@@ -1628,8 +1630,17 @@ impl<'a> LocatedVolume<'a> {
 
         // Headers are skipped by offset: copying the rest of a sparse image
         // would commit all of its zero-fill.
-        // Check for DiskCopy 4.2 header
-        let mut start = get_hfs_data_offset(&image);
+        // A DiskCopy 4.2 header is looked for in the input itself only: the
+        // output of another unwrapper never starts with one.
+        let mut start = 0;
+        if !decoded_udif && matches!(image, Cow::Borrowed(_)) {
+            let volume = plain_volume_range(data);
+            start = volume.start;
+            // Tag bytes and padding after the block data are not volume data.
+            let block_data = 0..volume.end;
+            image = Cow::Borrowed(&data[block_data.clone()]);
+            backed = vec![block_data];
+        }
 
         // Check for Apple Partition Map (APM) - used by .toast and CD images
         if let Some(apm_offset) = find_apm_hfs_partition(&image[start..]) {
@@ -2192,15 +2203,84 @@ fn resolve_extents(
     extents
 }
 
-fn get_hfs_data_offset(data: &[u8]) -> usize {
-    // Check for DiskCopy 4.2 header
-    if data.len() >= 0x54 {
-        let magic = u16::from_be_bytes([data[0x52], data[0x53]]);
-        if magic == DISKCOPY_MAGIC {
-            return 84; // DiskCopy header is 84 bytes
-        }
+// The block data of a DiskCopy 4.2 image: the `D` bytes after the header,
+// without the tag bytes and padding that follow them. The two magic bytes
+// alone match unrelated files, so the whole header has to agree with the file
+// (`docs/lisa/images.md`, section 4.7). The checksums are not verified:
+// several writers leave them zero or stale. The name, encoding and format
+// bytes say nothing reliable about the contents either.
+fn diskcopy_volume(data: &[u8]) -> Option<Range<usize>> {
+    let header = data.get(..DISKCOPY_HEADER_SIZE)?;
+    if header[0] > 63 || u16::from_be_bytes([header[0x52], header[0x53]]) != DISKCOPY_MAGIC {
+        return None;
     }
-    0
+    let field = |at: usize| {
+        u64::from(u32::from_be_bytes([
+            header[at],
+            header[at + 1],
+            header[at + 2],
+            header[at + 3],
+        ]))
+    };
+    let (data_size, tag_size) = (field(0x40), field(0x44));
+    if data_size == 0 || data_size % 512 != 0 {
+        return None;
+    }
+    // No tags, or 12 (floppy) or 20 (hard disk) bytes per block.
+    let blocks = data_size / 512;
+    if tag_size != 0 && tag_size != blocks * 12 && tag_size != blocks * 20 {
+        return None;
+    }
+    let data_end = DISKCOPY_HEADER_SIZE as u64 + data_size;
+    let len = data.len() as u64;
+    // Images sent over XMODEM are padded; anything longer is something else.
+    if data_end + tag_size > len || len - (data_end + tag_size) >= 2048 {
+        return None;
+    }
+    Some(DISKCOPY_HEADER_SIZE..usize::try_from(data_end).ok()?)
+}
+
+// A DART image (`docs/lisa/images.md`, section 5) of a disk with a volume.
+// The decoder lives with the Lisa image wrappers; only the chunk that holds
+// the volume signature is decoded here.
+#[cfg(feature = "lisa")]
+fn dart_has_volume(data: &[u8]) -> bool {
+    crate::formats::lisa::image::dart_leading_blocks(data, MDB_OFFSET / 512 + 1)
+        .is_some_and(|blocks| has_mdb_signature(&blocks, 0))
+}
+
+#[cfg(not(feature = "lisa"))]
+fn dart_has_volume(_data: &[u8]) -> bool {
+    false
+}
+
+// The decoded block data when `data` is such a DART image.
+#[cfg(feature = "lisa")]
+fn dart_volume(data: &[u8]) -> Result<Option<Vec<u8>>> {
+    if !dart_has_volume(data) {
+        return Ok(None);
+    }
+    crate::formats::lisa::image::dart_blocks(data).transpose()
+}
+
+#[cfg(not(feature = "lisa"))]
+fn dart_volume(_data: &[u8]) -> Result<Option<Vec<u8>>> {
+    Ok(None)
+}
+
+// Where a volume, or the partition map in front of it, lies in `data`: behind
+// a DiskCopy 4.2 header or at the start. Detection and opening both use this.
+// A bare volume whose boot blocks happen to read as a DiskCopy 4.2 header is
+// taken as bare unless the volume signature is found behind the header.
+fn plain_volume_range(data: &[u8]) -> Range<usize> {
+    match diskcopy_volume(data) {
+        Some(volume)
+            if has_mdb_signature(&data[volume.clone()], 0) || !has_mdb_signature(data, 0) =>
+        {
+            volume
+        }
+        _ => 0..data.len(),
+    }
 }
 
 // =============================================================================
@@ -2213,13 +2293,8 @@ struct MfsVolume {
 
 impl MfsVolume {
     fn parse(data: &[u8]) -> Result<Self> {
-        // Check for DiskCopy 4.2 header and strip if present
-        let mfs_offset = get_hfs_data_offset(data);
-        let mfs_data = if mfs_offset > 0 {
-            &data[mfs_offset..]
-        } else {
-            data
-        };
+        // Strip a DiskCopy 4.2 header, and the tag bytes after the volume.
+        let mfs_data = &data[plain_volume_range(data)];
 
         if mfs_data.len() < MDB_OFFSET + 64 {
             return Err(Error::invalid_format("MFS image too small"));
@@ -2558,13 +2633,11 @@ impl HfsContainer {
             return Err(Error::MaxDepthExceeded);
         }
 
+        let dart = dart_volume(data)?;
+        let data = dart.as_deref().unwrap_or(data);
+
         // Check for DiskCopy 4.2 header
-        let data_offset = get_hfs_data_offset(data);
-        let raw_data = if data_offset > 0 {
-            &data[data_offset..]
-        } else {
-            data
-        };
+        let raw_data = &data[plain_volume_range(data)];
 
         // Check if this is MFS (0xD2D7) or HFS (0x4244)
         if raw_data.len() >= MDB_OFFSET + 2 {
@@ -2737,17 +2810,170 @@ mod tests {
         assert!(!is_hfs_image(&small));
     }
 
+    // A DiskCopy 4.2 image of `volume` (padded to whole blocks) with
+    // `tag_len` tag bytes per block, every tag byte set to `tag_fill`.
+    fn diskcopy_image(volume: &[u8], tag_len: usize, tag_fill: u8) -> Vec<u8> {
+        let mut blocks = volume.to_vec();
+        blocks.resize(volume.len().next_multiple_of(512), 0);
+        let tags = vec![tag_fill; blocks.len() / 512 * tag_len];
+        let mut image = vec![0u8; DISKCOPY_HEADER_SIZE];
+        image[0] = 4;
+        image[1..5].copy_from_slice(b"Disk");
+        image[0x40..0x44].copy_from_slice(&(blocks.len() as u32).to_be_bytes());
+        image[0x44..0x48].copy_from_slice(&(tags.len() as u32).to_be_bytes());
+        image[0x51] = 0x02;
+        image[0x52..0x54].copy_from_slice(&DISKCOPY_MAGIC.to_be_bytes());
+        image.extend_from_slice(&blocks);
+        image.extend_from_slice(&tags);
+        image
+    }
+
     #[test]
     fn test_diskcopy_detection() {
-        // Create DiskCopy 4.2 wrapped data
-        let mut data = vec![0u8; 84 + 2048];
-        // DiskCopy magic at 0x52
-        data[0x52] = 0x01;
-        data[0x53] = 0x00;
-        // HFS signature at 84 + 1024
-        data[84 + 1024] = 0x42;
-        data[84 + 1025] = 0x44;
-        assert!(is_hfs_image(&data));
+        // HFS signature at 1024
+        let mut volume = vec![0u8; 2048];
+        volume[1024] = 0x42;
+        volume[1025] = 0x44;
+        assert!(is_hfs_image(&diskcopy_image(&volume, 0, 0)));
+        assert!(is_hfs_image(&diskcopy_image(&volume, 12, 0xD2)));
+    }
+
+    #[test]
+    fn diskcopy_header_must_agree_with_the_file() {
+        let volume = vec![0u8; 800 * 512];
+        let good = diskcopy_image(&volume, 12, 0);
+        assert_eq!(good.len(), 419_284);
+        assert_eq!(diskcopy_volume(&good), Some(84..84 + 409_600));
+        assert_eq!(
+            diskcopy_volume(&diskcopy_image(&volume, 20, 0)),
+            Some(84..84 + 409_600)
+        );
+        assert_eq!(
+            diskcopy_volume(&diskcopy_image(&volume, 0, 0)),
+            Some(84..84 + 409_600)
+        );
+
+        let with = |at: usize, bytes: &[u8]| {
+            let mut image = good.clone();
+            image[at..at + bytes.len()].copy_from_slice(bytes);
+            diskcopy_volume(&image)
+        };
+        // Name length, magic.
+        assert_eq!(with(0, &[63]), Some(84..84 + 409_600));
+        assert_eq!(with(0, &[64]), None);
+        assert_eq!(with(0x52, &[0x01, 0x01]), None);
+        // Data size: zero, not whole blocks, larger than the file.
+        assert_eq!(with(0x40, &0u32.to_be_bytes()), None);
+        assert_eq!(with(0x40, &409_601u32.to_be_bytes()), None);
+        assert_eq!(with(0x40, &0xFFFF_FE00u32.to_be_bytes()), None);
+        // Tag size: neither 12 nor 20 bytes per block.
+        assert_eq!(with(0x44, &9_601u32.to_be_bytes()), None);
+        assert_eq!(with(0x44, &(800u32 * 24).to_be_bytes()), None);
+        // Checksums, encoding and format bytes are not looked at.
+        assert!(with(0x48, &[0xFF; 8]).is_some());
+        for pair in [
+            [0x00, 0x02],
+            [0x00, 0x12],
+            [0x01, 0x22],
+            [0x01, 0x24],
+            [0x02, 0x02],
+            [0x03, 0x02],
+            [0x54, 0x01],
+            [0x5D, 0x93],
+        ] {
+            assert!(with(0x50, &pair).is_some(), "{pair:02X?}");
+        }
+
+        // Truncated, and padded as XMODEM transfers are.
+        assert_eq!(diskcopy_volume(&good[..good.len() - 1]), None);
+        assert_eq!(diskcopy_volume(&good[..83]), None);
+        let mut padded = good.clone();
+        padded.resize(good.len() + 2047, 0x1A);
+        assert_eq!(diskcopy_volume(&padded), Some(84..84 + 409_600));
+        padded.push(0x1A);
+        assert_eq!(diskcopy_volume(&padded), None);
+    }
+
+    #[test]
+    fn diskcopy_tag_bytes_are_not_volume_data() {
+        let volume = fragmented_catalog_volume(2, 3);
+        // Tags that would read as a volume signature, an allocation chain or
+        // file contents if they were taken for blocks.
+        for (tag_len, fill) in [(12, 0x42), (20, 0xD2), (12, 0xFF)] {
+            let image = diskcopy_image(&volume, tag_len, fill);
+            assert!(is_hfs_image(&image));
+            assert_eq!(container_files(&image), expected_files(2));
+            let located = LocatedVolume::find(&image, None).unwrap();
+            assert_eq!(located.start, 84);
+            assert_eq!(
+                located.bytes().len(),
+                volume.len().next_multiple_of(512),
+                "the volume ends where the block data ends"
+            );
+        }
+
+        // An MFS fork that runs past the block data is not fed from the tags.
+        let mfs = mfs_image(512, 8 * 512, 1, 100);
+        let listed = |image: &[u8]| {
+            let container = HfsContainer::from_bytes(image, "v".into(), 8).unwrap();
+            container.entries[0].data.clone()
+        };
+        let bare = listed(&mfs);
+        assert_eq!(listed(&diskcopy_image(&mfs, 12, 0xEE)), bare);
+        let volume = MfsVolume::parse(&diskcopy_image(&mfs, 12, 0xEE)).unwrap();
+        assert_eq!(volume.files[0].data_fork, bare);
+        // The budget follows the block data, tags or not: the aliased forks
+        // of `mfs_aliased_forks_are_charged_to_volume_budget` stay refused.
+        let block = 900 * 1024;
+        let aliased = mfs_image(block, 1024 * 1024, 10, block);
+        assert!(parse_fails(&diskcopy_image(&aliased, 20, 0)));
+    }
+
+    #[test]
+    fn bare_volume_with_diskcopy_magic_in_its_boot_blocks() {
+        // `01 00` at offset 82 of a bare volume is not a DiskCopy 4.2 header.
+        let mut volume = fragmented_catalog_volume(2, 3);
+        volume[0x52..0x54].copy_from_slice(&DISKCOPY_MAGIC.to_be_bytes());
+        assert_eq!(diskcopy_volume(&volume), None);
+        assert!(is_hfs_image(&volume));
+        assert_eq!(container_files(&volume), expected_files(2));
+
+        // Boot blocks that pass for a whole header: the reading with a
+        // volume signature wins, in detection and in opening alike.
+        volume.resize(84 + 512 * 40, 0);
+        volume[0] = 0;
+        volume[0x40..0x44].copy_from_slice(&(512u32 * 40).to_be_bytes());
+        volume[0x44..0x48].copy_from_slice(&0u32.to_be_bytes());
+        assert!(diskcopy_volume(&volume).is_some());
+        assert_eq!(plain_volume_range(&volume), 0..volume.len());
+        assert!(is_hfs_image(&volume));
+        assert_eq!(container_files(&volume), expected_files(2));
+
+        let mut mfs = mfs_image(512, 84 + 512 * 8, 1, 100);
+        mfs[0x40..0x44].copy_from_slice(&(512u32 * 8).to_be_bytes());
+        mfs[0x52..0x54].copy_from_slice(&DISKCOPY_MAGIC.to_be_bytes());
+        assert!(diskcopy_volume(&mfs).is_some());
+        assert!(is_hfs_image(&mfs));
+        assert_eq!(MfsVolume::parse(&mfs).unwrap().files.len(), 1);
+    }
+
+    #[test]
+    fn diskcopy_header_is_not_looked_for_in_decoded_images() {
+        // A volume whose first bytes read as a DiskCopy 4.2 header with a
+        // volume signature behind it (here in the Finder info of the HFS+
+        // header). Decoded from a UDIF image it starts at its first byte.
+        let mut volume = hfsplus::testing::sample_volume();
+        let blocks = (volume.len() - DISKCOPY_HEADER_SIZE) / 512;
+        volume[0] = 0;
+        volume[0x40..0x44].copy_from_slice(&((blocks * 512) as u32).to_be_bytes());
+        volume[0x44..0x48].copy_from_slice(&0u32.to_be_bytes());
+        volume[0x52..0x54].copy_from_slice(&DISKCOPY_MAGIC.to_be_bytes());
+        volume[DISKCOPY_HEADER_SIZE + MDB_OFFSET..][..4].copy_from_slice(b"H+\x00\x04");
+        assert_eq!(plain_volume_range(&volume).start, DISKCOPY_HEADER_SIZE);
+
+        let udif = sparse_udif(&volume, 16);
+        assert_eq!(LocatedVolume::find(&udif, None).unwrap().start, 0);
+        assert_eq!(visited(&udif), hfs_plus_sample_entries());
     }
 
     #[test]
@@ -4372,11 +4598,11 @@ mod tests {
         assert_eq!(container_files(&apm), expected_files(2));
 
         for inner in [&volume, &apm] {
-            let mut diskcopy = vec![0u8; 84];
-            diskcopy[0x52..0x54].copy_from_slice(&DISKCOPY_MAGIC.to_be_bytes());
-            diskcopy.extend_from_slice(inner);
-            assert!(is_hfs_image(&diskcopy));
-            assert_eq!(container_files(&diskcopy), expected_files(2));
+            for tag_len in [0, 12] {
+                let diskcopy = diskcopy_image(inner, tag_len, 0x5A);
+                assert!(is_hfs_image(&diskcopy));
+                assert_eq!(container_files(&diskcopy), expected_files(2));
+            }
         }
     }
 
@@ -4492,11 +4718,8 @@ mod tests {
         apm_hfsx[512 + 48..512 + 59].copy_from_slice(b"Apple_HFSX\0");
         apm_hfsx.extend_from_slice(&hfsx);
 
-        let mut diskcopy = vec![0u8; 84];
-        diskcopy[0x52..0x54].copy_from_slice(&DISKCOPY_MAGIC.to_be_bytes());
-        diskcopy.extend_from_slice(&volume);
-        let mut diskcopy_apm = diskcopy[..84].to_vec();
-        diskcopy_apm.extend_from_slice(&apm);
+        let diskcopy = diskcopy_image(&volume, 12, 0);
+        let diskcopy_apm = diskcopy_image(&apm, 0, 0);
 
         // Padded to whole CD sectors.
         let mut cooked = apm.clone();

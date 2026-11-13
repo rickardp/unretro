@@ -49,6 +49,9 @@ pub enum ContainerFormat {
     /// Macintosh disk image: `HFS`, `MFS`, `HFS Plus` or `HFSX` volume.
     #[cfg(feature = "macintosh")]
     Hfs,
+    /// Apple Partition Map disk image (partitions listed as entries).
+    #[cfg(feature = "macintosh")]
+    Apm,
     /// `StuffIt` archive (`.sit`).
     #[cfg(feature = "macintosh")]
     StuffIt,
@@ -110,6 +113,9 @@ pub enum ContainerFormat {
     /// `CUE/BIN` CD image (cue sheet plus track files).
     #[cfg(feature = "dos")]
     CueBin,
+    /// `UDF` disc image (optical discs without a usable `ISO 9660` volume).
+    #[cfg(feature = "dos")]
+    Udf,
 
     // NeXT / BSD formats
     /// `NeXT` disklabel-partitioned disk image.
@@ -160,6 +166,8 @@ impl ContainerFormat {
             #[cfg(feature = "macintosh")]
             Self::Hfs => "HFS Disk Image",
             #[cfg(feature = "macintosh")]
+            Self::Apm => "Apple Partition Map Disk Image",
+            #[cfg(feature = "macintosh")]
             Self::StuffIt => "StuffIt Archive",
             #[cfg(feature = "macintosh")]
             Self::CompactPro => "CompactPro Archive",
@@ -197,6 +205,8 @@ impl ContainerFormat {
             Self::Arj => "ARJ Archive",
             #[cfg(feature = "dos")]
             Self::CueBin => "CUE/BIN Disc Image",
+            #[cfg(feature = "dos")]
+            Self::Udf => "UDF Disc Image",
             #[cfg(feature = "next")]
             Self::NextDisklabel => "NeXT Disk Image",
             #[cfg(feature = "next")]
@@ -278,6 +288,8 @@ impl ContainerFormat {
             "arj" => Some(Self::Arj),
             #[cfg(feature = "dos")]
             "cue" => Some(Self::CueBin),
+            #[cfg(feature = "dos")]
+            "udf" => Some(Self::Udf),
             #[cfg(feature = "next")]
             "ufs" => Some(Self::Ufs),
             #[cfg(feature = "beos")]
@@ -312,7 +324,7 @@ impl ContainerFormat {
             #[cfg(feature = "dos")]
             Self::Rar => true,
             #[cfg(feature = "macintosh")]
-            Self::Hfs | Self::StuffIt | Self::CompactPro => true,
+            Self::Hfs | Self::Apm | Self::StuffIt | Self::CompactPro => true,
             #[cfg(feature = "macintosh")]
             Self::BinHex | Self::MacBinary | Self::AppleSingle | Self::AppleDouble => false,
             #[cfg(feature = "macintosh")]
@@ -322,7 +334,13 @@ impl ContainerFormat {
             #[cfg(feature = "game")]
             Self::Wad | Self::Pak | Self::Wolf3d | Self::ImuseBundle => true,
             #[cfg(feature = "dos")]
-            Self::Fat | Self::Mbr | Self::Gpt | Self::Iso9660 | Self::Arj | Self::CueBin => true,
+            Self::Fat
+            | Self::Mbr
+            | Self::Gpt
+            | Self::Iso9660
+            | Self::Arj
+            | Self::CueBin
+            | Self::Udf => true,
             #[cfg(feature = "next")]
             Self::NextDisklabel | Self::Ufs => true,
             #[cfg(feature = "beos")]

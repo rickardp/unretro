@@ -16,7 +16,8 @@ const WINDOW_SIZE: usize = 0x1_0000;
 const WINDOW_MASK: usize = WINDOW_SIZE - 1;
 // Largest distance the format can express.
 const MAX_HISTORY: u32 = 0xFFFF;
-// D7: no item yields more than 266 bytes for two bits.
+// D7: a deliberately loose bound, 267 bytes per packed bit. No item yields
+// more than 266 bytes and each costs more than two bits.
 const MAX_RATIO: u64 = 2136;
 
 // Sequential codes (5.1): runs of (code length, symbol count), canonical.

@@ -1253,3 +1253,38 @@ blocks; solid groups with state carry-over, with an empty first member,
 with an empty middle member, with a table switch as first symbol; the
 error cases of section 12.2; unpack version 26; method bytes `0x31` to
 `0x36`; a wrong CRC-32.
+
+## Clean-room feedback
+
+Notes from the implementation side (clean room). They record where this
+document was found silent or inconsistent and what was observed with
+black-box tools; they describe behaviour in prose and were not written
+from any decoder's source.
+
+1. **Section 10.3 and empty continuation members.** The section says
+   that every later member that continues a damaged group is reported
+   failed, and does not say whether a continuation member with U = 0
+   (section 10.2, "state unchanged") is exempt. Experiment with `unar`
+   1.10.7 on a crafted archive of three members (a first member whose
+   packed bytes are cut short; a continuation member with P = 0 and
+   U = 0; a further continuation member): the first and third members
+   fail, the empty one is reported OK and is created as an empty file.
+   Resolution: **an empty continuation member is exempt from 10.3**. It
+   reads nothing and therefore depends on nothing; it is delivered as an
+   empty file (subject to its CRC-32, which is 0) and leaves the state,
+   damaged or not, as it is. The container layer and the decoder both
+   follow this now.
+2. **Names of the two "cannot continue" results.** Three wordings are in
+   use for two different conditions; they are meant as follows, here and
+   in `old-container.md` and `rar29-lz.md`:
+   - an **earlier member of the group could not be decoded** (10.3; C10
+     in `old-container.md`; 12.4 in `rar29-lz.md`): "depends on a damaged
+     member" and "depends on an unreadable earlier entry" are the same
+     result. The implementation reports "depends on an unreadable earlier
+     entry of the solid archive";
+   - the **state to continue is not there** (10.2, R13; V4 in
+     `old-container.md`): "solid predecessor unavailable". The
+     implementation reports "has no solid predecessor: the files it
+     continues are not available". This is also the result for a solid
+     member of a later volume opened without the volumes before it, when
+     the volume starts with the orphaned last piece of a split file.

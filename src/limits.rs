@@ -91,6 +91,10 @@ impl OutputBudget {
         }
     }
 
+    pub(crate) const fn remaining(&self) -> u64 {
+        self.remaining
+    }
+
     // Accounts for `bytes` of output, failing once the budget is spent.
     pub(crate) fn charge(&mut self, bytes: usize, what: &str) -> Result<()> {
         match self.remaining.checked_sub(bytes as u64) {

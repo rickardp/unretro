@@ -46,7 +46,9 @@ use crate::formats::macintosh::binhex::{BinHexContainer, is_binhex_file};
 use crate::formats::macintosh::stuffit::{StuffItContainer, is_stuffit_archive};
 #[cfg(feature = "macintosh")]
 use crate::formats::macintosh::{
-    ResourceForkContainer, apple_double,
+    ResourceForkContainer,
+    apm::{ApmContainer, is_apm_image},
+    apple_double,
     compactpro::{CompactProContainer, is_compactpro_archive},
     hfs::{HfsContainer, is_hfs_image},
     macbinary::{
@@ -79,7 +81,7 @@ use crate::formats::game::imuse_bundle::{ImuseBundleContainer, is_imuse_bundle};
 use crate::formats::dos::arj::{self, ArjContainer, is_arj_archive};
 
 #[cfg(feature = "dos")]
-use crate::formats::dos::cue::{CueBinContainer, is_cue_sheet};
+use crate::formats::dos::cue::{self, CueBinContainer, is_cue_sheet};
 
 #[cfg(feature = "dos")]
 use crate::formats::dos::fat::{FatContainer, is_fat_image};
@@ -88,13 +90,16 @@ use crate::formats::dos::fat::{FatContainer, is_fat_image};
 use crate::formats::dos::gpt::{GptContainer, is_gpt_image};
 
 #[cfg(feature = "dos")]
-use crate::formats::dos::iso9660::{Iso9660Container, is_iso9660_image};
+use crate::formats::dos::iso9660::{Iso9660Container, has_readable_root, is_iso9660_image};
 
 #[cfg(feature = "dos")]
 use crate::formats::dos::mbr::{MbrContainer, is_mbr_image};
 
 #[cfg(all(feature = "dos", feature = "__backend_dos_rar"))]
 use crate::formats::dos::rar::{self, RarContainer, is_rar_archive};
+
+#[cfg(feature = "dos")]
+use crate::formats::dos::udf::{UdfContainer, is_udf_image};
 
 #[cfg(feature = "next")]
 use crate::formats::next::disklabel::{NextDisklabelContainer, is_next_disklabel};
@@ -671,6 +676,22 @@ impl Loader {
                         }
                     }
 
+                    // The track files of a cue sheet sit next to it.
+                    #[cfg(feature = "dos")]
+                    if path
+                        .extension()
+                        .is_some_and(|ext| ext.eq_ignore_ascii_case("cue"))
+                        && is_cue_sheet(source.as_slice())
+                    {
+                        let container = Box::new(CueBinContainer::from_bytes_with_siblings(
+                            source.as_slice(),
+                            path_str.clone(),
+                            self.max_depth,
+                            &|name| read_cue_track_file(path, name),
+                        )?);
+                        return Ok((Some(source), container));
+                    }
+
                     #[cfg(all(feature = "dos", feature = "__backend_dos_rar"))]
                     if rar::volume_after(&path_str, 1).is_some()
                         && is_rar_archive(source.as_slice())
@@ -877,8 +898,11 @@ where
     let prefix = container.prefix().to_string();
     let mut visitor_error: Option<Error> = None;
 
-    let visit_result = container.visit(&mut |entry: &Entry<'_>| {
-        if let Some(budget) = nesting.as_deref_mut() {
+    #[cfg(feature = "dos")]
+    let cue_sheets = core::cell::RefCell::new(cue::SheetIndex::default());
+    // `late` for an entry held back until the container had been visited.
+    let mut visit_entry = |entry: &Entry<'_>, late: bool| -> Result<bool> {
+        if let Some(budget) = nesting.as_deref_mut().filter(|_| !late) {
             budget.spend(entry.data.len());
         }
 
@@ -899,12 +923,32 @@ where
                     .and_then(|number| arj::volume_name(&rel, number - 1));
                 #[cfg(feature = "__backend_dos_rar")]
                 let earlier = earlier.or_else(|| {
+                    // A reader that starts at an earlier volume passes over
+                    // a few missing ones.
                     is_rar_archive(entry.data)
-                        .then(|| rar::volume_before(&rel))
+                        .then(|| rar::volumes_before(&rel).find(|name| container.has_file(name)))
                         .flatten()
                 });
                 if earlier.is_some_and(|earlier| container.has_file(&earlier)) {
                     return Ok(true);
+                }
+                // Likewise a track file that a cue sheet beside it reads; it
+                // is held back while that sheet is still to be visited.
+                if !late {
+                    let exists = |path: &str| container.has_file(path);
+                    let mut sheets = cue_sheets.borrow_mut();
+                    // A directory on disk can be searched for sheets whose
+                    // names do not give them away.
+                    #[cfg(feature = "std")]
+                    if nesting.is_none() && sheets.enters_directory(&rel) {
+                        for sheet in cue_sheets_beside(entry.path, &rel) {
+                            let data = container.read_file(&sheet);
+                            sheets.add_sheet(&sheet, data.as_deref(), &exists);
+                        }
+                    }
+                    if sheets.hides(&rel, entry, &exists, &|path| container.read_file(path)) {
+                        return Ok(true);
+                    }
                 }
             }
         }
@@ -1102,6 +1146,12 @@ where
                     detected_format,
                 )
             };
+            #[cfg(feature = "dos")]
+            if open_result.is_ok() && matches!(detected_format, Some(ContainerFormat::CueBin)) {
+                if let Some(rel) = extract_relative_path(entry.path, &prefix) {
+                    cue_sheets.borrow_mut().sheet_opened(&rel);
+                }
+            }
             if let Err(err) = visit_nested(
                 open_result,
                 entry.path,
@@ -1183,7 +1233,32 @@ where
         }
 
         Ok(true)
-    });
+    };
+
+    #[cfg(not(feature = "dos"))]
+    let visit_result = container.visit(&mut |entry: &Entry<'_>| visit_entry(entry, false));
+    #[cfg(feature = "dos")]
+    let visit_result = {
+        // Only a visitor error makes `visit_entry` fail.
+        let mut visitor_failed = false;
+        let visit_result = container.visit(&mut |entry: &Entry<'_>| {
+            let result = visit_entry(entry, false);
+            visitor_failed |= result.is_err();
+            result
+        });
+        // Track files whose cue sheet was not opened after all.
+        let unlisted = cue_sheets.borrow_mut().take_unlisted();
+        for held in unlisted {
+            if visitor_failed {
+                break;
+            }
+            if let Some(data) = container.read_file(&held.file) {
+                let entry = Entry::new(&held.path, &held.container_path, &data);
+                visitor_failed = visit_entry(&entry, true).is_err();
+            }
+        }
+        visit_result
+    };
 
     if let Some(err) = visitor_error {
         return Err(err);
@@ -1285,6 +1360,49 @@ where
 #[cfg(feature = "macintosh")]
 fn has_native_resource_fork(container: &dyn Container, entry_path: &str, prefix: &str) -> bool {
     extract_relative_path(entry_path, prefix).is_some_and(|rel| container.has_resource_fork(&rel))
+}
+
+// A track file for the cue sheet at `sheet`, by a name relative to the
+// sheet's directory. Links are resolved, and a name that leads out of that
+// directory is not read.
+#[cfg(all(feature = "std", feature = "dos"))]
+fn read_cue_track_file(sheet: &Path, name: &str) -> Option<Vec<u8>> {
+    let name = Path::new(name);
+    if !name
+        .components()
+        .all(|component| matches!(component, std::path::Component::Normal(_)))
+    {
+        return None;
+    }
+    let directory = sheet
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."))
+        .canonicalize()
+        .ok()?;
+    let file = directory.join(name).canonicalize().ok()?;
+    (file.starts_with(&directory) && file.is_file()).then(|| fs::read(file).ok())?
+}
+
+// The cue sheets in the directory of the file at `entry_path`, which is at
+// `rel` in a directory container; as paths in that container.
+#[cfg(all(feature = "std", feature = "dos"))]
+fn cue_sheets_beside(entry_path: &str, rel: &str) -> Vec<String> {
+    const MAX_SHEET_SIZE: u64 = 1024 * 1024;
+    let directory = &rel[..rel.len() - last_path_component(rel).len()];
+    let Some(Ok(listing)) = Path::new(entry_path).parent().map(fs::read_dir) else {
+        return Vec::new();
+    };
+    listing
+        .flatten()
+        .filter(|item| {
+            item.metadata()
+                .is_ok_and(|meta| meta.is_file() && meta.len() <= MAX_SHEET_SIZE)
+        })
+        .filter_map(|item| item.file_name().into_string().ok())
+        .filter(|name| path_extension(name).is_some_and(|ext| ext.eq_ignore_ascii_case("cue")))
+        .map(|name| format!("{directory}{name}"))
+        .collect()
 }
 
 fn visitor_error_sentinel() -> Error {
@@ -1458,6 +1576,13 @@ fn open_container_internal(
             depth,
         )?)),
         #[cfg(feature = "macintosh")]
+        Some(ContainerFormat::Apm) => Ok(Box::new(ApmContainer::from_bytes(
+            data,
+            prefix.to_string(),
+            depth,
+            options.numeric_identifiers,
+        )?)),
+        #[cfg(feature = "macintosh")]
         Some(ContainerFormat::StuffIt) => Ok(Box::new(StuffItContainer::from_bytes(
             data,
             prefix.to_string(),
@@ -1582,6 +1707,12 @@ fn open_container_internal(
             prefix.to_string(),
             depth,
         )?)),
+        #[cfg(feature = "dos")]
+        Some(ContainerFormat::Udf) => Ok(Box::new(UdfContainer::from_bytes(
+            data,
+            prefix.to_string(),
+            depth,
+        )?)),
         #[cfg(feature = "next")]
         Some(ContainerFormat::NextDisklabel) => Ok(Box::new(NextDisklabelContainer::from_bytes(
             data,
@@ -1694,10 +1825,36 @@ where
         }
     }
 
-    // CueBin sibling wiring goes here
+    // The track files of a cue sheet are siblings in its directory.
+    #[cfg(feature = "dos")]
+    if path_extension(path).is_some_and(|ext| ext.eq_ignore_ascii_case("cue")) {
+        let format = pre_detected_format.or_else(|| detect_format(path, Some(data)));
+        if matches!(format, Some(ContainerFormat::CueBin)) {
+            let directory = &path[..path.len() - last_path_component(path).len()];
+            return Ok(Box::new(CueBinContainer::from_bytes_with_siblings(
+                data,
+                prefix.to_string(),
+                depth,
+                &|name| get_sibling(&format!("{directory}{name}")),
+            )?));
+        }
+    }
 
     // For other formats, just use the normal open
     open_container_internal(data, path, prefix, depth, options, pre_detected_format)
+}
+
+// ISO 9660 or UDF. A disc carrying both opens as ISO 9660 unless that volume
+// has no root directory to read.
+#[cfg(feature = "dos")]
+fn optical_disc_format(data: &[u8]) -> Option<ContainerFormat> {
+    if is_iso9660_image(data) && (has_readable_root(data) || !is_udf_image(data)) {
+        Some(ContainerFormat::Iso9660)
+    } else if is_udf_image(data) {
+        Some(ContainerFormat::Udf)
+    } else {
+        None
+    }
 }
 
 /// Detect the container format from a path hint and optional file bytes.
@@ -1796,6 +1953,8 @@ pub fn detect_format(path: &str, data: Option<&[u8]>) -> Option<ContainerFormat>
                 // A Lisa disk in a DiskCopy 4.2 wrapper is not an HFS image.
                 #[cfg(feature = "lisa")]
                 try_format!(is_lisa_image, ContainerFormat::LisaFs);
+                // A partition map lists its partitions instead of opening one.
+                try_format!(is_apm_image, ContainerFormat::Apm);
                 try_format!(is_hfs_image, ContainerFormat::Hfs);
             }
             #[cfg(feature = "macintosh")]
@@ -1832,13 +1991,24 @@ pub fn detect_format(path: &str, data: Option<&[u8]>) -> Option<ContainerFormat>
             #[cfg(feature = "dos")]
             ContainerFormat::Fat => try_format!(is_fat_image, ContainerFormat::Fat),
             #[cfg(feature = "dos")]
-            ContainerFormat::Iso9660 => try_format!(is_iso9660_image, ContainerFormat::Iso9660),
+            ContainerFormat::Iso9660 => {
+                if optical_disc_format(data) == Some(ContainerFormat::Iso9660) {
+                    return Some(ContainerFormat::Iso9660);
+                }
+            }
             #[cfg(feature = "dos")]
             ContainerFormat::Arj => try_format!(is_arj_archive, ContainerFormat::Arj),
             // A cue sheet is plain text without a magic number, so it is
             // only probed under its own extension.
             #[cfg(feature = "dos")]
             ContainerFormat::CueBin => try_format!(is_cue_sheet, ContainerFormat::CueBin),
+            // A UDF bridge disc keeps opening as ISO 9660.
+            #[cfg(feature = "dos")]
+            ContainerFormat::Udf => {
+                if optical_disc_format(data) == Some(ContainerFormat::Udf) {
+                    return Some(ContainerFormat::Udf);
+                }
+            }
             #[cfg(feature = "next")]
             ContainerFormat::Ufs => try_format!(is_ufs_image, ContainerFormat::Ufs),
             #[cfg(feature = "beos")]
@@ -1916,6 +2086,10 @@ pub fn detect_format(path: &str, data: Option<&[u8]>) -> Option<ContainerFormat>
 
     #[cfg(feature = "macintosh")]
     {
+        // Before HFS, which would open the map's first HFS partition only.
+        if is_apm_image(data) {
+            return Some(ContainerFormat::Apm);
+        }
         if is_hfs_image(data) {
             return Some(ContainerFormat::Hfs);
         }
@@ -1968,6 +2142,8 @@ pub fn detect_format(path: &str, data: Option<&[u8]>) -> Option<ContainerFormat>
         // then MBR (generic 0x55AA signature with partition entries),
         // then ISO 9660 ("CD001" at sector 16; after the partition maps, so
         // isohybrid images keep opening as their partition table),
+        // then UDF (only without a usable ISO 9660 volume, so bridge discs
+        // keep opening as ISO 9660),
         // then RAR and ARJ (distinctive magic, no ambiguity; ARJ also needs
         // a CRC-checked header)
         if is_fat_image(data) {
@@ -1979,8 +2155,8 @@ pub fn detect_format(path: &str, data: Option<&[u8]>) -> Option<ContainerFormat>
         if is_mbr_image(data) {
             return Some(ContainerFormat::Mbr);
         }
-        if is_iso9660_image(data) {
-            return Some(ContainerFormat::Iso9660);
+        if let Some(format) = optical_disc_format(data) {
+            return Some(format);
         }
         #[cfg(feature = "__backend_dos_rar")]
         if is_rar_archive(data) {

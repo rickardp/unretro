@@ -850,3 +850,23 @@ Faults of the tools examined. They explain rules; none is to be imitated.
    skipped entry with a reason (or, where stated, the end of the listing
    with what was listed so far); none aborts the entries that are
    independent of it.
+
+## Clean-room feedback
+
+Notes from the implementation side (clean room); prose only, not written
+from any decoder's source.
+
+1. **C1, self-extracting archives.** The search that C1 leaves to "the
+   layer that handles self-extracting files" is done by the RAR reader
+   itself, with one rule for all three containers: see the feedback
+   section of `rar4-container.md`. At the found offset the structural
+   checks of section 2.2 apply unchanged. The RAR 1.402 distribution
+   (`RAR1_402.EXE`, archive at offset 6,491) is read this way; its nine
+   members match their references.
+2. **C11 together with C10.** A split file that is abandoned because
+   the next volume brings a different file stops the chain when it was
+   packed, and does not when it was stored (a stored file takes no part
+   in the chain, section 4.1). The same holds when the next volume is
+   missing altogether.
+3. **Names of the results of C10 and V4**: see item 2 of the feedback
+   section of `rar20.md`.
