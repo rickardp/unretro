@@ -49,7 +49,7 @@ use crate::formats::macintosh::{
     ResourceForkContainer,
     apm::{ApmContainer, is_apm_image},
     apple_double,
-    compactpro::{CompactProContainer, is_compactpro_archive},
+    compactpro::{self, CompactProContainer, is_compactpro_archive},
     hfs::{HfsContainer, is_hfs_image},
     macbinary::{
         AppleSingleContainer, MacBinaryContainer, is_apple_single_file, is_macbinary_file,
@@ -105,7 +105,7 @@ use crate::formats::hybrid::with_iso_side;
 use crate::formats::dos::rar::{self, RarContainer, is_rar_archive};
 
 #[cfg(feature = "dos")]
-use crate::formats::dos::udf::{UdfContainer, is_udf_image};
+use crate::formats::dos::udf::{UdfContainer, is_udf_image, is_writable_volume};
 
 #[cfg(feature = "next")]
 use crate::formats::next::disklabel::{NextDisklabelContainer, is_next_disklabel};
@@ -127,7 +127,11 @@ struct LoaderOptions {
 }
 
 /// Diagnostic code describing a traversal issue.
+///
+/// New codes may be added in minor releases; include a wildcard arm when
+/// matching.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum TraversalDiagnosticCode {
     /// Root container path could not be opened or read.
     RootOpenFailed,
@@ -655,10 +659,11 @@ impl Loader {
                                 return Ok((Some(source), opened?));
                             }
                             let rsrc_path = format!("{path_str}/..namedfork/rsrc");
-                            let container = Box::new(HfsContainer::from_bytes_with_sibling_lookup(
+                            let container = open_mac_disk(
                                 source.as_slice(),
                                 path_str,
                                 self.max_depth,
+                                options,
                                 |sibling_name| {
                                     if sibling_name == "..namedfork/rsrc" {
                                         fs::read(&rsrc_path).ok()
@@ -666,11 +671,29 @@ impl Loader {
                                         None
                                     }
                                 },
-                            )?);
+                            )?;
                             let container =
                                 with_iso_side(container, source.as_slice(), self.max_depth);
                             return Ok((Some(source), container));
                         }
+                    }
+
+                    // The earlier segments of a Compact Pro set sit next to
+                    // the last one.
+                    #[cfg(all(feature = "macintosh", feature = "std"))]
+                    if compactpro::last_segment_number(source.as_slice()).is_some()
+                        && detect_format(&path_str, Some(source.as_slice()))
+                            == Some(ContainerFormat::CompactPro)
+                    {
+                        let name = path.file_name().and_then(|name| name.to_str());
+                        let container = Box::new(CompactProContainer::from_bytes_with_segments(
+                            source.as_slice(),
+                            path_str.clone(),
+                            self.max_depth,
+                            name.unwrap_or_default(),
+                            &|name| fs::read(path.with_file_name(name)).ok(),
+                        )?);
+                        return Ok((Some(source), container));
                     }
 
                     // Later volumes of an ARJ set sit next to the first one.
@@ -997,6 +1020,19 @@ where
             }
         }
 
+        // An earlier segment of a Compact Pro set is read through the last
+        // one, which holds the index.
+        #[cfg(feature = "macintosh")]
+        if depth > 1 {
+            if let Some(rel) = extract_relative_path(entry.path, &prefix) {
+                if compactpro::is_read_through_later_segment(&rel, entry.data, &|name| {
+                    container.read_file(name).map(Cow::into_owned)
+                }) {
+                    return Ok(true);
+                }
+            }
+        }
+
         // Look for an AppleDouble sidecar and, if present, extract the
         // type/creator + resource fork from it. This lets us enrich the entry
         // with Mac metadata while still running the normal yield/recurse flow
@@ -1189,7 +1225,7 @@ where
                             return Some(data.to_vec());
                         }
                         // Siblings named by full path, such as ARJ volumes.
-                        #[cfg(feature = "dos")]
+                        #[cfg(any(feature = "macintosh", feature = "dos"))]
                         if let Some(rel) = extract_relative_path(sibling_path, &prefix) {
                             return container.read_file(&rel).map(Cow::into_owned);
                         }
@@ -1629,7 +1665,7 @@ fn open_container_internal(
         }
         #[cfg(feature = "macintosh")]
         Some(ContainerFormat::Hfs) => Ok(with_iso_side(
-            Box::new(HfsContainer::from_bytes(data, prefix.to_string(), depth)?),
+            open_mac_disk(data, prefix.to_string(), depth, options, |_| None)?,
             data,
             depth,
         )),
@@ -1851,11 +1887,8 @@ where
             }
             // Build the sibling resource fork path: data_fork_path + /..namedfork/rsrc
             let rsrc_sibling_path = format!("{path}/..namedfork/rsrc");
-            let container = Box::new(HfsContainer::from_bytes_with_sibling_lookup(
-                data,
-                prefix.to_string(),
-                depth,
-                |sibling_name| {
+            let container =
+                open_mac_disk(data, prefix.to_string(), depth, options, |sibling_name| {
                     // The HFS container asks for "..namedfork/rsrc" relative to itself
                     // We need to translate that to the full path in the parent container
                     if sibling_name == "..namedfork/rsrc" {
@@ -1863,9 +1896,23 @@ where
                     } else {
                         None
                     }
-                },
-            )?);
+                })?;
             return Ok(with_iso_side(container, data, depth));
+        }
+    }
+
+    // The earlier segments of a Compact Pro set are siblings of the last one.
+    #[cfg(feature = "macintosh")]
+    if compactpro::last_segment_number(data).is_some() {
+        let format = pre_detected_format.or_else(|| detect_format(path, Some(data)));
+        if matches!(format, Some(ContainerFormat::CompactPro)) {
+            return Ok(Box::new(CompactProContainer::from_bytes_with_segments(
+                data,
+                prefix.to_string(),
+                depth,
+                path,
+                &|name| get_sibling(name),
+            )?));
         }
     }
 
@@ -1917,16 +1964,17 @@ where
 }
 
 // ISO 9660 or UDF. A disc carrying both opens as ISO 9660 unless that volume
-// has no root directory to read.
+// has no root directory to read, or the UDF volume is a writable one: packet
+// writers leave an ISO 9660 volume that holds only their reader software.
 #[cfg(feature = "dos")]
 fn optical_disc_format(data: &[u8]) -> Option<ContainerFormat> {
-    if is_iso9660_image(data) && (has_readable_root(data) || !is_udf_image(data)) {
-        Some(ContainerFormat::Iso9660)
-    } else if is_udf_image(data) {
-        Some(ContainerFormat::Udf)
-    } else {
-        None
+    if is_iso9660_image(data) && !is_writable_volume(data) {
+        if has_readable_root(data) || !is_udf_image(data) {
+            return Some(ContainerFormat::Iso9660);
+        }
+        return Some(ContainerFormat::Udf);
     }
+    is_udf_image(data).then_some(ContainerFormat::Udf)
 }
 
 // The volume a disc image holds, by the Macintosh and optical probes.
@@ -2016,6 +2064,33 @@ fn open_xa_framed(
     let (cooked_format, cooked) = xa_framed_volume(data)?;
     (format == Some(cooked_format))
         .then(|| open_container_internal(&cooked, path, prefix, depth, options, format))
+}
+
+// A Macintosh disk image: its volume, or its partitions when a UDIF, DiskCopy
+// 4.2 or NDIF wrapper holds a disk with an Apple Partition Map.
+#[cfg(feature = "macintosh")]
+fn open_mac_disk<F>(
+    data: &[u8],
+    prefix: String,
+    depth: u32,
+    options: LoaderOptions,
+    get_sibling: F,
+) -> Result<Box<dyn Container>>
+where
+    F: Fn(&str) -> Option<Vec<u8>>,
+{
+    use crate::formats::macintosh::hfs::Opened;
+    Ok(
+        match HfsContainer::open(data, prefix.clone(), depth, get_sibling)? {
+            Opened::Volume(volume) => Box::new(volume),
+            Opened::Partitioned(image) => Box::new(ApmContainer::from_bytes(
+                &image,
+                prefix,
+                depth,
+                options.numeric_identifiers,
+            )?),
+        },
+    )
 }
 
 #[cfg(all(feature = "macintosh", not(feature = "dos")))]

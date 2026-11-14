@@ -204,7 +204,10 @@ fn reported_method(fork: &ForkInfo) -> u8 {
 }
 
 fn build_stuffit_metadata(entry: &SitEntry) -> Option<Metadata> {
-    let mut meta = Metadata::new().with_type_creator(entry.file_type, entry.creator);
+    // Modification time: zone-less seconds since 1904 (containers.md 2.6).
+    let mut meta = Metadata::new()
+        .with_type_creator(entry.file_type, entry.creator)
+        .with_modified(crate::Timestamp::from_mac(entry.modified, true));
     let data_method = reported_method(&entry.data);
     let rsrc_method = reported_method(&entry.rsrc);
 

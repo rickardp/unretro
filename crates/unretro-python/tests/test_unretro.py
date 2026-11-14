@@ -93,7 +93,10 @@ def temp_gzip_file(simple_gzip_bytes, tmp_path):
 # tests/test_unretro.py is at crates/unretro-python/tests/test_unretro.py
 # parent chain: tests -> unretro-python -> crates -> repo-root
 REPO_ROOT = Path(__file__).parent.parent.parent.parent
-TESTDATA_DIR = REPO_ROOT.parent / "unretro-samples" / "data"
+# The samples repository: named by UNRETRO_SAMPLES, else a checkout beside this one.
+TESTDATA_DIR = Path(
+    os.environ.get("UNRETRO_SAMPLES") or REPO_ROOT.parent / "unretro-samples" / "data"
+)
 UNRETRO_TESTDATA = REPO_ROOT / "testdata"
 
 

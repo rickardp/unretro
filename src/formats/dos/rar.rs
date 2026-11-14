@@ -57,31 +57,52 @@ fn check_size_limit(unpacked_size: u64) -> core::result::Result<(), String> {
 // Packed and unpacked bytes of the current solid chain. A later member may
 // be tiny because it repeats earlier ones, so the ratio limit is applied to
 // the chain as a whole.
-#[derive(Default)]
 struct Ratio {
     packed: u64,
     unpacked: u64,
+    // What the archive may still decode beyond the ratio limit. Constant
+    // data such as a blank disk image packs far better than the limit
+    // allows, so this much per archive is let through regardless.
+    exempt: u64,
+}
+
+impl Default for Ratio {
+    fn default() -> Self {
+        Self {
+            packed: 0,
+            unpacked: 0,
+            exempt: crate::limits::BUDGET_FLOOR,
+        }
+    }
 }
 
 impl Ratio {
+    fn start_chain(&mut self) {
+        self.packed = 0;
+        self.unpacked = 0;
+    }
+
     // The limits for a member of `packed` bytes declaring `size`; `fresh`:
     // it starts a chain.
     fn check(&mut self, fresh: bool, packed: u64, size: u64) -> core::result::Result<(), String> {
         if fresh {
-            *self = Self::default();
+            self.start_chain();
         }
         let packed = self.packed.saturating_add(packed);
         let unpacked = self.unpacked.saturating_add(size);
         check_size_limit(size)?;
-        check_ratio_limit(packed, unpacked)?;
-        *self = Self { packed, unpacked };
+        if let Err(reason) = check_ratio_limit(packed, unpacked) {
+            self.exempt = self.exempt.checked_sub(size).ok_or(reason)?;
+        }
+        self.packed = packed;
+        self.unpacked = unpacked;
         Ok(())
     }
 
     // For a member of unknown size: the most it may decode to.
     fn allowance(&mut self, fresh: bool, packed: u64) -> u64 {
         if fresh {
-            *self = Self::default();
+            self.start_chain();
         }
         self.packed = self.packed.saturating_add(packed);
         let base = self.packed.max(RATIO_CHECK_MIN_PACKED);
@@ -215,10 +236,10 @@ impl RarContainer {
         let mut later: Vec<Vec<u8>> = Vec::new();
         let mut last = first;
         let mut number = 0;
-        while let Some(run) = runs.last_mut()
-            && !last.stop
-            && (last.next != Next::None || last.open)
-        {
+        while !last.stop && (last.next != Next::None || last.open) {
+            let Some(run) = runs.last_mut() else {
+                break;
+            };
             // A volume that may or may not be the last: a missing or foreign
             // next file just ends the set.
             let optional = last.next == Next::Possible && !last.open;
@@ -364,9 +385,7 @@ fn parse_volume_name(name: &str) -> Option<VolumeName<'_>> {
     }
     let sfx = is_sfx_extension(extension);
     if sfx || extension.eq_ignore_ascii_case("rar") {
-        let digits_at = stem
-            .rfind(|c: char| !c.is_ascii_digit())
-            .map_or(0, |at| at + 1);
+        let digits_at = stem.trim_end_matches(|c: char| c.is_ascii_digit()).len();
         let head = &stem[..digits_at];
         let is_part = digits_at < stem.len()
             && head.len() >= 5
@@ -746,9 +765,10 @@ fn reason(error: &Error) -> String {
     text.strip_prefix("RAR: ").unwrap_or(text).to_string()
 }
 
-fn method_metadata(level: u8) -> Option<Metadata> {
+fn method_metadata(level: u8, modified: Option<crate::Timestamp>) -> Option<Metadata> {
+    let metadata = Metadata::new().with_modified(modified);
     let method_name = match level {
-        0 => return None, // Stored
+        0 => return modified.map(|_| metadata), // Stored
         1 => "fastest",
         2 => "fast",
         3 => "normal",
@@ -756,7 +776,20 @@ fn method_metadata(level: u8) -> Option<Metadata> {
         5 => "best",
         _ => "unknown",
     };
-    Some(Metadata::new().with_compression_method(method_name))
+    Some(metadata.with_compression_method(method_name))
+}
+
+// RAR 1.5 to 4.x record the zone-less local time of the archiving machine.
+fn rar4_modified(time: container4::Timestamp) -> Option<crate::Timestamp> {
+    crate::Timestamp::civil_seconds(
+        i64::from(time.year),
+        u32::from(time.month),
+        u32::from(time.day),
+        u32::from(time.hour),
+        u32::from(time.minute),
+        u32::from(time.second),
+    )
+    .map(crate::Timestamp::local)
 }
 
 // ============================================================================
@@ -1036,7 +1069,7 @@ impl OldReader<'_> {
             Ok(data)
         });
         self.out
-            .deliver(member.name, method_metadata(member.level), result);
+            .deliver(member.name, method_metadata(member.level, None), result);
     }
 
     fn unpack(
@@ -1351,7 +1384,10 @@ impl Rar4Run<'_, '_> {
         if named_as_directory && member.packed_size == 0 && size == 0 {
             return;
         }
-        let metadata = method_metadata(member.method.wrapping_sub(RAR4_METHOD_STORE));
+        let metadata = method_metadata(
+            member.method.wrapping_sub(RAR4_METHOD_STORE),
+            member.modified.and_then(rar4_modified),
+        );
         out.deliver(&name, metadata, result);
     }
 
@@ -1551,7 +1587,10 @@ fn read_rar5_run(out: &mut Output, volumes: &[&[u8]], parsed: Parsed) {
                 }
             }
         };
-        let metadata = method_metadata(member.compression.method);
+        let metadata = method_metadata(
+            member.compression.method,
+            member.mtime.map(|time| crate::Timestamp::utc(time.seconds)),
+        );
         if let Some(slot) = delivered.get_mut(index) {
             *slot = out.deliver(&name, metadata, result);
         }
@@ -1639,10 +1678,10 @@ impl Rar5Run<'_, '_> {
         member: &container5::Member,
         previous: Option<usize>,
     ) -> core::result::Result<Vec<u8>, String> {
-        if let Some(previous) = previous
-            && (self.failed.get(previous).copied().unwrap_or(true)
-                || self.last_decoded != Some(previous))
-        {
+        if previous.is_some_and(|previous| {
+            self.failed.get(previous).copied().unwrap_or(true)
+                || self.last_decoded != Some(previous)
+        }) {
             return Err(BROKEN_CHAIN.to_string());
         }
         let fresh = previous.is_none();
@@ -1773,6 +1812,22 @@ mod tests {
         assert_eq!(rar4_name_field(b"plain.txt", 0), "plain.txt");
     }
 
+    #[test]
+    fn volume_names_with_multibyte_characters() {
+        for name in [
+            "caf\u{e9}.rar",
+            "caf\u{e9}.exe",
+            "\u{65e5}\u{672c}12.rar",
+            "\u{e9}.r00",
+        ] {
+            assert!(parse_volume_name(name).is_some(), "{name}");
+        }
+        assert!(matches!(
+            parse_volume_name("caf\u{e9}.part2.rar"),
+            Some(VolumeName::Part("caf\u{e9}.part", "2", ".rar"))
+        ));
+    }
+
     // The limits for a member that starts a chain.
     fn check_declared_size(packed: u64, unpacked: u64) -> core::result::Result<(), String> {
         Ratio::default().check(true, packed, unpacked)
@@ -1800,7 +1855,11 @@ mod tests {
     fn declared_size_rejects_tiny_entry_claiming_huge_output() {
         // Entries under 64 packed bytes used to skip the check entirely.
         for packed in [0, 1, 63] {
-            for unpacked in [1 << 20, crate::MAX_DECOMPRESSED_SIZE, u64::MAX] {
+            for unpacked in [
+                crate::limits::BUDGET_FLOOR + 1,
+                crate::MAX_DECOMPRESSED_SIZE,
+                u64::MAX,
+            ] {
                 assert!(
                     check_declared_size(packed, unpacked).is_err(),
                     "{packed} -> {unpacked}"
@@ -1810,8 +1869,21 @@ mod tests {
     }
 
     #[test]
+    fn ratio_limit_exempts_a_small_total_per_archive() {
+        // A blank floppy image packs far beyond the ratio limit.
+        let mut reader = Ratio::default();
+        assert!(reader.check(true, 40, 1_474_560).is_ok());
+        // The exemption is shared by all members of the archive.
+        assert!(reader.check(true, 40, 10 << 20).is_ok());
+        assert!(reader.check(true, 40, 10 << 20).is_err());
+        // Members within the ratio limit do not draw on it.
+        assert!(reader.check(true, 1 << 20, 100 << 20).is_ok());
+        assert!(reader.check(true, 40, 4 << 20).is_ok());
+    }
+
+    #[test]
     fn declared_size_rejects_ratio_and_absolute_limit() {
-        let err = check_declared_size(1000, 1000 * 1001).unwrap_err();
+        let err = check_declared_size(100_000, 100_000 * 1001).unwrap_err();
         assert!(err.contains("compression ratio"), "{err}");
 
         // Ratio is fine (1:1) but the size is past MAX_DECOMPRESSED_SIZE.
@@ -2794,7 +2866,7 @@ mod tests {
             .collect();
         digits
             .chunks(2)
-            .map(|pair| pair[0] << 4 | pair[1])
+            .map(|pair| (pair[0] << 4) | pair[1])
             .collect()
     }
 
@@ -2885,8 +2957,8 @@ mod tests {
     #[test]
     fn ratio_limit_applies_to_the_solid_chain() {
         let mut reader = Ratio::default();
-        // Alone, 2 MiB from 100 bytes is refused.
-        assert!(reader.check(true, 100, 2 << 20).is_err());
+        // Alone, 32 MiB from 100 bytes is refused.
+        assert!(reader.check(true, 100, 32 << 20).is_err());
         // After 2 MiB that took 1 MiB, the same member repeats earlier data.
         assert!(reader.check(true, 1 << 20, 2 << 20).is_ok());
         assert!(reader.check(false, 100, 2 << 20).is_ok());

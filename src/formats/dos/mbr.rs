@@ -161,7 +161,7 @@ impl MbrContainer {
 fn partition_name(index: usize, data: &[u8], numeric: bool) -> String {
     if !numeric {
         if let Some(label) = super::partition_label(data) {
-            return label;
+            return crate::sanitize_path_component(&label);
         }
     }
     format!("p{index}.img")

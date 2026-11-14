@@ -1070,7 +1070,11 @@ fn print_list_json(path: &str, numeric: bool) -> Result<VisitReport, Box<dyn std
                 name: entry_name.to_string(),
                 size: entry.data.len() as u64,
                 format: entry.container_format,
-                metadata: entry.metadata.as_ref().map(|m| m.to_string()),
+                metadata: entry
+                    .metadata
+                    .as_ref()
+                    .map(|m| m.to_string())
+                    .filter(|text| !text.is_empty()),
                 children: Vec::new(),
             };
 

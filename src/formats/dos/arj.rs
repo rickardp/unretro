@@ -4,7 +4,7 @@ use crate::format::ContainerFormat;
 use crate::formats::common::crc32::crc32;
 use crate::limits::{OutputBudget, prealloc_hint};
 use crate::sanitize_archive_path;
-use crate::{Container, ContainerInfo, Entry, Metadata};
+use crate::{Container, ContainerInfo, Entry, Metadata, Timestamp};
 
 // =============================================================================
 // Headers
@@ -67,6 +67,17 @@ impl Header<'_> {
 
     fn file_type(&self) -> u8 {
         self.fixed[6]
+    }
+
+    // Modification time. MS-DOS format, time in the low word and date in the
+    // high one; archives written on Unix hosts hold Unix time in the same
+    // field (the committed fixtures, made in 2026, read as 2033 otherwise).
+    fn modified(&self) -> Option<Timestamp> {
+        if matches!(self.host_os(), HOST_UNIX | HOST_NEXT) {
+            let seconds = le32(self.fixed, 8);
+            return (seconds != 0).then(|| Timestamp::utc(i64::from(seconds)));
+        }
+        Timestamp::from_dos(le16(self.fixed, 10), le16(self.fixed, 8))
     }
 
     fn compressed_size(&self) -> u32 {
@@ -574,6 +585,7 @@ struct ArjEntry {
     method: u8,
     // Permission bits, when the host stores Unix ones.
     mode: Option<u16>,
+    modified: Option<Timestamp>,
 }
 
 // Entries left out of the listing.
@@ -726,6 +738,7 @@ impl SetReader {
                     method: header.method(),
                     mode: matches!(header.host_os(), HOST_UNIX | HOST_NEXT)
                         .then(|| header.access_mode()),
+                    modified: header.modified(),
                 },
             };
             if continues {
@@ -895,7 +908,9 @@ impl Container for ArjContainer {
     fn visit(&self, visitor: &mut dyn FnMut(&Entry<'_>) -> Result<bool>) -> Result<()> {
         for entry in &self.entries {
             let path = format!("{}/{}", self.prefix, sanitize_archive_path(&entry.path));
-            let mut metadata = Metadata::new().with_compression_method(method_name(entry.method));
+            let mut metadata = Metadata::new()
+                .with_compression_method(method_name(entry.method))
+                .with_modified(entry.modified);
             if let Some(mode) = entry.mode {
                 metadata = metadata.with_mode(unix_mode(mode));
             }

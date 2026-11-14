@@ -8,7 +8,7 @@ use crate::error::{Error, Result};
 use crate::format::ContainerFormat;
 use crate::limits::{OutputBudget, prealloc_hint};
 use crate::sanitize_archive_path;
-use crate::{Container, ContainerInfo, Entry};
+use crate::{Container, ContainerInfo, Entry, Metadata, Timestamp};
 
 use super::image::{self, BLOCK_SIZE, Blocks, TaggedImage, Wrapped};
 
@@ -282,7 +282,13 @@ fn name_to_string(name: &[u8]) -> String {
 struct LisaFile {
     path: String,
     data: Vec<u8>,
+    modified: Option<Timestamp>,
 }
+
+// Seconds between 1901-01-01 and 1970-01-01 (lisafs.md 12).
+const LISA_EPOCH_OFFSET: i64 = 2_177_452_800;
+// DTM in the hint entry at the start of the leader page (lisafs.md 7.1).
+const HINT_MODIFIED: usize = 0x36;
 
 // A type-3 catalog entry.
 struct CatalogFile {
@@ -295,6 +301,8 @@ struct CatalogFile {
 
 struct FileData {
     data: Vec<u8>,
+    // Zone-less seconds since 1901; zero means never.
+    modified: u32,
     // Set when the contents were cut short.
     note: Option<&'static str>,
 }
@@ -544,6 +552,9 @@ impl<'a> Walk<'a> {
                 })
         });
         let leader = trusted.ok_or("stale S-list entry")?;
+        let modified = self
+            .page(leader)
+            .map_or(0, |hint| be32(hint, HINT_MODIFIED));
         let mut length = u32::try_from(size).map_err(|_| "negative file size")?;
         let mut note = None;
         // D11: the smaller of the two sizes when the catalog disagrees.
@@ -555,6 +566,7 @@ impl<'a> Walk<'a> {
         if length == 0 {
             return Ok(FileData {
                 data: Vec::new(),
+                modified,
                 note,
             });
         }
@@ -595,7 +607,11 @@ impl<'a> Walk<'a> {
                 }
             }
         }
-        Ok(FileData { data, note })
+        Ok(FileData {
+            data,
+            modified,
+            note,
+        })
     }
 
     fn valid_file_number(&self, file: i16) -> Option<u16> {
@@ -788,6 +804,9 @@ impl<'a> Walk<'a> {
                     files.push(LisaFile {
                         path,
                         data: contents.data,
+                        modified: (contents.modified != 0).then(|| {
+                            Timestamp::local(i64::from(contents.modified) - LISA_EPOCH_OFFSET)
+                        }),
                     });
                 }
                 Err(why) => self.damage(&path, why),
@@ -890,7 +909,13 @@ impl Container for LisaFsContainer {
     fn visit(&self, visitor: &mut dyn FnMut(&Entry<'_>) -> Result<bool>) -> Result<()> {
         for entry in &self.entries {
             let path = format!("{}/{}", self.prefix, sanitize_archive_path(&entry.path));
+            let metadata = Metadata::new().with_modified(entry.modified);
             let e = Entry::new(&path, &self.prefix, &entry.data);
+            let e = if entry.modified.is_some() {
+                e.with_metadata(&metadata)
+            } else {
+                e
+            };
 
             if !visitor(&e)? {
                 return Ok(());

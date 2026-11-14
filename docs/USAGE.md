@@ -150,6 +150,42 @@ Root-level failures and recoverable nested issues are separated in the report.
 - Copy entry bytes if needed after callback returns.
 - `path` is full virtual path; `container_path` is owning container path; `relative_path()` is path inside that container.
 
+### Modification Times
+
+`Metadata::modified` is an `Option<Timestamp>`: `seconds` since 1970-01-01 00:00:00 and a
+`local` flag. Many retro formats record the wall-clock time of the machine that wrote
+them, with no time zone; for those `local` is `true` and `seconds` is right as a calendar
+date and time of day but not as an instant. With `local` false the value is Unix time
+(UTC). The CLI does not print it; it is available to Rust and Python callers.
+
+| Format | Source | `local` |
+|:--|:--|:--|
+| tar | header `mtime`, or the pax `mtime` record (fraction dropped) | no |
+| ZIP | Info-ZIP extended timestamp if present, else the MS-DOS date and time | no / yes |
+| gzip | `MTIME` of the first member; zero is "not set" | no |
+| LHA / LZH | Unix or Windows time of an extended header, else the MS-DOS field | no / yes |
+| ARJ | MS-DOS date and time; Unix time for archives written on Unix or NeXT hosts | yes / no |
+| RAR 1.5 to 4.x | file time | yes |
+| RAR 5 | modification time of the file header or its time record | no |
+| FAT | last write date and time | yes |
+| ISO 9660 | recording date and time of the directory record, with its GMT offset applied | no |
+| High Sierra | recording date and time (no offset is stored) | yes |
+| UDF | modification time of the file entry; with a stored UTC offset it is applied | no / yes |
+| HFS, MFS | modification date | yes |
+| HFS Plus, HFSX | content modification date (a hard link has its target's) | no |
+| StuffIt, CompactPro, MacBinary | modification date | yes |
+| AppleSingle | modification time of the File Dates entry | no |
+| ADF | last change of the file header | yes |
+| UFS | i-node modification time | no |
+| BFS | i-node modification time | no |
+| Lisa FS | modification date of the file's hint entry; zero is "never" | yes |
+
+Not set for: RAR 1.3/1.4 archives, bzip2, XZ/LZMA and Unix compress files, BinHex,
+standalone AppleDouble sidecars and resource fork entries, partitions and tracks of
+partition tables and disc images (MBR, GPT, APM, NeXT labels, CUE/BIN, NRG), El Torito
+boot images and the game formats. Rock Ridge and Joliet do not change the ISO 9660
+value. A date the container stores as zero or with fields out of range is not set.
+
 ## Classic Mac Resource Forks
 
 Every resource is yielded as `<owner>/..namedfork/rsrc/<TYPE>/<name>` (or `<TYPE>/#<id>`
@@ -225,6 +261,42 @@ Read-only, `macintosh` feature (`ContainerFormat::StuffIt`). Decoded natively, a
   file is still yielded and the traversal reports one recoverable
   `ContainerEntriesSkipped` diagnostic.
 
+## CompactPro Archives
+
+Read-only, `macintosh` feature (`ContainerFormat::CompactPro`). Decoded natively, also
+in `no_std` and `wasm32` builds.
+
+- Detected at offset 0 by structural checks (the marker byte, a directory offset inside
+  the file, a plausible entry count and first name), not by the `.cpt` extension alone.
+- Both fork encodings are read: run-length only, and run-length with LZH. The
+  `compression_method` metadata is `rle` or `rle+lzh`, or `data:<m>, rsrc:<m>` when the
+  two forks differ; the Finder type and creator are reported as well.
+- Files are yielded as `<archive>/<folder>/.../<name>` with the data fork as the entry
+  data, followed by `<file>/..namedfork/rsrc` when the resource fork holds a resource
+  map. Folders themselves are not yielded.
+- Each file's CRC-32, which covers both forks, is verified. A file that fails it, is
+  encrypted, or whose data fork cannot be decoded is left out; a resource fork that
+  cannot be decoded is left out on its own and the data fork is still yielded (then
+  unverified). Either case is reported by one recoverable `ContainerEntriesSkipped`
+  diagnostic. The directory CRC is not verified.
+- Segmented archives are read through their last segment, the only one that holds the
+  directory; it opens as `ContainerFormat::CompactPro` and lists every file of the set.
+  The earlier segments are looked up next to it, on disk or in the same archive or
+  volume, by replacing the segment number in its name: `Name.cpt.#3` reads
+  `Name.cpt.#2` and `Name.cpt.#1`, `Name.#3.cpt` reads `Name.#2.cpt` and `Name.#1.cpt`,
+  and `Name.cpt.3` reads `Name.cpt.2` and `Name.cpt.1`. A first segment that kept the
+  plain name (`Name.cpt` beside `Name.cpt.#2`) is found too, also when it is wrapped in
+  MacBinary, as self-extracting first segments often are. A file is taken only when its
+  header carries the expected segment number and the set's identifier, so a renamed
+  file of another set is not mixed in.
+- An earlier segment that the next segment beside it reads is not listed on its own. A
+  file whose data lies in a segment that is not found is left out and reported as
+  `segment N of M is missing`; files stored wholly in the segments at hand are still
+  read. An earlier segment opened directly is not recognised, as it has no directory.
+- Limits: all forks of one archive together may unpack to at most 2048 times the
+  archive length (of all its segments), and to at least 16 MiB; forks beyond that are
+  left out the same way.
+
 ## HFS Plus and HFSX Volumes
 
 Read-only, `macintosh` feature. HFS Plus and HFSX open as `ContainerFormat::Hfs`, like
@@ -272,7 +344,8 @@ HFS and MFS; there is no separate format value.
   at most 4 GiB); links beyond that are left out and reported.
 - Not listed: the private metadata directories that hold link targets, `.journal` and
   `.journal_info_block` of a journaled volume, symbolic links, device nodes, FIFOs and
-  sockets, and files whose forks are both empty. Folders are not entries.
+  sockets. Folders are not entries. A file whose forks are both empty is an entry of
+  0 bytes, on HFS and MFS volumes too.
 - Not supported:
   - Journal replay. The volume is read as it is on disk, so an image of a volume that
     was not unmounted cleanly can show the state before its last changes.
@@ -281,7 +354,7 @@ HFS and MFS; there is no separate format value.
     content elsewhere. With the content in its resource fork it appears as an empty
     file with a resource fork that is not a resource map (reported as one
     `NestedContainerOpenFailed` diagnostic). With an empty resource fork as well it is
-    not listed, like any file whose forks are both empty.
+    an empty file.
   - Extended attributes (the attributes file) and directory hard links.
   - LZFSE compressed UDIF images (`ULFO`) and encrypted images.
 - Damage: a fork whose extents leave the image is cut short. Left out are files with a
@@ -316,9 +389,14 @@ Read-only, `macintosh` feature (`ContainerFormat::Apm`).
   zero length, one that starts at block 0 or past the end, and one that shares bytes
   with an earlier listed partition are left out, without a diagnostic. Maps declaring
   more than 128 entries are not recognised.
-- Not covered: a partition map inside a UDIF or NDIF disk image or behind a DiskCopy
-  4.2 header. Those still open as `ContainerFormat::Hfs`, presenting the first HFS
-  partition.
+- A partitioned disk inside a UDIF (`.dmg`) or NDIF disk image, or behind a DiskCopy
+  4.2 header, is listed the same way. `detect_format` still reports such a file as
+  `ContainerFormat::Hfs` (the wrapper is recognised without decoding it); opening it
+  gives a container whose `info().format` is `ContainerFormat::Apm`. A UDIF image with
+  a GUID partition table, or with a bare volume, opens as `Hfs` as before.
+- Exception: a wrapped image that decodes to more than 1032 times the size of its file
+  (at least 16 MiB) is nearly all zero-fill; it opens as `Hfs`, presenting its first
+  HFS partition, because only that reader avoids committing memory for zero-fill.
 
 ## ISO 9660 CD-ROM Images
 
@@ -401,10 +479,12 @@ Read-only, `dos` feature (`ContainerFormat::Udf`, extension `.udf`).
   descriptor sequence. Cooked images with logical blocks of 2048, 512, 1024 or 4096
   bytes, and raw 2352-byte sector dumps (2048-byte blocks only).
 - Bridge discs: an image that also has an ISO 9660 volume keeps opening as
-  `ContainerFormat::Iso9660`, whatever its extension. UDF is chosen only when there is
-  no ISO 9660 volume or when that volume has no root directory to read (neither the
-  primary nor the Joliet root is where its descriptor says). HFS, FAT, GPT and MBR are
-  tried before both.
+  `ContainerFormat::Iso9660`, whatever its extension. UDF is chosen when there is no
+  ISO 9660 volume, when that volume has no root directory to read (neither the primary
+  nor the Joliet root is where its descriptor says), or when the UDF partition is
+  marked write-once, rewritable or overwritable: packet writers (DirectCD, InCD) keep
+  the files in such a volume and leave an ISO 9660 one that holds only their reader
+  software. HFS, FAT, GPT and MBR are tried before both.
 - Revisions 1.02 to 2.60: file entries and extended file entries, ICB strategy 4,
   indirect entries, short, long and extended allocation descriptors, data embedded in
   the ICB, continuation extents, and unrecorded or sparse extents, which read as
@@ -718,8 +798,10 @@ Read-only, `dos` feature (`ContainerFormat::Rar`). Read and decoded natively, al
   by `;` and the version number (`hello.txt;1`).
 - The compression-ratio limit (1000:1, measured over at least 64 packed bytes) applies
   to RAR 2.9 to 7 files; for a solid archive it is applied to the files of one solid
-  group together, since a file that repeats earlier ones packs to almost nothing. A
-  RAR 5 file of undeclared size may decode to as much as that limit allows.
+  group together, since a file that repeats earlier ones packs to almost nothing.
+  Files over the limit are still read while they total at most 16 MiB per archive, so
+  that constant data such as a blank disk image is not refused. A RAR 5 file of
+  undeclared size may decode to as much as the ratio limit allows.
 - File names of the RAR 1.3/1.4 container, and names of the RAR 1.50 to 4.x format that
   have no Unicode form and are not UTF-8, are read as code page 437.
 - Multi-volume sets are read through their first volume, which lists the files of every
@@ -765,9 +847,10 @@ and `wasm32` builds; the reader was written from the format specification in
 - Every entry must decode to exactly its declared length and match its CRC-16. An
   entry that is corrupt, truncated, over the output limit or of an unsupported method
   (`-lh2-`, `-lh3-`, `-lhx-`, `-pm0-` to `-pm2-`, ...) is left out. Everything
-  decoded from one archive together may not exceed 1024 times the bytes its entries
-  occupy (headers and packed data; bytes after the end marker do not count). There is
-  no minimum, entries that fail after decoding count like delivered ones, and an
+  decoded from one archive together may not exceed 2048 times the bytes its entries
+  occupy (headers and packed data; bytes after the end marker do not count), or 16 MiB
+  if that is more, so that a blank disk image, which packs to a few hundred bytes, is
+  read. Entries that fail after decoding count like delivered ones, and an
   entry whose declared length is above what is left is not decoded and does not use
   any of it. An entry list that ends early (an invalid header, a truncated
   archive) keeps the entries found so far. In all these cases every readable file is
@@ -867,7 +950,8 @@ written by NeXTSTEP, OPENSTEP and Rhapsody and by 4.2BSD, 4.3BSD, 4.4BSD and Net
   - Volumes that do not start at the first byte of the data: BSD and Sun disk labels
     are not interpreted, and the image is never scanned for a superblock. Backup
     superblocks are not used.
-  - Timestamps, owners and groups (there is no `Metadata` field for them).
+  - Owners and groups (there is no `Metadata` field for them). The modification time
+    is in `Metadata::modified`.
 - Limits: the contents and paths of all listed files together may not exceed twice the
   volume size (at least 16 MiB, at most 4 GiB); a file that does not fit is left out on
   its own and smaller files after it are still listed. At most 4,194,304 files and
@@ -913,8 +997,9 @@ specification in [docs/bfs/](bfs/README.md).
   characters in a name are replaced by `_`; when that would give two files the same
   path, the changed name keeps those characters as `%XX` instead (`a:b` beside `a_b` is
   listed as `a%3Ab`).
-- `Metadata::mode` holds the permission bits as an `ls`-style string (`-rwxr-xr-x`).
-  Owner, group and timestamps are not reported.
+- `Metadata::mode` holds the permission bits as an `ls`-style string (`-rwxr-xr-x`)
+  and `Metadata::modified` the modification time. Owner, group and creation time are
+  not reported.
 - Not listed: directories as such (an empty folder leaves no trace), symbolic links
   (never followed), special nodes, deleted files, attribute directories, the index
   directory and its indices.
@@ -977,8 +1062,8 @@ specification in [docs/lisa/](lisa/README.md).
   as U+FFFD. A `/` inside a name becomes `-`; `\`, `:` and control characters become
   `_`, and a name of `..` becomes `_`. Office System disks show their internal names
   (`{T3}obj`, `{D109T3}`); the desktop names kept in the file labels are not read.
-- Entries carry no metadata: file labels, timestamps, file types and passwords are not
-  surfaced. Password and protection flags are ignored and the contents are delivered as
+- `Metadata::modified` holds the file's modification date (zone-less). File labels,
+  the other dates, file types and passwords are not surfaced. Password and protection flags are ignored and the contents are delivered as
   stored.
 - All files together may not exceed twice the image size (at least 16 MiB); a decoded
   DART image counts against the same limit.

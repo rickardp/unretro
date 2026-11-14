@@ -365,8 +365,9 @@ impl AudioChannel {
                 }
             }
             self.errors = [0; 7];
-            if best > 0
-                && let Some(weight) = self.weights.get_mut((best - 1) / 2)
+            if let Some(weight) = best
+                .checked_sub(1)
+                .and_then(|at| self.weights.get_mut(at / 2))
             {
                 if best % 2 == 1 {
                     if *weight >= -16 {
@@ -610,10 +611,11 @@ fn compile(bytes: &[u8]) -> Result<Compiled> {
         if operands >= 2 {
             second = read_operand(&mut bits, byte_form).ok_or_else(program_truncated)?;
         }
-        if info & IS_JUMP != 0
-            && let Operand::Imm(value) = first
-        {
-            first = Operand::Imm(jump_target(own, value));
+        match first {
+            Operand::Imm(value) if info & IS_JUMP != 0 => {
+                first = Operand::Imm(jump_target(own, value));
+            }
+            _ => {}
         }
         // 16.4.
         let writes_immediate = (info & WRITES_FIRST != 0 && matches!(first, Operand::Imm(_)))
@@ -659,11 +661,12 @@ impl Machine {
 
     fn mark(&mut self, addr: usize) {
         let page = addr >> PAGE_SHIFT;
-        if let Some(flag) = self.dirty.get_mut(page)
-            && !*flag
-        {
-            *flag = true;
-            self.dirty_pages.push(page as u16);
+        match self.dirty.get_mut(page) {
+            Some(flag) if !*flag => {
+                *flag = true;
+                self.dirty_pages.push(page as u16);
+            }
+            _ => {}
         }
     }
 
@@ -1271,9 +1274,7 @@ impl Filters {
         if self.pending() >= MAX_PENDING {
             return Err(corrupt("RAR: too many pending filters"));
         }
-        if let Some(standard) = standard
-            && !standard.accepts(&regs, len)
-        {
+        if standard.is_some_and(|standard| !standard.accepts(&regs, len)) {
             return Err(corrupt("RAR: invalid parameters for a standard filter"));
         }
         let end = start

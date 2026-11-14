@@ -2,7 +2,7 @@ use crate::compat::{String, ToString, Vec, format};
 use crate::error::{Error, Result};
 use crate::format::ContainerFormat;
 use crate::sanitize_path_component;
-use crate::{Container, ContainerInfo, Entry, Metadata};
+use crate::{Container, ContainerInfo, Entry, Metadata, Timestamp};
 
 use super::encoding::decode_mac_roman;
 use super::resource_fork::ResourceFork;
@@ -37,6 +37,13 @@ pub fn is_macbinary_file(data: &[u8]) -> bool {
         return false;
     }
 
+    // Checked before the CRC: 16 bits alone let one foreign file in tens of
+    // thousands through.
+    let filename_len = header[1];
+    if !(1..=63).contains(&filename_len) {
+        return false;
+    }
+
     // MacBinary II: CRC check
     let stored_crc = u16::from_be_bytes([header[124], header[125]]);
     if stored_crc == calc_macbinary_crc(&header[..124]) && stored_crc != 0 {
@@ -44,10 +51,6 @@ pub fn is_macbinary_file(data: &[u8]) -> bool {
     }
 
     // MacBinary I
-    let filename_len = header[1];
-    if !(1..=63).contains(&filename_len) {
-        return false;
-    }
     // No checksum guards this version, and a Mac file name holds no control
     // characters; small binary records otherwise pass for a header.
     if header[2..2 + filename_len as usize]
@@ -93,6 +96,7 @@ pub struct MacBinaryContainer {
     resource_fork: Vec<u8>,
     file_type: [u8; 4],
     creator: [u8; 4],
+    modified: Option<Timestamp>,
 }
 
 impl MacBinaryContainer {
@@ -119,6 +123,12 @@ impl MacBinaryContainer {
         let rsrc_len =
             u32::from_be_bytes([header[87], header[88], header[89], header[90]]) as usize;
 
+        // Modification date: zone-less seconds since 1904.
+        let modified = Timestamp::from_mac(
+            u32::from_be_bytes([header[95], header[96], header[97], header[98]]),
+            true,
+        );
+
         let is_macbinary_iii = &header[102..106] == b"mBIN";
         let secondary_header_len = if is_macbinary_iii {
             u16::from_be_bytes([header[120], header[121]]) as usize
@@ -127,23 +137,22 @@ impl MacBinaryContainer {
         };
         let secondary_header_padded = next_multiple_of_128(secondary_header_len);
 
+        // Fork lengths are 32-bit fields: sums are checked so that they
+        // cannot wrap on 32-bit targets.
+        let fork = |start: Option<usize>, len: usize| {
+            start
+                .filter(|_| len > 0)
+                .and_then(|start| data.get(start..start.checked_add(len)?))
+                .map_or_else(Vec::new, <[u8]>::to_vec)
+        };
         let data_start = MACBINARY_HEADER_SIZE + secondary_header_padded;
-        let data_end = data_start + data_len;
-        let data_padded = next_multiple_of_128(data_len);
-        let rsrc_start = data_start + data_padded;
-        let rsrc_end = rsrc_start + rsrc_len;
+        let rsrc_start = data_len
+            .checked_add(127)
+            .and_then(|padded| data_start.checked_add(padded & !127));
 
-        let data_fork = if data_len > 0 && data_end <= data.len() {
-            data[data_start..data_end].to_vec()
-        } else {
-            Vec::new()
-        };
+        let data_fork = fork(Some(data_start), data_len);
 
-        let resource_fork = if rsrc_len > 0 && rsrc_end <= data.len() {
-            data[rsrc_start..rsrc_end].to_vec()
-        } else {
-            Vec::new()
-        };
+        let resource_fork = fork(rsrc_start, rsrc_len);
 
         Ok(Self {
             prefix,
@@ -152,6 +161,7 @@ impl MacBinaryContainer {
             resource_fork,
             file_type,
             creator,
+            modified,
         })
     }
 
@@ -171,7 +181,9 @@ impl Container for MacBinaryContainer {
 
     fn visit(&self, visitor: &mut dyn FnMut(&Entry<'_>) -> Result<bool>) -> Result<()> {
         let full_path = self.data_path();
-        let metadata = Metadata::new().with_type_creator(self.file_type, self.creator);
+        let metadata = Metadata::new()
+            .with_type_creator(self.file_type, self.creator)
+            .with_modified(self.modified);
 
         let entry = Entry::new(&full_path, &self.prefix, &self.data_fork).with_metadata(&metadata);
         visitor(&entry)?;
@@ -204,8 +216,19 @@ const APPLE_SINGLE_MAGIC: u32 = 0x0005_1600;
 const ENTRY_DATA_FORK: u32 = 1;
 const ENTRY_RESOURCE_FORK: u32 = 2;
 const ENTRY_REAL_NAME: u32 = 3;
+// File Dates Info: creation, modification, backup and access times as
+// signed seconds from 2000-01-01 00:00:00 GMT; 0x80000000 means unknown.
+const ENTRY_FILE_DATES: u32 = 8;
 const ENTRY_FINDER_INFO: u32 = 9;
-type AppleSingleParts = (String, Vec<u8>, Vec<u8>, [u8; 4], [u8; 4]);
+const APPLE_SINGLE_EPOCH: i64 = 946_684_800;
+type AppleSingleParts = (
+    String,
+    Vec<u8>,
+    Vec<u8>,
+    [u8; 4],
+    [u8; 4],
+    Option<Timestamp>,
+);
 
 #[must_use]
 pub fn is_apple_single_file(data: &[u8]) -> bool {
@@ -228,6 +251,7 @@ fn parse_apple_single(data: &[u8]) -> Result<AppleSingleParts> {
     let mut resource_fork = Vec::new();
     let mut file_type = [0u8; 4];
     let mut creator = [0u8; 4];
+    let mut modified = None;
 
     for i in 0..num_entries {
         let entry_offset = 26 + i * 12;
@@ -254,7 +278,10 @@ fn parse_apple_single(data: &[u8]) -> Result<AppleSingleParts> {
             data[entry_offset + 11],
         ]) as usize;
 
-        if offset + length > data.len() {
+        if offset
+            .checked_add(length)
+            .is_none_or(|end| end > data.len())
+        {
             continue;
         }
 
@@ -273,6 +300,16 @@ fn parse_apple_single(data: &[u8]) -> Result<AppleSingleParts> {
                     Err(_) => decode_mac_roman(raw),
                 };
             }
+            ENTRY_FILE_DATES if length >= 8 => {
+                let seconds = i32::from_be_bytes([
+                    data[offset + 4],
+                    data[offset + 5],
+                    data[offset + 6],
+                    data[offset + 7],
+                ]);
+                modified = (seconds != i32::MIN)
+                    .then(|| Timestamp::utc(i64::from(seconds) + APPLE_SINGLE_EPOCH));
+            }
             // Finder Info: first 4 bytes = type, next 4 = creator
             ENTRY_FINDER_INFO if length >= 8 => {
                 file_type = data[offset..offset + 4].try_into().unwrap_or([0; 4]);
@@ -286,7 +323,14 @@ fn parse_apple_single(data: &[u8]) -> Result<AppleSingleParts> {
         filename = "untitled".to_string();
     }
 
-    Ok((filename, data_fork, resource_fork, file_type, creator))
+    Ok((
+        filename,
+        data_fork,
+        resource_fork,
+        file_type,
+        creator,
+        modified,
+    ))
 }
 
 pub struct AppleSingleContainer {
@@ -296,11 +340,13 @@ pub struct AppleSingleContainer {
     resource_fork: Vec<u8>,
     file_type: [u8; 4],
     creator: [u8; 4],
+    modified: Option<Timestamp>,
 }
 
 impl AppleSingleContainer {
     pub fn from_bytes(data: &[u8], prefix: String, _depth: u32) -> Result<Self> {
-        let (filename, data_fork, resource_fork, file_type, creator) = parse_apple_single(data)?;
+        let (filename, data_fork, resource_fork, file_type, creator, modified) =
+            parse_apple_single(data)?;
 
         Ok(Self {
             prefix,
@@ -309,6 +355,7 @@ impl AppleSingleContainer {
             resource_fork,
             file_type,
             creator,
+            modified,
         })
     }
 
@@ -328,7 +375,9 @@ impl Container for AppleSingleContainer {
 
     fn visit(&self, visitor: &mut dyn FnMut(&Entry<'_>) -> Result<bool>) -> Result<()> {
         let full_path = self.data_path();
-        let metadata = Metadata::new().with_type_creator(self.file_type, self.creator);
+        let metadata = Metadata::new()
+            .with_type_creator(self.file_type, self.creator)
+            .with_modified(self.modified);
 
         let entry = Entry::new(&full_path, &self.prefix, &self.data_fork).with_metadata(&metadata);
         visitor(&entry)?;
@@ -372,6 +421,24 @@ mod tests {
         assert!(is_macbinary_file(&named));
         let container = MacBinaryContainer::from_bytes(&named, "x".to_string(), 8).unwrap();
         assert_eq!(container.filename, "Caf\u{e9}");
+    }
+
+    #[test]
+    fn macbinary_two_needs_a_name() {
+        // A Lotus 1-2-3 worksheet whose first 124 bytes happened to match
+        // the CRC stored after them; its name length byte is zero.
+        let mut header = vec![0u8; 128];
+        header[2] = 0x02;
+        header[4..8].copy_from_slice(&[0x04, 0x04, 0x06, 0x00]);
+        let crc = calc_macbinary_crc(&header[..124]);
+        assert_ne!(crc, 0);
+        header[124..126].copy_from_slice(&crc.to_be_bytes());
+        assert!(!is_macbinary_file(&header));
+
+        header[1] = 1;
+        let crc = calc_macbinary_crc(&header[..124]);
+        header[124..126].copy_from_slice(&crc.to_be_bytes());
+        assert!(is_macbinary_file(&header));
     }
 
     #[test]

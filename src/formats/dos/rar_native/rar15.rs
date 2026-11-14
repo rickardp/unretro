@@ -1181,9 +1181,11 @@ mod tests {
         }
     }
 
-    // Real archives. Runs only when UNRETRO_RAR_CORPUS names a corpus
-    // directory (`archives/<id>/...`, `old13/archives/<id>/...`,
-    // `MANIFEST.tsv` with reference paths); skips silently otherwise.
+    // Real archives. Runs only when the samples repository that
+    // `UNRETRO_SAMPLES` names has a `corpus/rar` directory
+    // (`archives/<id>/...`, `old13/archives/<id>/...`, `MANIFEST.tsv` with
+    // reference paths relative to its own directory); skips silently
+    // otherwise.
     mod corpus {
         use super::*;
         use std::collections::HashMap;
@@ -1219,7 +1221,8 @@ mod tests {
                 else {
                     continue;
                 };
-                refs.insert((id, size, sum), PathBuf::from(cols[9]));
+                let listed = manifest.parent().unwrap_or(Path::new("")).join(cols[9]);
+                refs.insert((id, size, sum), listed);
             }
             refs
         }
@@ -1466,10 +1469,10 @@ mod tests {
         }
 
         fn report(what: &str, old: bool) {
-            let Some(root) = std::env::var_os("UNRETRO_RAR_CORPUS") else {
+            let Some(root) = crate::test_samples::corpus("rar") else {
                 return;
             };
-            let Some(t) = run(Path::new(&root), old) else {
+            let Some(t) = run(&root, old) else {
                 return;
             };
             println!(

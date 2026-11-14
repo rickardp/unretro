@@ -453,6 +453,10 @@ impl RawHeader<'_> {
             level: self.level,
             os_id: self.os_id,
             modified: self.modified(),
+            modified_local: self.level < 2
+                && self.unix_time.is_none()
+                && self.windows_time.is_none()
+                && self.area_time.is_none(),
         })
     }
 }

@@ -251,7 +251,7 @@ mod tests {
                     }
                     lz5.push(i as u8);
                 }
-                lz5.extend_from_slice(&[0x00, pos as u8, ((pos >> 8) << 4 | len) as u8]);
+                lz5.extend_from_slice(&[0x00, pos as u8, (((pos >> 8) << 4) | len) as u8]);
                 let output = decode_lz5(&lz5, literals + len + 3).unwrap();
                 let from = literals - ((4078 + literals - pos - 1) % 4096 + 1);
                 assert_eq!(output[literals..], output[from..from + len + 3], "{pos}");

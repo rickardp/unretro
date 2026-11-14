@@ -1,3 +1,5 @@
+use core::cmp::Ordering;
+
 use crate::compat::Vec;
 use crate::error::{Error, Result};
 use crate::limits::prealloc_hint;
@@ -186,15 +188,13 @@ impl Alphabet {
     fn payload(self, symbol: usize) -> u32 {
         match self {
             Self::CodeLength => ((symbol as u32) << 16) | FLAG_LITERAL,
-            Self::LiteralLength => {
-                if symbol < END_OF_BLOCK {
-                    ((symbol as u32) << 16) | FLAG_LITERAL
-                } else if symbol == END_OF_BLOCK {
-                    FLAG_END
-                } else {
+            Self::LiteralLength => match symbol.cmp(&END_OF_BLOCK) {
+                Ordering::Less => ((symbol as u32) << 16) | FLAG_LITERAL,
+                Ordering::Equal => FLAG_END,
+                Ordering::Greater => {
                     base_and_extra(&LENGTH_BASE, &LENGTH_EXTRA, symbol - END_OF_BLOCK - 1)
                 }
-            }
+            },
             Self::Distance => base_and_extra(&DIST_BASE, &DIST_EXTRA, symbol),
         }
     }

@@ -279,7 +279,7 @@ fn run_walk(
             }
 
             // Push new container onto the stack
-            if !container_stack.last().is_some_and(|top| *top == cp) {
+            if container_stack.last().is_none_or(|top| *top != cp) {
                 container_stack.push(cp.clone());
             }
         }

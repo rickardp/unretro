@@ -7,6 +7,8 @@
 //! tools, not from this crate.
 #![cfg(all(feature = "macintosh", feature = "dos", feature = "common"))]
 
+mod common;
+
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::Read;
 use std::path::{Path, PathBuf};
@@ -173,10 +175,6 @@ fn check_rows(rows: &[Row], listing: &Listing, fixture: &str, at: &str) -> usize
         match row.kind.as_str() {
             // The image itself and its cooked view: checked by the caller.
             "top" | "cooked" => continue,
-            "empty" => {
-                assert!(!listing.entries.contains_key(&path), "{path} is listed");
-                continue;
-            }
             _ => {}
         }
         let seen = listing
@@ -198,6 +196,8 @@ fn check_rows(rows: &[Row], listing: &Listing, fixture: &str, at: &str) -> usize
                     "{path}"
                 );
             }
+            // A file with two empty forks; HFS rows carry its type and creator.
+            "empty" => assert_eq!(seen.format, None, "{path}"),
             "file" | "res" | "iso" => {
                 assert_eq!(seen.format, None, "{path}");
                 assert_eq!(seen.type_creator, None, "{path}");
@@ -648,25 +648,18 @@ fn survey(path: &Path) -> Survey {
     }
 }
 
-// Real images, when a specimen directory is given: everything downloaded in
-// full under `toast/full/` and the purpose-built images under
-// `toast/synthetic/`. Expected values are in `docs/toast/README.md`.
+// Real images, when the samples repository has a `corpus/toast` directory:
+// whole images under `full/` and purpose-built ones under `synthetic/`. Expected values are in `docs/toast/README.md`.
 #[test]
 fn real_images_open_as_documented() {
-    let Some(root) = std::env::var_os("UNRETRO_SPECIMENS") else {
-        eprintln!("skipped: UNRETRO_SPECIMENS is not set");
+    let Some(root) = common::corpus("toast") else {
         return;
     };
-    let root = Path::new(&root).join("toast");
-    if !root.join("full").is_dir() {
-        eprintln!("skipped: no {}", root.join("full").display());
-        return;
-    }
     // Path, top-level format, then three counts of files:
     // - of an optical volume, as `7zz l` counts them;
     // - of the Macintosh volume: the files of the machfs or `7zz -thfs`
-    //   reference (section 7 of the document), less those with two empty
-    //   forks, plus the desktop database files that reference leaves out;
+    //   reference (section 7 of the document), plus the desktop database
+    //   files that reference leaves out;
     // - of the ISO 9660 side of a hybrid, in the one tree this crate lists:
     //   the Rock Ridge tree of the two WriterTools images (as `xorriso
     //   -find / -type f` counts; their Joliet tree has 4 and 5), the Joliet
@@ -697,21 +690,21 @@ fn real_images_open_as_documented() {
             "aoe2-nocd/Age of Empires II NoCD.toast",
             ContainerFormat::Apm,
             0,
-            9,
+            10,
             0,
         ),
         (
             "writer-tools-2.0/WriterTools1-1.toast",
             ContainerFormat::Apm,
             0,
-            4,
+            5,
             1,
         ),
         (
             "writer-tools-2.0b/WriterTools 2.0.toast",
             ContainerFormat::Apm,
             0,
-            5,
+            6,
             2,
         ),
         (
@@ -732,7 +725,7 @@ fn real_images_open_as_documented() {
             "apple-business-server-kit/Apple Business Server Kit (1996).toast",
             ContainerFormat::Apm,
             0,
-            615,
+            618,
             0,
         ),
         (
@@ -750,13 +743,16 @@ fn real_images_open_as_documented() {
             0,
         ),
     ];
-    // With the directory present, a missing image is a failure, not a skip.
+    // With `full/` present, a missing image is a failure, not a skip.
+    let has_full = root.join("full").is_dir();
     let present = |name: &str| {
         let path = root.join("full").join(name);
         assert!(path.is_file(), "{} is missing", path.display());
         path
     };
-    for (name, format, optical_files, mac_files, iso_side_files) in full {
+    for (name, format, optical_files, mac_files, iso_side_files) in
+        full.into_iter().filter(|_| has_full)
+    {
         let seen = survey(&present(name));
         assert_eq!(seen.root_format, Some(format), "{name}");
         assert_eq!(seen.iso_side, iso_side_files, "{name}: ISO 9660 side");
@@ -783,7 +779,10 @@ fn real_images_open_as_documented() {
             10,
             0,
         ),
-    ] {
+    ]
+    .into_iter()
+    .filter(|_| has_full)
+    {
         let seen = survey(&present(name));
         assert_eq!(seen.images, [Some(format)], "{name}");
         assert_eq!(seen.mac_files, mac_files, "{name}: Macintosh side");

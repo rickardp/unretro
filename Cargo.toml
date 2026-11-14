@@ -19,6 +19,8 @@ pedantic = { level = "allow", priority = -1 }
 nursery = { level = "allow", priority = -1 }
 too_many_lines = "allow"
 too_many_arguments = "allow"
+# In `all` for the MSRV toolchain's clippy, pedantic in later ones.
+format_collect = "allow"
 
 [workspace.dependencies]
 pyo3 = { version = "0.23", features = ["extension-module", "abi3-py39"] }

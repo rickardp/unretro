@@ -77,7 +77,7 @@ fn read_code(data: &[u8], bit: u64, width: u32) -> u32 {
             .and_then(|at| data.get(at))
             .map_or(0, |&value| u32::from(value))
     };
-    let raw = byte(0) | byte(1) << 8 | byte(2) << 16;
+    let raw = byte(0) | (byte(1) << 8) | (byte(2) << 16);
     (raw >> (bit % 8)) & ((1 << width) - 1)
 }
 

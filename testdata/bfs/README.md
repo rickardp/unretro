@@ -110,6 +110,8 @@ Deleted entries were made last, after the zero fill: `Deleted/gone.txt` (2`B`+10
 
 ## manifest.tsv
 
+Stored gzipped, as `manifest.tsv.gz`.
+
 Tab-separated, UTF-8, one header line, no quoting or escaping (no fixture name contains a tab, line feed or backslash). Columns:
 
 | Column | Meaning |
@@ -179,7 +181,7 @@ All 18 variants are refused by Haiku. Linux mounts 8 of them and GRUB lists 10, 
 
 ## Real specimens (not in the repository)
 
-`$UNRETRO_SPECIMENS/beos/` (normally `~/.cache/unretro-specimens/beos/`) holds a `README.md`, `SOURCES.tsv` (file, url, sha256, description) and one `<file>.manifest.tsv` per image, in the format above with `image` = the file name and only `dir`, `file`, `empty` and `symlink` rows:
+Three real volumes were listed with independent tools while this reader was written, each into a manifest in the format above with only `dir`, `file`, `empty` and `symlink` rows. No test reads them; a cut-down copy of the first is in the `unretro-samples` repository (`data/beos/`):
 
 | File | Volume |
 |---|---|

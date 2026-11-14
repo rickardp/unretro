@@ -184,14 +184,22 @@ fn insert_entry_into_tree(
         node.size = entry.data.len() as u64;
         // Use container_format from the API instead of re-detecting
         node.format = entry.container_format;
-        node.metadata = entry.metadata.as_ref().map(|m| m.to_string());
+        node.metadata = entry
+            .metadata
+            .as_ref()
+            .map(|m| m.to_string())
+            .filter(|text| !text.is_empty());
     } else {
         // Create new entry node
         let mut new_node = TreeNode::new(&entry_name);
         new_node.size = entry.data.len() as u64;
         // Use container_format from the API instead of re-detecting
         new_node.format = entry.container_format;
-        new_node.metadata = entry.metadata.as_ref().map(|m| m.to_string());
+        new_node.metadata = entry
+            .metadata
+            .as_ref()
+            .map(|m| m.to_string())
+            .filter(|text| !text.is_empty());
 
         // Add to parent container
         let child_idx = {

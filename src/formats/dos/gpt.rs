@@ -74,20 +74,22 @@ fn parse_gpt_partitions(data: &[u8]) -> Result<Vec<GptPartition>> {
         return Err(Error::invalid_format("GPT partition entry size too small"));
     }
 
-    let entries_offset = (partition_entry_lba as usize)
-        .checked_mul(512)
+    let entries_offset = usize::try_from(partition_entry_lba)
+        .ok()
+        .and_then(|lba| lba.checked_mul(512))
         .ok_or_else(|| Error::invalid_format("GPT: partition entry LBA overflow"))?;
 
     // Cap at 128 entries to avoid absurd allocations from corrupt images
     let num_entries = num_entries.min(128) as usize;
 
     for i in 0..num_entries {
-        let entry_offset = entries_offset + i * entry_size;
-        if entry_offset + 128 > data.len() {
+        let Some(entry) = i
+            .checked_mul(entry_size)
+            .and_then(|at| entries_offset.checked_add(at))
+            .and_then(|at| data.get(at..at.checked_add(128)?))
+        else {
             break;
-        }
-
-        let entry = &data[entry_offset..entry_offset + 128];
+        };
 
         // Partition type GUID (bytes 0-15)
         let type_guid = &entry[0..16];
@@ -109,14 +111,12 @@ fn parse_gpt_partitions(data: &[u8]) -> Result<Vec<GptPartition>> {
             continue;
         }
 
-        let offset = match (start_lba as usize).checked_mul(512) {
-            Some(v) => v,
-            None => continue,
+        let bytes = |sectors: u64| usize::try_from(sectors).ok()?.checked_mul(512);
+        let Some(offset) = bytes(start_lba) else {
+            continue;
         };
-        let sector_count = end_lba - start_lba + 1;
-        let length = match (sector_count as usize).checked_mul(512) {
-            Some(v) => v,
-            None => continue,
+        let Some(length) = (end_lba - start_lba).checked_add(1).and_then(bytes) else {
+            continue;
         };
         let actual_end = offset.saturating_add(length).min(data.len());
 
@@ -169,7 +169,7 @@ impl GptContainer {
 fn partition_name(index: usize, data: &[u8], numeric: bool) -> String {
     if !numeric {
         if let Some(label) = super::partition_label(data) {
-            return label;
+            return crate::sanitize_path_component(&label);
         }
     }
     format!("p{index}.img")
@@ -275,6 +275,15 @@ mod tests {
         image[data_offset..data_offset + copy_len].copy_from_slice(&partition_data[..copy_len]);
 
         image
+    }
+
+    #[test]
+    fn partition_spanning_every_lba_is_skipped() {
+        let mut image = create_gpt_image(&[0x55; 1024]);
+        let entry_offset = 2 * 512;
+        image[entry_offset + 32..entry_offset + 40].copy_from_slice(&0u64.to_le_bytes());
+        image[entry_offset + 40..entry_offset + 48].copy_from_slice(&u64::MAX.to_le_bytes());
+        assert!(parse_gpt_partitions(&image).is_ok_and(|found| found.is_empty()));
     }
 
     #[test]

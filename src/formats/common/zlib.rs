@@ -53,7 +53,7 @@ pub(crate) fn zlib_decode_exact(stream: &[u8], out: &mut [u8]) -> Result<()> {
     if cmf >> 4 > MAX_WINDOW_BITS {
         return Err(malformed("window size above 32 KiB"));
     }
-    if (u16::from(cmf) << 8 | u16::from(flags)) % 31 != 0 {
+    if ((u16::from(cmf) << 8) | u16::from(flags)) % 31 != 0 {
         return Err(malformed("header check bits do not match"));
     }
     if flags & FLAG_PRESET_DICTIONARY != 0 {
@@ -201,7 +201,7 @@ mod tests {
 
     // Recomputes FCHECK after a header edit.
     fn with_header(stream: &[u8], cmf: u8, flags: u8) -> Vec<u8> {
-        let base = u16::from(cmf) << 8 | u16::from(flags & 0xE0);
+        let base = (u16::from(cmf) << 8) | u16::from(flags & 0xE0);
         let check = (31 - base % 31) % 31;
         let mut out = stream.to_vec();
         out[0] = cmf;

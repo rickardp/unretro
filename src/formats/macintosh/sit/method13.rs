@@ -410,7 +410,7 @@ impl Code {
         for length in 1..=self.longest {
             let bit = reader.read_bit().ok_or_else(|| truncated(WHAT))?;
             // The first bit read is the codeword's most significant digit.
-            word = word << 1 | bit;
+            word = (word << 1) | bit;
             let rank = word.wrapping_sub(self.first[length]);
             if rank < self.count[length] {
                 let symbol = self.symbols.get((self.start[length] + rank) as usize);
@@ -435,7 +435,7 @@ fn read_field(reader: &mut LsbBitReader<'_>, count: u32) -> Result<u32> {
 fn read_meta_symbol(reader: &mut LsbBitReader<'_>) -> Result<usize> {
     let mut word = 0u16;
     for length in 1..=META_LONGEST {
-        word = word << 1 | read_field(reader, 1)? as u16;
+        word = (word << 1) | read_field(reader, 1)? as u16;
         if let Some(symbol) = META_CODE.iter().position(|&entry| entry == (length, word)) {
             return Ok(symbol);
         }

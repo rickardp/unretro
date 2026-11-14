@@ -1,13 +1,15 @@
 //! Be File System fixtures from `testdata/bfs/` (see its README for how they
-//! were made), and real volumes from `$UNRETRO_SPECIMENS/beos/` when present.
+//! were made).
 //!
-//! Expected paths, sizes, FNV-1a hashes and modes are in `manifest.tsv`,
+//! Expected paths, sizes, FNV-1a hashes and modes are in `manifest.tsv.gz`,
 //! written by the script that staged the volumes' contents and confirmed by
 //! three other readers, not taken from this crate.
-#![cfg(feature = "beos")]
+// Every fixture is gzip-packed, so nothing here runs without `common`.
+#![cfg(all(feature = "beos", feature = "common"))]
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::path::PathBuf;
+#[cfg(feature = "common")]
+use std::io::Read;
 
 use unretro::{
     ContainerFormat, EntryType, Loader, VisitAction, VisitReport, detect_format,
@@ -119,7 +121,11 @@ fn expected(manifest: &str, image: &str, escapes: bool) -> Expected {
 
 #[cfg(feature = "common")]
 fn fixture_manifest(image: &str) -> Expected {
-    let text = String::from_utf8(fixture("manifest.tsv")).unwrap();
+    // Decoded here, not by the crate's own gzip reader.
+    let mut text = String::new();
+    flate2::read::GzDecoder::new(fixture("manifest.tsv.gz").as_slice())
+        .read_to_string(&mut text)
+        .unwrap();
     expected(&text, image, false)
 }
 
@@ -550,98 +556,4 @@ fn names_differing_only_in_invalid_utf8_stay_apart() {
     assert_eq!(listing.files["%E9aaaaaaaa"], whole.files["empty.txt"]);
     assert_eq!(listing.files["%E8aaaaaaaa"], whole.files["typed.txt"]);
     assert_ne!(whole.files["empty.txt"].size, whole.files["typed.txt"].size);
-}
-
-// =============================================================================
-// Real volumes, not in the repository
-// =============================================================================
-
-fn specimen(file: &str) -> Option<(PathBuf, Expected)> {
-    let root = std::env::var_os("UNRETRO_SPECIMENS")?;
-    let path = PathBuf::from(root).join("beos").join(file);
-    let manifest =
-        std::fs::read_to_string(path.with_file_name(format!("{file}.manifest.tsv"))).ok()?;
-    path.is_file()
-        .then(|| (path, expected(&manifest, file, true)))
-}
-
-fn assert_specimen(file: &str, formats: &[ContainerFormat], files: usize) {
-    let Some((path, want)) = specimen(file) else {
-        return;
-    };
-    let listing = list(Loader::from_path(&path), true, file);
-    assert_eq!(listing.formats, formats, "{file}");
-    assert_eq!(want.files.len(), files, "{file}");
-    assert_listing(&listing, &want, file);
-}
-
-#[test]
-fn specimen_beos_r5_personal_edition() {
-    // Little-endian, superblock at byte 512 behind boot code.
-    assert_specimen("image.be", &[ContainerFormat::Bfs], 2168);
-}
-
-#[test]
-fn specimen_haiku_nightly() {
-    assert_specimen(
-        "haiku-hrev60410-x86_64-bfs.img",
-        &[ContainerFormat::Bfs],
-        221,
-    );
-}
-
-// The partition of an Apple Partition Map (512-byte blocks) with this type.
-fn apple_partition(image: &[u8], kind: &str) -> Option<std::ops::Range<usize>> {
-    let be32 = |at: usize| {
-        let bytes = image.get(at..at + 4)?;
-        Some(u32::from_be_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]) as usize)
-    };
-    let count = be32(512 + 4)?;
-    (1..=count).find_map(|index| {
-        let entry = index * 512;
-        let name = image.get(entry + 48..entry + 80)?;
-        let name = name.split(|&byte| byte == 0).next()?;
-        if image.get(entry..entry + 2)? != b"PM" || name != kind.as_bytes() {
-            return None;
-        }
-        let start = be32(entry + 8)? * 512;
-        Some(start..start + be32(entry + 12)? * 512)
-    })
-}
-
-#[test]
-fn specimen_beos_advanced_access_powerpc() {
-    // Big-endian, superblock at byte 0 of the `Be_BFS` partition of an Apple
-    // Partition Map. The map also has an HFS partition, and the loader opens
-    // such a disc as that HFS volume only, so the partition is cut out here.
-    let file = "BeOS_Advanced_Access.iso";
-    let Some((path, want)) = specimen(file) else {
-        return;
-    };
-    let disc = std::fs::read(&path).unwrap();
-    let range = apple_partition(&disc, "Be_BFS").expect("Be_BFS partition");
-    let partition = disc[range].to_vec();
-    drop(disc);
-    assert_eq!(partition[32..40], *b"BFS1BIGE");
-    assert_eq!(
-        detect_format("no-extension", Some(&partition)),
-        Some(ContainerFormat::Bfs)
-    );
-    let listing = list(Loader::from_bytes(partition, "Be_BFS"), true, file);
-    assert_eq!(listing.formats, [ContainerFormat::Bfs]);
-    assert_eq!(want.files.len(), 3456);
-    assert_listing(&listing, &want, file);
-}
-
-// The whole disc, as a user has it. Its Apple Partition Map holds an HFS and
-// a `Be_BFS` partition.
-#[test]
-fn specimen_beos_advanced_access_whole_disc() {
-    let file = "BeOS_Advanced_Access.iso";
-    let Some((path, want)) = specimen(file) else {
-        return;
-    };
-    let listing = list(Loader::from_path(&path), false, file);
-    assert_eq!(want.files.len(), 3456);
-    assert_listing(&listing, &want, file);
 }

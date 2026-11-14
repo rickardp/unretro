@@ -62,7 +62,7 @@ while IFS= read -r -d '' file; do
 done < <(git -C "$UNRETRO_SAMPLES" ls-files -z --cached --others --exclude-standard \
     | perl -e '
         $/ = "\0"; $prefix = shift;
-        @files = map { "$prefix/$_" } grep { !/\.expect$/ && !/^(Dockerfile|build\.sh|\.gitignore)$/ } map { chomp; $_ } <STDIN>;
+        @files = map { "$prefix/$_" } grep { !/\.expect$/ && !/^(Dockerfile|build\.sh|\.gitignore)$/ && !m{^corpus/} } map { chomp; $_ } <STDIN>;
         print join("\0", sort @files), "\0" if @files;
     ' "$UNRETRO_SAMPLES")
 

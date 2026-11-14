@@ -2,14 +2,17 @@
 //! expected entry paths, lengths, CRC-16 and FNV-1a 64 hashes.
 //!
 //! `testdata/lha/manifest.tsv` is always checked. A second manifest of real
-//! archives is checked when `UNRETRO_LHA_ORACLE` names its directory; without
-//! it that test prints a skip notice and passes.
+//! archives is checked when the samples repository that `UNRETRO_SAMPLES` names
+//! has a `corpus/lha` directory; without it that test prints a skip notice
+//! and passes.
 //!
 //! The expected columns come from independent tools (`testdata/lha/README.md`).
 #![cfg(feature = "full")]
 
+mod common;
+
 use std::collections::HashMap;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use unretro::{ContainerFormat, EntryType, Loader, TraversalDiagnosticCode, VisitAction};
 
@@ -282,17 +285,10 @@ fn lha_files(dir: &Path) -> usize {
 
 #[test]
 fn oracle_archives_match_manifest() {
-    use std::io::Write;
-    let Some(dir) = std::env::var_os("UNRETRO_LHA_ORACLE").filter(|dir| !dir.is_empty()) else {
-        // Written to the stream itself: the harness captures `eprintln!` of a
-        // passing test, and a skipped check must not look like a run one.
-        let _ = writeln!(
-            std::io::stderr(),
-            "UNRETRO_LHA_ORACLE not set, skipping the LHA checks against real archives"
-        );
+    let Some(dir) = common::corpus("lha") else {
         return;
     };
-    let checked = check_manifest(&PathBuf::from(dir));
+    let checked = check_manifest(&dir);
     assert!(checked.archives > 0 && checked.files > 0);
     // Real archives are expected to read completely.
     assert_eq!(checked.with_diagnostic, 0);
@@ -589,7 +585,7 @@ mod built {
     }
 
     #[test]
-    fn nested_archives_do_not_each_claim_an_allowance() {
+    fn allowance_floor_covers_a_blank_disk_and_no_more() {
         // Seven packed bytes that unpack to 16,776,960 spaces.
         let packed = run_stream(0xFFFF);
         let unpacked = 0xFFFF * 256;
@@ -601,33 +597,48 @@ mod built {
             ..Header::stored(0, b"B", &packed)
         }]);
         assert!(bomb.len() < 40);
-        // The stream is valid: it is the allowance that refuses it.
-        let padded = Header {
-            method: b"-lh5-",
-            unpacked,
-            crc: crc16(&spaces),
-            ..Header::stored(0, b"B", &[&packed[..], &[0; 20_000][..]].concat())
-        }
-        .bytes();
-        let (visited, diagnostics) = read([&padded[..], &[0]].concat(), false);
+        // Constant data such as a blank disk image packs this well, so the
+        // minimum allowance lets it through, also in a nested archive.
+        let (visited, diagnostics) = read(bomb.clone(), false);
         assert_eq!(visited.len(), 1);
         assert_eq!(fnv1a64(&visited[0].1), fnv1a64(&spaces));
         assert!(diagnostics.is_empty(), "{diagnostics:?}");
 
-        // 200 of them, stored in an outer archive and opened one by one.
-        let names: Vec<String> = (0..200).map(|index| format!("{index:03}.LHA")).collect();
+        let names: Vec<String> = (0..4).map(|index| format!("{index:03}.LHA")).collect();
         let inner: Vec<Header<'_>> = names
             .iter()
             .map(|name| Header::stored(0, name.as_bytes(), &bomb))
             .collect();
-        let outer = archive(&inner);
-        let outer_len = outer.len() as u64;
-        let (visited, diagnostics) = read(outer, true);
-        let total: u64 = visited.iter().map(|(_, data)| data.len() as u64).sum();
-        assert_eq!(visited.len(), 200);
-        assert_eq!(total, 200 * bomb.len() as u64);
-        assert!(total <= outer_len);
-        assert_eq!(diagnostics.len(), 200);
+        let (visited, diagnostics) = read(archive(&inner), true);
+        // Each nested archive is visited as a container, then its entry.
+        let leaves: Vec<_> = visited
+            .iter()
+            .filter(|(path, _)| path.ends_with("/B"))
+            .collect();
+        assert_eq!(leaves.len(), 4);
+        for (_, data) in leaves {
+            assert_eq!(fnv1a64(data), fnv1a64(&spaces));
+        }
+        assert!(diagnostics.is_empty(), "{diagnostics:?}");
+
+        // Two such entries in one archive are over it.
+        let twice = archive(&[
+            Header {
+                method: b"-lh5-",
+                unpacked,
+                crc: crc16(&spaces),
+                ..Header::stored(0, b"A", &packed)
+            },
+            Header {
+                method: b"-lh5-",
+                unpacked,
+                crc: crc16(&spaces),
+                ..Header::stored(0, b"B", &packed)
+            },
+        ]);
+        let (visited, diagnostics) = read(twice, false);
+        assert_eq!(visited.len(), 1);
+        assert_eq!(diagnostics.len(), 1);
         assert!(
             diagnostics[0].contains("output limit exceeded"),
             "{diagnostics:?}"

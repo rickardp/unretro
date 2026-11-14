@@ -404,6 +404,47 @@ fn bridge_disc_without_a_readable_iso_root_opens_as_udf() {
 }
 
 #[test]
+fn bridge_disc_with_a_writable_udf_volume_opens_as_udf() {
+    // DirectCD and InCD put their reader software in an ISO 9660 volume and
+    // the files in a rewritable UDF one. Here the partition descriptors of
+    // the bridge disc are changed from read-only to overwritable.
+    let mut image = inner_image("bridge.iso.gz");
+    let mut changed = 0;
+    for sector in 0..image.len() / SECTOR {
+        let tag = &mut image[sector * SECTOR..sector * SECTOR + 512];
+        let location = u32::from_le_bytes(tag[12..16].try_into().unwrap());
+        if u16::from_le_bytes([tag[0], tag[1]]) != 5 || location as usize != sector {
+            continue;
+        }
+        assert_eq!(tag[184..188], 1u32.to_le_bytes());
+        tag[184..188].copy_from_slice(&4u32.to_le_bytes());
+        let len = usize::from(u16::from_le_bytes([tag[10], tag[11]]));
+        let mut crc = 0u16;
+        for &byte in &tag[16..16 + len] {
+            crc ^= u16::from(byte) << 8;
+            for _ in 0..8 {
+                crc = if crc & 0x8000 == 0 {
+                    crc << 1
+                } else {
+                    (crc << 1) ^ 0x1021
+                };
+            }
+        }
+        tag[8..10].copy_from_slice(&crc.to_le_bytes());
+        tag[4] = 0;
+        tag[4] = tag[..16]
+            .iter()
+            .fold(0u8, |sum, &byte| sum.wrapping_add(byte));
+        changed += 1;
+    }
+    assert_eq!(changed, 2);
+    assert_detected("bridge.iso", &image, ContainerFormat::Udf);
+    let (leaves, report) = visit(image, "bridge.iso", "bridge.iso", EntryType::Leaves);
+    assert_clean(&report, "bridge.iso");
+    assert_same(&leaves, &expected("small").leaves, "bridge.iso");
+}
+
+#[test]
 fn bridge_disc_stays_iso9660() {
     // ISO 9660 with Joliet and UDF 1.50 over the same files. The folder it
     // was made from is the one udf-only-102 was made from.

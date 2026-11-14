@@ -3,7 +3,7 @@ use crate::error::{Error, Result};
 use crate::format::ContainerFormat;
 use crate::limits::{OutputBudget, prealloc_hint};
 use crate::sanitize_archive_path;
-use crate::{Container, ContainerInfo, Entry};
+use crate::{Container, ContainerInfo, Entry, Metadata, Timestamp};
 
 // =============================================================================
 // Constants
@@ -127,6 +127,28 @@ pub fn is_adf_image(data: &[u8]) -> bool {
 struct AdfFileEntry {
     path: String,
     data: Vec<u8>,
+    modified: Option<Timestamp>,
+}
+
+// Last change of a file header: days since 1978-01-01, minutes past
+// midnight and ticks of 1/50 second, in zone-less local time.
+const OFF_DAYS: usize = 420;
+const AMIGA_EPOCH_OFFSET: i64 = 252_460_800;
+
+fn header_time(header: &[u8]) -> Option<Timestamp> {
+    let (days, minutes, ticks) = (
+        be32(header, OFF_DAYS),
+        be32(header, OFF_DAYS + 4),
+        be32(header, OFF_DAYS + 8),
+    );
+    (minutes < 24 * 60 && ticks < 60 * 50).then(|| {
+        Timestamp::local(
+            AMIGA_EPOCH_OFFSET
+                + i64::from(days) * 86_400
+                + i64::from(minutes) * 60
+                + i64::from(ticks / 50),
+        )
+    })
 }
 
 struct Walk<'a> {
@@ -231,6 +253,7 @@ impl<'a> Walk<'a> {
                             self.entries.push(AdfFileEntry {
                                 path: join_path(&dir_path, &name),
                                 data,
+                                modified: header_time(header),
                             });
                         }
                         _ => self.damage(key, "unknown entry type"),
@@ -378,7 +401,13 @@ impl Container for AdfContainer {
     fn visit(&self, visitor: &mut dyn FnMut(&Entry<'_>) -> Result<bool>) -> Result<()> {
         for entry in &self.entries {
             let path = format!("{}/{}", self.prefix, sanitize_archive_path(&entry.path));
+            let metadata = Metadata::new().with_modified(entry.modified);
             let e = Entry::new(&path, &self.prefix, &entry.data);
+            let e = if entry.modified.is_some() {
+                e.with_metadata(&metadata)
+            } else {
+                e
+            };
 
             if !visitor(&e)? {
                 return Ok(());

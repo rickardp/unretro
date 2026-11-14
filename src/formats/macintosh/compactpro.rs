@@ -1,6 +1,8 @@
-use crate::compat::{String, ToString, Vec, format, vec};
+use crate::compat::{Cow, String, ToString, Vec, format, vec};
 use crate::error::{Error, Result};
 use crate::format::ContainerFormat;
+use crate::formats::common::crc32::crc32_update;
+use crate::limits::OutputBudget;
 use crate::sanitize_path_component;
 use crate::{Container, ContainerInfo, Entry, Metadata};
 
@@ -12,6 +14,11 @@ const ESC1: u8 = 0x81;
 const ESC2: u8 = 0x82;
 
 const CIRCSIZE: usize = 8192;
+// A block ends once its literals (2 each) and matches (3 each) reach this.
+const BLOCK_SIZE: u32 = 0x1FFF0;
+// Run-length and LZH together reach a few thousand to one on blank disk
+// images; the floor in `OutputBudget` covers small archives.
+const BUDGET_RATIO: u64 = 2048;
 
 const CPTHDRSIZE: usize = 8;
 const CPTHDR2SIZE: usize = 7;
@@ -23,6 +30,8 @@ const F_VOLUME: usize = 35;
 const F_FILEPOS: usize = 36;
 const F_FTYPE: usize = 40;
 const F_CREATOR: usize = 44;
+// Modification date: zone-less seconds since 1904.
+const F_MODDATE: usize = 52;
 const F_FILECRC: usize = 58;
 const F_CPTFLAG: usize = 62;
 const F_RSRCLENGTH: usize = 64;
@@ -46,7 +55,11 @@ pub fn is_compactpro_archive(data: &[u8]) -> bool {
     }
     // Check that offset is reasonable
     let offset = get4(&data[4..8]) as usize;
-    if offset < CPTHDRSIZE || offset + CPTHDR2SIZE > data.len() {
+    if offset < CPTHDRSIZE
+        || offset
+            .checked_add(CPTHDR2SIZE)
+            .is_none_or(|end| end > data.len())
+    {
         return false;
     }
 
@@ -81,6 +94,117 @@ pub fn is_compactpro_archive(data: &[u8]) -> bool {
     true
 }
 
+/// The number of this segment when `data` is the last segment of a segmented
+/// archive, the one holding the index.
+#[must_use]
+pub fn last_segment_number(data: &[u8]) -> Option<u8> {
+    (is_compactpro_archive(data) && data[1] > 1).then(|| data[1])
+}
+
+// Segment `number` of the set `other` belongs to: segments share the two
+// bytes after the number.
+fn is_segment(data: &[u8], number: u8, other: &[u8]) -> bool {
+    data.len() >= CPTHDRSIZE
+        && other.len() >= CPTHDRSIZE
+        && data[0] == CPT_SIGNATURE
+        && data[1] == number
+        && data[2..4] == other[2..4]
+}
+
+fn macbinary_data_fork(data: &[u8]) -> Option<&[u8]> {
+    if !super::macbinary::is_macbinary_file(data) {
+        return None;
+    }
+    let len = get4(data.get(83..87)?) as usize;
+    data.get(128..128usize.checked_add(len)?)
+}
+
+/// Whether `data`, found at `path`, is a segment that a later segment beside
+/// it reads, so that it needs no listing of its own. `sibling` reads a file
+/// by name.
+#[must_use]
+pub fn is_read_through_later_segment(
+    path: &str,
+    data: &[u8],
+    sibling: &dyn Fn(&str) -> Option<Vec<u8>>,
+) -> bool {
+    // Only the last segment has an index offset.
+    if data.len() < CPTHDRSIZE
+        || data[0] != CPT_SIGNATURE
+        || data[1] == 0
+        || data[1] == u8::MAX
+        || data[4..8] != [0; 4]
+    {
+        return false;
+    }
+    segment_names(path, data[1], data[1] + 1)
+        .iter()
+        .any(|name| sibling(name).is_some_and(|next| is_segment(&next, data[1] + 1, data)))
+}
+
+/// The names segment `wanted` may go by, given the path of segment `own`.
+/// Compact Pro names segments `Name.cpt.#1`, `Name.cpt.#2`, ...; sets are
+/// also found as `Name.#1.cpt` and with an unnumbered first segment.
+#[must_use]
+pub fn segment_names(path: &str, own: u8, wanted: u8) -> Vec<String> {
+    let (directory, name) = path
+        .rfind('/')
+        .map_or(("", path), |at| path.split_at(at + 1));
+    let bytes = name.as_bytes();
+    let mut names = Vec::new();
+
+    // The last run of digits that spells `own` after a `#`, or between dots.
+    let mut end = bytes.len();
+    while end > 0 {
+        if !bytes[end - 1].is_ascii_digit() {
+            end -= 1;
+            continue;
+        }
+        let mut start = end;
+        while start > 0 && bytes[start - 1].is_ascii_digit() {
+            start -= 1;
+        }
+        let before = start.checked_sub(1).map(|at| bytes[at]);
+        let marked = before == Some(b'#')
+            || (before == Some(b'.') && bytes.get(end).is_none_or(|&next| next == b'.'));
+        if marked && end - start <= 3 && name[start..end].parse() == Ok(u32::from(own)) {
+            let width = end - start;
+            names.push(format!(
+                "{directory}{}{wanted:0width$}{}",
+                &name[..start],
+                &name[end..]
+            ));
+            // A first segment may have kept the plain archive name.
+            if wanted == 1 {
+                let mut cut = start;
+                if before == Some(b'#') {
+                    cut -= 1;
+                }
+                if cut > 0 && bytes[cut - 1] == b'.' {
+                    cut -= 1;
+                }
+                if cut > 0 {
+                    names.push(format!("{directory}{}{}", &name[..cut], &name[end..]));
+                }
+            }
+            break;
+        }
+        end = start;
+    }
+
+    if own == 1 {
+        names.push(format!("{directory}{name}.#{wanted}"));
+        if let Some(dot) = name.rfind('.').filter(|&dot| dot > 0) {
+            names.push(format!(
+                "{directory}{}.#{wanted}{}",
+                &name[..dot],
+                &name[dot..]
+            ));
+        }
+    }
+    names
+}
+
 struct CompactProEntry {
     name: String,
     data_fork: Vec<u8>,
@@ -91,12 +215,49 @@ struct CompactProEntry {
 pub struct CompactProContainer {
     prefix: String,
     entries: Vec<CompactProEntry>,
+    skipped: Option<String>,
 }
 
 impl CompactProContainer {
     pub fn from_bytes(data: &[u8], prefix: String, _depth: u32) -> Result<Self> {
-        let entries = parse_and_extract(data)?;
-        Ok(Self { prefix, entries })
+        let (entries, skipped) = parse_and_extract(data, &[])?;
+        Ok(Self {
+            prefix,
+            entries,
+            skipped,
+        })
+    }
+
+    /// Opens the last segment of a segmented archive found at `path`;
+    /// `sibling` reads the earlier segments by the names they may go by.
+    pub fn from_bytes_with_segments(
+        data: &[u8],
+        prefix: String,
+        _depth: u32,
+        path: &str,
+        sibling: &dyn Fn(&str) -> Option<Vec<u8>>,
+    ) -> Result<Self> {
+        let last = last_segment_number(data).unwrap_or(1);
+        let earlier: Vec<Option<Vec<u8>>> = (1..last)
+            .map(|number| {
+                segment_names(path, last, number).iter().find_map(|name| {
+                    let bytes = sibling(name)?;
+                    if is_segment(&bytes, number, data) {
+                        return Some(bytes);
+                    }
+                    // A self-extracting first segment is often kept in
+                    // MacBinary for its resource fork.
+                    let fork = macbinary_data_fork(&bytes)?;
+                    is_segment(fork, number, data).then(|| fork.to_vec())
+                })
+            })
+            .collect();
+        let (entries, skipped) = parse_and_extract(data, &earlier)?;
+        Ok(Self {
+            prefix,
+            entries,
+            skipped,
+        })
     }
 
     fn entry_path(&self, name: &str) -> String {
@@ -140,6 +301,10 @@ impl Container for CompactProContainer {
     fn prefix(&self) -> &str {
         &self.prefix
     }
+
+    fn skipped_entries(&self) -> Option<String> {
+        self.skipped.clone()
+    }
 }
 
 fn get2(data: &[u8]) -> u16 {
@@ -162,6 +327,7 @@ struct FileHeader {
     name: String,
     is_folder: bool,
     folder_size: u16,
+    volume: u8,
     file_pos: u32,
     file_type: [u8; 4],
     creator: [u8; 4],
@@ -170,8 +336,8 @@ struct FileHeader {
     data_length: u32,
     comp_rsrc_length: u32,
     comp_data_length: u32,
-    #[allow(dead_code)]
     file_crc: u32,
+    modified: u32,
 }
 
 fn parse_header(data: &[u8]) -> Result<CptHeader> {
@@ -187,7 +353,11 @@ fn parse_header(data: &[u8]) -> Result<CptHeader> {
 
     // Read second part of header after the compressed data
     let hdr2_pos = offset as usize;
-    if hdr2_pos + CPTHDR2SIZE > data.len() {
+    if hdr2_pos < CPTHDRSIZE
+        || hdr2_pos
+            .checked_add(CPTHDR2SIZE)
+            .is_none_or(|end| end > data.len())
+    {
         return Err(Error::invalid_format(
             "CompactPro header offset out of bounds",
         ));
@@ -223,6 +393,7 @@ fn parse_file_header(data: &[u8]) -> Result<FileHeader> {
             name,
             is_folder: true,
             folder_size,
+            volume: 0,
             file_pos: 0,
             file_type: [0; 4],
             creator: [0; 4],
@@ -232,6 +403,7 @@ fn parse_file_header(data: &[u8]) -> Result<FileHeader> {
             comp_rsrc_length: 0,
             comp_data_length: 0,
             file_crc: 0,
+            modified: 0,
         });
     }
 
@@ -251,6 +423,7 @@ fn parse_file_header(data: &[u8]) -> Result<FileHeader> {
         name,
         is_folder: false,
         folder_size: 0,
+        volume: data[F_VOLUME],
         file_pos,
         file_type,
         creator,
@@ -260,6 +433,7 @@ fn parse_file_header(data: &[u8]) -> Result<FileHeader> {
         comp_rsrc_length,
         comp_data_length,
         file_crc,
+        modified: get4(&data[F_MODDATE..F_MODDATE + 4]),
     })
 }
 
@@ -273,7 +447,9 @@ fn compression_method_name(flag: u16, is_rsrc: bool) -> &'static str {
 }
 
 fn build_metadata(hdr: &FileHeader) -> Option<Metadata> {
-    let mut meta = Metadata::new().with_type_creator(hdr.file_type, hdr.creator);
+    let mut meta = Metadata::new()
+        .with_type_creator(hdr.file_type, hdr.creator)
+        .with_modified(crate::Timestamp::from_mac(hdr.modified, true));
 
     let rsrc_method = compression_method_name(hdr.cpt_flag, true);
     let data_method = compression_method_name(hdr.cpt_flag, false);
@@ -287,11 +463,108 @@ fn build_metadata(hdr: &FileHeader) -> Option<Metadata> {
     if meta.is_empty() { None } else { Some(meta) }
 }
 
-fn parse_and_extract(data: &[u8]) -> Result<Vec<CompactProEntry>> {
+#[derive(Default)]
+struct Skipped {
+    count: usize,
+    first: Option<String>,
+}
+
+impl Skipped {
+    fn note(&mut self, name: &str, reason: impl core::fmt::Display) {
+        self.count += 1;
+        if self.first.is_none() {
+            self.first = Some(format!("{name} ({reason})"));
+        }
+    }
+
+    fn summary(self) -> Option<String> {
+        self.first.map(|first| {
+            format!(
+                "CompactPro: {} unreadable file(s) or fork(s) left out, first: {first}",
+                self.count
+            )
+        })
+    }
+}
+
+fn read_fork(
+    packed_area: &[u8],
+    start: Option<usize>,
+    packed: u32,
+    unpacked: u32,
+    lzh: bool,
+    budget: &mut OutputBudget,
+) -> Result<Vec<u8>> {
+    if unpacked == 0 {
+        return Ok(Vec::new());
+    }
+    let input = start
+        .and_then(|start| packed_area.get(start..start.checked_add(packed as usize)?))
+        .ok_or_else(|| Error::invalid_format("CompactPro fork lies outside the archive"))?;
+    budget.charge(unpacked as usize, "CompactPro fork")?;
+    let output = if lzh {
+        decompress_rle_lzh(input, unpacked as usize)?
+    } else {
+        decompress_rle(input, unpacked as usize)
+    };
+    if output.len() != unpacked as usize {
+        return Err(Error::decompression("CompactPro fork is truncated"));
+    }
+    Ok(output)
+}
+
+// The `len` packed bytes of a file that starts at `pos` of segment `volume`.
+// They run on through the segments that follow, past each one's header.
+fn packed_bytes<'a>(
+    bodies: &[Option<&'a [u8]>],
+    volume: usize,
+    pos: u32,
+    len: usize,
+) -> core::result::Result<Cow<'a, [u8]>, String> {
+    let outside = || "lies outside the archive".to_string();
+    if len == 0 {
+        return Ok(Cow::Borrowed(&[]));
+    }
+    if volume == 0 || volume > bodies.len() {
+        return Err(outside());
+    }
+    let mut start = (pos as usize).checked_sub(CPTHDRSIZE).ok_or_else(outside)?;
+    let mut joined = Vec::new();
+    for (index, body) in bodies.iter().enumerate().skip(volume - 1) {
+        let body =
+            body.ok_or_else(|| format!("segment {} of {} is missing", index + 1, bodies.len()))?;
+        let rest = body.get(start..).ok_or_else(outside)?;
+        let want = len - joined.len();
+        if joined.is_empty() && rest.len() >= want {
+            return Ok(Cow::Borrowed(&rest[..want]));
+        }
+        joined.extend_from_slice(&rest[..want.min(rest.len())]);
+        if joined.len() == len {
+            return Ok(Cow::Owned(joined));
+        }
+        start = 0;
+    }
+    Err(outside())
+}
+
+// `earlier` holds the segments before `data`, the one with the index, in
+// order; `None` for one that was not found.
+fn parse_and_extract(
+    data: &[u8],
+    earlier: &[Option<Vec<u8>>],
+) -> Result<(Vec<CompactProEntry>, Option<String>)> {
     let header = parse_header(data)?;
 
     // Compressed data is stored from offset 8 to header.offset
     let compressed_data = &data[CPTHDRSIZE..header.offset as usize];
+    let count = usize::from(data[1]).max(1);
+    let mut bodies: Vec<Option<&[u8]>> = (0..count - 1)
+        .map(|index| earlier.get(index)?.as_deref()?.get(CPTHDRSIZE..))
+        .collect();
+    bodies.push(Some(compressed_data));
+    let total = earlier.iter().flatten().map(Vec::len).sum::<usize>() + data.len();
+    let mut budget = OutputBudget::for_input(total, BUDGET_RATIO);
+    let mut skipped = Skipped::default();
 
     // Index starts after the second header part
     let index_start = header.offset as usize + CPTHDR2SIZE + header.comment_size as usize;
@@ -372,11 +645,6 @@ fn parse_and_extract(data: &[u8]) -> Result<Vec<CompactProEntry>> {
             continue;
         }
 
-        // Skip encrypted files
-        if (file_hdr.cpt_flag & FLAG_ENCRYPTED) != 0 {
-            continue;
-        }
-
         // Build full path (path_stack is already sanitized)
         let sanitized_name = sanitize_path_component(&file_hdr.name);
         let full_name = if path_stack.is_empty() {
@@ -385,40 +653,80 @@ fn parse_and_extract(data: &[u8]) -> Result<Vec<CompactProEntry>> {
             format!("{}/{}", path_stack.join("/"), sanitized_name)
         };
 
-        // filepos is absolute from file start, but compressed_data starts at CPTHDRSIZE
-        let file_pos = file_hdr.file_pos as usize;
-        let base_offset = file_pos.saturating_sub(CPTHDRSIZE);
+        if (file_hdr.cpt_flag & FLAG_ENCRYPTED) != 0 {
+            skipped.note(&full_name, "encrypted");
+            continue;
+        }
 
-        // Extract resource fork
-        let resource_fork = if file_hdr.rsrc_length > 0 && file_hdr.comp_rsrc_length > 0 {
-            let start = base_offset;
-            let end = start + file_hdr.comp_rsrc_length as usize;
-            if end <= compressed_data.len() {
-                let compressed = &compressed_data[start..end];
-                let is_lzh = (file_hdr.cpt_flag & FLAG_RSRC_COMPRESSED) != 0;
-                decompress(compressed, file_hdr.rsrc_length as usize, is_lzh)
-                    .unwrap_or_else(|_| Vec::new())
-            } else {
-                Vec::new()
-            }
+        // filepos counts from the start of the segment the file begins in;
+        // the resource fork is stored first. An archive in one piece has
+        // only segment 1.
+        let volume = if count == 1 {
+            1
         } else {
-            Vec::new()
+            usize::from(file_hdr.volume)
         };
-
-        // Extract data fork
-        let data_fork = if file_hdr.data_length > 0 && file_hdr.comp_data_length > 0 {
-            let start = base_offset + file_hdr.comp_rsrc_length as usize;
-            let end = start + file_hdr.comp_data_length as usize;
-            if end <= compressed_data.len() {
-                let compressed = &compressed_data[start..end];
-                let is_lzh = (file_hdr.cpt_flag & FLAG_DATA_COMPRESSED) != 0;
-                decompress(compressed, file_hdr.data_length as usize, is_lzh)
-                    .unwrap_or_else(|_| Vec::new())
+        let packed_len = (file_hdr.comp_rsrc_length as usize)
+            .checked_add(if file_hdr.data_length == 0 {
+                0
             } else {
+                file_hdr.comp_data_length as usize
+            })
+            .ok_or_else(|| "fork lengths overflow".to_string());
+        let packed = match packed_len
+            .and_then(|len| packed_bytes(&bodies, volume, file_hdr.file_pos, len))
+        {
+            Ok(packed) => packed,
+            Err(err) => {
+                skipped.note(&full_name, err);
+                continue;
+            }
+        };
+        let compressed_data: &[u8] = &packed;
+        let rsrc_start = Some(0);
+        let data_start = Some(file_hdr.comp_rsrc_length as usize);
+        let rsrc = read_fork(
+            compressed_data,
+            rsrc_start,
+            file_hdr.comp_rsrc_length,
+            file_hdr.rsrc_length,
+            (file_hdr.cpt_flag & FLAG_RSRC_COMPRESSED) != 0,
+            &mut budget,
+        );
+        let data = read_fork(
+            compressed_data,
+            data_start,
+            file_hdr.comp_data_length,
+            file_hdr.data_length,
+            (file_hdr.cpt_flag & FLAG_DATA_COMPRESSED) != 0,
+            &mut budget,
+        );
+
+        // Without its data fork the file is left out, without its resource
+        // fork only that fork is.
+        let data_fork = match data {
+            Ok(bytes) => bytes,
+            Err(err) => {
+                skipped.note(&full_name, format_args!("data fork: {err}"));
+                continue;
+            }
+        };
+        let resource_fork = match rsrc {
+            Ok(bytes) => {
+                // One CRC-32 covers both forks, stored without the final
+                // complement.
+                let crc = crc32_update(crc32_update(u32::MAX, &bytes), &data_fork);
+                let empty = bytes.is_empty() && data_fork.is_empty();
+                if crc != file_hdr.file_crc && !empty {
+                    skipped.note(&full_name, "CRC mismatch");
+                    continue;
+                }
+                bytes
+            }
+            Err(err) => {
+                skipped.note(&full_name, format_args!("resource fork: {err}"));
                 Vec::new()
             }
-        } else {
-            Vec::new()
         };
 
         entries.push(CompactProEntry {
@@ -429,19 +737,7 @@ fn parse_and_extract(data: &[u8]) -> Result<Vec<CompactProEntry>> {
         });
     }
 
-    Ok(entries)
-}
-
-fn decompress(input: &[u8], output_len: usize, use_lzh: bool) -> Result<Vec<u8>> {
-    // Sanity check: reject unreasonable decompression ratios (corrupt headers)
-    if output_len > input.len().saturating_mul(256) {
-        return Err(Error::invalid_format("decompressed size ratio too large"));
-    }
-    if use_lzh {
-        decompress_rle_lzh(input, output_len)
-    } else {
-        decompress_rle(input, output_len)
-    }
+    Ok((entries, skipped.summary()))
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -530,7 +826,7 @@ impl RleOutput {
     }
 }
 
-fn decompress_rle(input: &[u8], output_len: usize) -> Result<Vec<u8>> {
+fn decompress_rle(input: &[u8], output_len: usize) -> Vec<u8> {
     let mut rle = RleOutput::new(output_len);
 
     for &byte in input {
@@ -540,283 +836,168 @@ fn decompress_rle(input: &[u8], output_len: usize) -> Result<Vec<u8>> {
         }
     }
 
-    Ok(rle.into_vec())
+    rle.into_vec()
 }
 
-#[derive(Clone, Default)]
-struct HuffNode {
-    is_leaf: bool,
-    value: u16,
-    zero: usize,
-    one: usize,
+fn truncated() -> Error {
+    Error::decompression("CompactPro LZH data is truncated")
 }
 
+// Most significant bit first.
 struct BitReader<'a> {
     data: &'a [u8],
     pos: usize,
-    bits: u32,
-    bits_avail: i32,
+    used: u8,
 }
 
-impl<'a> BitReader<'a> {
-    fn new(data: &'a [u8]) -> Self {
-        let mut reader = Self {
-            data,
-            pos: 0,
-            bits: 0,
-            bits_avail: 0,
-        };
-        // Pre-load bits
-        reader.refill();
-        reader.refill();
-        reader
-    }
-
-    fn refill(&mut self) {
-        if self.pos + 1 < self.data.len() {
-            let word = ((self.data[self.pos] as u32) << 8) | (self.data[self.pos + 1] as u32);
-            self.pos += 2;
-            self.bits |= word << (16 - self.bits_avail);
-            self.bits_avail += 16;
+impl BitReader<'_> {
+    fn bit(&mut self) -> Result<u32> {
+        let byte = *self.data.get(self.pos).ok_or_else(truncated)?;
+        let bit = (byte >> (7 - self.used)) & 1;
+        self.used += 1;
+        if self.used == 8 {
+            self.used = 0;
+            self.pos += 1;
         }
+        Ok(u32::from(bit))
     }
 
-    fn get_bit(&mut self) -> u32 {
-        let bit = (self.bits >> 31) & 1;
-        self.bits_avail = self.bits_avail.saturating_sub(1);
-        if self.bits_avail < 16 {
-            self.refill();
+    fn bits(&mut self, count: u32) -> Result<u32> {
+        let mut value = 0;
+        for _ in 0..count {
+            value = (value << 1) | self.bit()?;
         }
-        self.bits <<= 1;
-        bit
+        Ok(value)
     }
 
-    fn get_6bits(&mut self) -> u32 {
-        let val = (self.bits >> 26) & 0x3F;
-        self.bits_avail = self.bits_avail.saturating_sub(6);
-        self.bits <<= 6;
-        if self.bits_avail < 16 {
-            self.refill();
+    fn align(&mut self) {
+        if self.used != 0 {
+            self.used = 0;
+            self.pos += 1;
         }
-        val
-    }
-
-    fn is_exhausted(&self) -> bool {
-        self.bits_avail <= 0 && self.pos + 1 >= self.data.len()
     }
 }
 
-fn read_huffman_tree(reader: &mut BitReader, size: usize) -> Vec<HuffNode> {
-    let tree_bytes = if reader.pos < reader.data.len() {
-        reader.data[reader.pos] as usize
-    } else {
-        0
-    };
-    reader.pos += 1;
+const MAX_CODE_LENGTH: usize = 15;
 
-    // Read code lengths
-    let mut entries: Vec<(u16, u8)> = Vec::new();
-    let mut max_length = 0u8;
-    let mut tree_count = [0u32; 32];
+// Canonical prefix code: shorter codes first, ascending symbol within a
+// length, the shortest code all zeros.
+struct PrefixCode {
+    count: [u16; MAX_CODE_LENGTH + 1],
+    symbols: Vec<u16>,
+}
 
-    let mut i = 0usize;
-    let mut bytes_read = 0usize;
-    while bytes_read < tree_bytes && reader.pos < reader.data.len() {
-        let byte = reader.data[reader.pos];
-        reader.pos += 1;
-        bytes_read += 1;
+impl PrefixCode {
+    // A length byte, then that many bytes holding two 4-bit code lengths each.
+    fn read(reader: &mut BitReader, size: usize) -> Result<Self> {
+        let bytes = usize::from(*reader.data.get(reader.pos).ok_or_else(truncated)?);
+        if bytes * 2 > size {
+            return Err(Error::decompression("CompactPro code table is too long"));
+        }
+        let start = reader.pos + 1;
+        let packed = reader
+            .data
+            .get(start..start + bytes)
+            .ok_or_else(truncated)?;
+        reader.pos = start + bytes;
 
-        // High nibble
-        let len1 = byte >> 4;
-        if len1 != 0 {
-            if len1 > max_length {
-                max_length = len1;
+        let lengths = || packed.iter().flat_map(|&byte| [byte >> 4, byte & 0x0F]);
+        let mut count = [0u16; MAX_CODE_LENGTH + 1];
+        for length in lengths() {
+            count[usize::from(length)] += 1;
+        }
+        count[0] = 0;
+
+        let mut unused = 1i32;
+        let mut next = [0u16; MAX_CODE_LENGTH + 1];
+        for length in 1..=MAX_CODE_LENGTH {
+            unused = (unused << 1) - i32::from(count[length]);
+            if unused < 0 {
+                return Err(Error::decompression("CompactPro code table is invalid"));
             }
-            tree_count[len1 as usize] += 1;
-            entries.push((i as u16, len1));
-        }
-        i += 1;
-
-        // Low nibble
-        let len2 = byte & 0x0F;
-        if len2 != 0 {
-            if len2 > max_length {
-                max_length = len2;
-            }
-            tree_count[len2 as usize] += 1;
-            entries.push((i as u16, len2));
-        }
-        i += 1;
-    }
-
-    // Add unused trailing codes
-    let mut j = 0u32;
-    for k in 0..=max_length {
-        j = (j << 1) + tree_count[k as usize];
-    }
-    let unused = (1u32 << max_length).saturating_sub(j);
-    let tree_size = size * 2 + 8;
-    // Every entry needs a leaf slot; a code table that cannot fit is corrupt.
-    if entries.len().saturating_add(unused as usize) > tree_size {
-        return vec![HuffNode::default(); tree_size];
-    }
-    for _ in 0..unused {
-        entries.push((size as u16, max_length));
-    }
-
-    // Sort by (length, value)
-    entries.sort_by(|a, b| {
-        if a.1 != b.1 {
-            a.1.cmp(&b.1)
-        } else {
-            a.0.cmp(&b.0)
-        }
-    });
-
-    // Build tree
-    let mut tree = vec![HuffNode::default(); tree_size];
-
-    if entries.is_empty() || max_length == 0 {
-        return tree;
-    }
-
-    let mut idx = entries.len();
-    let mut lvl_start = tree_size - 1;
-    let mut next = lvl_start;
-
-    for code_len in (1..=max_length).rev() {
-        // Add leaves at this level
-        while idx > 0 && entries[idx - 1].1 == code_len {
-            idx -= 1;
-            tree[next].is_leaf = true;
-            tree[next].value = entries[idx].0;
-            next = match next.checked_sub(1) {
-                Some(n) => n,
-                None => return vec![HuffNode::default(); tree_size],
-            };
+            next[length] = next[length - 1] + count[length - 1];
         }
 
-        // Build internal nodes
-        let parents = next;
-        if code_len > 1 {
-            let mut j = lvl_start;
-            while j > parents + 1 {
-                tree[next].is_leaf = false;
-                tree[next].one = j;
-                tree[next].zero = j - 1;
-                j -= 2;
-                next = match next.checked_sub(1) {
-                    Some(n) => n,
-                    None => return vec![HuffNode::default(); tree_size],
-                };
+        let mut symbols = vec![0u16; usize::from(next[MAX_CODE_LENGTH] + count[MAX_CODE_LENGTH])];
+        for (symbol, length) in lengths().enumerate() {
+            if length != 0 {
+                let slot = &mut next[usize::from(length)];
+                symbols[usize::from(*slot)] = symbol as u16;
+                *slot += 1;
             }
         }
-        lvl_start = parents;
+        Ok(Self { count, symbols })
     }
 
-    // Set root
-    if next + 2 < tree_size {
-        tree[0].is_leaf = false;
-        tree[0].one = next + 2;
-        tree[0].zero = next + 1;
+    fn decode(&self, reader: &mut BitReader) -> Result<u16> {
+        let mut code = 0u32;
+        let mut first = 0u32;
+        let mut index = 0u32;
+        for &count in &self.count[1..] {
+            code |= reader.bit()?;
+            let count = u32::from(count);
+            if code - first < count {
+                return Ok(self.symbols[(index + code - first) as usize]);
+            }
+            index += count;
+            first = (first + count) << 1;
+            code <<= 1;
+        }
+        Err(Error::decompression("CompactPro LZH code is invalid"))
     }
-
-    tree
 }
 
-fn get_huffman_byte(reader: &mut BitReader, tree: &[HuffNode]) -> u16 {
-    let mut node = &tree[0];
-    // Cap traversal at tree.len(): a well-formed Huffman tree reaches a leaf in
-    // at most that many steps. A corrupt tree (or one consumed past EOF, where
-    // BitReader::get_bit just keeps returning 0) can otherwise cycle forever.
-    for _ in 0..tree.len() {
-        if node.is_leaf {
-            return node.value;
-        }
-        let bit = reader.get_bit();
-        let next_idx = if bit != 0 { node.one } else { node.zero };
-        if next_idx >= tree.len() {
-            return 0;
-        }
-        node = &tree[next_idx];
-    }
-    // Bail out on cycle-or-EOF: returning 0 lets the outer
-    // `decompress_rle_lzh` loop hit its no-progress check and break.
-    0
-}
-
+// LZSS over an 8 KiB window with three prefix codes per block; the result is
+// run-length coded. Layout cross-checked against archives made by Compact Pro.
 fn decompress_rle_lzh(input: &[u8], output_len: usize) -> Result<Vec<u8>> {
     let mut rle = RleOutput::new(output_len);
-    let mut lz_buffer = [0u8; CIRCSIZE];
-    let mut lz_ptr = 0usize;
-    let mut reader = BitReader::new(input);
-
-    // Initialize buffer
-    lz_buffer[CIRCSIZE - 3] = 0;
-    lz_buffer[CIRCSIZE - 2] = 0;
-    lz_buffer[CIRCSIZE - 1] = 0;
-
-    let block_size = 0x1FFF0;
+    let mut window = [0u8; CIRCSIZE];
+    let mut at = 0usize;
+    let mut reader = BitReader {
+        data: input,
+        pos: 0,
+        used: 0,
+    };
 
     while rle.remaining > 0 {
-        let remaining_before = rle.remaining;
+        let literals = PrefixCode::read(&mut reader, 256)?;
+        let lengths = PrefixCode::read(&mut reader, 64)?;
+        let offsets = PrefixCode::read(&mut reader, 128)?;
+        let block_start = reader.pos;
+        let mut block = 0;
 
-        // Read Huffman trees for this block
-        let huff_tree = read_huffman_tree(&mut reader, 256);
-        let lz_length_tree = read_huffman_tree(&mut reader, 64);
-        let lz_offset_tree = read_huffman_tree(&mut reader, 128);
-
-        // Re-initialize bit stream after reading trees
-        reader.bits = 0;
-        reader.bits_avail = 0;
-        if reader.pos + 1 < reader.data.len() {
-            reader.bits = ((reader.data[reader.pos] as u32) << 24)
-                | ((reader.data[reader.pos + 1] as u32) << 16);
-            reader.pos += 2;
-            reader.bits_avail = 16;
-        }
-        reader.refill();
-
-        // Bail out if no data available (corrupt input)
-        if reader.is_exhausted() {
-            break;
-        }
-
-        let mut block_count = 0;
-
-        while block_count < block_size && rle.remaining > 0 && !reader.is_exhausted() {
-            if reader.get_bit() != 0 {
-                // Literal byte
-                let byte = get_huffman_byte(&mut reader, &huff_tree) as u8;
-                lz_buffer[lz_ptr & (CIRCSIZE - 1)] = byte;
-                lz_ptr += 1;
+        while block < BLOCK_SIZE && rle.remaining > 0 {
+            if reader.bit()? != 0 {
+                let byte = literals.decode(&mut reader)? as u8;
+                window[at % CIRCSIZE] = byte;
+                at = at.wrapping_add(1);
                 rle.output_char(byte);
-                block_count += 2;
+                block += 2;
             } else {
-                // LZ match
-                let length = get_huffman_byte(&mut reader, &lz_length_tree) as usize;
-                let offset_hi = get_huffman_byte(&mut reader, &lz_offset_tree) as usize;
-                let offset_lo = reader.get_6bits() as usize;
-                let offset = (offset_hi << 6) | offset_lo;
-
-                let back_start = lz_ptr.wrapping_sub(offset);
-                for i in 0..length {
-                    let byte = lz_buffer[back_start.wrapping_add(i) & (CIRCSIZE - 1)];
-                    lz_buffer[lz_ptr & (CIRCSIZE - 1)] = byte;
-                    lz_ptr += 1;
+                let length = usize::from(lengths.decode(&mut reader)?);
+                let offset =
+                    (usize::from(offsets.decode(&mut reader)?) << 6) | reader.bits(6)? as usize;
+                // Offset 0 is a full window back, which the ring gives for free.
+                let mut from = at.wrapping_sub(offset);
+                for _ in 0..length {
+                    let byte = window[from % CIRCSIZE];
+                    from = from.wrapping_add(1);
+                    window[at % CIRCSIZE] = byte;
+                    at = at.wrapping_add(1);
                     rle.output_char(byte);
-                    if rle.remaining == 0 {
-                        break;
-                    }
                 }
-                block_count += 3;
+                block += 3;
             }
         }
 
-        // No progress in this block means corrupt data - bail out
-        if rle.remaining == remaining_before {
-            break;
-        }
+        // The packer read 16-bit words with one word of lookahead, so a
+        // block is padded to a word boundary and followed by one more word.
+        reader.align();
+        reader.pos += if (reader.pos - block_start) % 2 == 0 {
+            2
+        } else {
+            3
+        };
     }
 
     Ok(rle.into_vec())
@@ -825,6 +1006,14 @@ fn decompress_rle_lzh(input: &[u8], output_len: usize) -> Result<Vec<u8>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn detection_rejects_an_offset_at_the_top_of_the_address_range() {
+        let mut data = [0u8; 64];
+        data[0] = CPT_SIGNATURE;
+        data[4..8].copy_from_slice(&u32::MAX.to_be_bytes());
+        assert!(!is_compactpro_archive(&data));
+    }
 
     #[test]
     fn test_not_compactpro() {
@@ -836,22 +1025,20 @@ mod tests {
     #[test]
     fn test_rle_passthrough() {
         let input = b"Hello World";
-        let result = decompress_rle(input, input.len()).unwrap();
-        assert_eq!(result, input);
+        assert_eq!(decompress_rle(input, input.len()), input);
     }
 
     #[test]
     fn test_rle_escape() {
         // ESC1 ESC2 0x05 means repeat previous char 4 times
         let input = [b'A', ESC1, ESC2, 0x05];
-        let result = decompress_rle(&input, 5).unwrap();
-        assert_eq!(result, b"AAAAA");
+        assert_eq!(decompress_rle(&input, 5), b"AAAAA");
     }
 
     #[test]
     fn test_rle_huge_declared_size_does_not_drive_allocation() {
         let input = [b'A', ESC1, ESC2, 0x05];
-        let result = decompress_rle(&input, u32::MAX as usize).unwrap();
+        let result = decompress_rle(&input, u32::MAX as usize);
         assert_eq!(result, b"AAAAA");
         assert!(result.capacity() <= crate::limits::PREALLOC_LIMIT);
     }
@@ -860,22 +1047,297 @@ mod tests {
     fn test_rle_output_larger_than_prealloc_limit() {
         let target = crate::limits::PREALLOC_LIMIT + 1000;
         let input = vec![b'Z'; target];
-        let result = decompress_rle(&input, target).unwrap();
-        assert_eq!(result, input);
+        assert_eq!(decompress_rle(&input, target), input);
+    }
+
+    #[derive(Default)]
+    struct BitWriter {
+        bytes: Vec<u8>,
+        used: u32,
+    }
+
+    impl BitWriter {
+        fn push(&mut self, value: u32, count: u32) {
+            for shift in (0..count).rev() {
+                if self.used == 0 {
+                    self.bytes.push(0);
+                }
+                let last = self.bytes.last_mut().unwrap();
+                *last |= (((value >> shift) & 1) as u8) << (7 - self.used);
+                self.used = (self.used + 1) % 8;
+            }
+        }
+    }
+
+    // One LZH block: `matches` matches of length 3 at distance 1, then
+    // `literals`. Every literal has an 8-bit code equal to its value; the
+    // length and offset codes each have a single 1-bit code.
+    fn lzh_block(matches: usize, literals: &[u8], packed: &mut Vec<u8>, plain: &mut Vec<u8>) {
+        packed.push(128);
+        packed.extend_from_slice(&[0x88; 128]);
+        packed.extend_from_slice(&[2, 0x00, 0x01]);
+        packed.extend_from_slice(&[1, 0x10]);
+        let mut bits = BitWriter::default();
+        for _ in 0..matches {
+            bits.push(0b00, 3);
+            bits.push(1, 6);
+            let last = plain.last().copied().unwrap_or(0);
+            plain.extend_from_slice(&[last; 3]);
+        }
+        for &literal in literals {
+            bits.push(1, 1);
+            bits.push(u32::from(literal), 8);
+            plain.push(literal);
+        }
+        packed.extend_from_slice(&bits.bytes);
+    }
+
+    // A full first block whose packed length has the given parity, its
+    // trailer, and a short second block.
+    fn two_blocks(matches: usize, trailer: usize) -> (Vec<u8>, Vec<u8>) {
+        let literals = (BLOCK_SIZE as usize - 3 * matches).div_ceil(2);
+        let first: Vec<u8> = (0..literals).map(|i| (i % 127) as u8).collect();
+        let (mut packed, mut plain) = (Vec::new(), Vec::new());
+        lzh_block(matches, &first, &mut packed, &mut plain);
+        packed.extend_from_slice(&[0xAA; 3][..trailer]);
+        lzh_block(1, b"second block", &mut packed, &mut plain);
+        (packed, plain)
     }
 
     #[test]
-    fn test_huffman_tree_with_oversized_padding_is_rejected() {
-        // One code of length 15 leaves 32767 unused codes, far more than the
-        // literal tree's node table can hold.
-        let mut input = vec![0, 0, 0, 0, 1, 0xF0];
-        input.extend_from_slice(&[0; 10]);
-        let output = decompress(&input, 100, true).unwrap();
-        assert!(output.is_empty());
+    fn lzh_block_of_odd_length_is_followed_by_three_bytes() {
+        let (packed, plain) = two_blocks(0, 3);
+        assert_eq!(decompress_rle_lzh(&packed, plain.len()).unwrap(), plain);
     }
 
     #[test]
-    fn test_decompress_rejects_implausible_ratio() {
-        assert!(decompress(&[b'A'; 4], u32::MAX as usize, false).is_err());
+    fn lzh_block_of_even_length_is_followed_by_two_bytes() {
+        let (packed, plain) = two_blocks(2, 2);
+        assert_eq!(decompress_rle_lzh(&packed, plain.len()).unwrap(), plain);
+    }
+
+    #[test]
+    fn lzh_offset_zero_reaches_a_full_window_back() {
+        let literals: Vec<u8> = (0..CIRCSIZE).map(|i| (i % 127) as u8).collect();
+        let (mut packed, mut plain) = (Vec::new(), Vec::new());
+        lzh_block(0, &literals, &mut packed, &mut plain);
+        // Rewrite the tables so a match can follow the literals.
+        let mut bits = BitWriter {
+            bytes: packed.split_off(129 + 3 + 2),
+            used: 0,
+        };
+        bits.push(0b00, 3);
+        bits.push(0, 6);
+        packed.extend_from_slice(&bits.bytes);
+        plain.extend_from_slice(&[0, 1, 2]);
+        assert_eq!(decompress_rle_lzh(&packed, plain.len()).unwrap(), plain);
+    }
+
+    #[test]
+    fn lzh_rejects_an_oversubscribed_code_table() {
+        // Three codes of length 1.
+        let input = [2, 0x11, 0x10, 0, 0, 0, 0];
+        assert!(decompress_rle_lzh(&input, 100).is_err());
+    }
+
+    #[test]
+    fn lzh_reports_truncated_input() {
+        let (packed, plain) = two_blocks(0, 3);
+        for cut in [0, 1, 100, 134, 5000, packed.len() - 1] {
+            assert!(
+                decompress_rle_lzh(&packed[..cut], plain.len()).is_err(),
+                "cut at {cut}"
+            );
+        }
+    }
+
+    const FIXTURE: &[u8] = include_bytes!("../../../testdata/compactpro/test-image.cpt");
+
+    // Offset of the first index entry's fixed fields (those after the name).
+    fn first_entry_fields(archive: &[u8]) -> usize {
+        let index = get4(&archive[4..8]) as usize
+            + CPTHDR2SIZE
+            + archive[get4(&archive[4..8]) as usize + 6] as usize;
+        index + 1 + (archive[index] & 0x3F) as usize
+    }
+
+    #[test]
+    fn fixture_forks_decode_in_full() {
+        let (entries, skipped) = parse_and_extract(FIXTURE, &[]).unwrap();
+        assert_eq!(skipped, None);
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].data_fork.len(), 1_474_560);
+        assert_eq!(entries[0].resource_fork.len(), 563);
+    }
+
+    #[test]
+    fn crc_mismatch_leaves_the_file_out() {
+        let mut archive = FIXTURE.to_vec();
+        let crc = first_entry_fields(&archive) + F_FILECRC - F_VOLUME;
+        archive[crc] ^= 1;
+        let (entries, skipped) = parse_and_extract(&archive, &[]).unwrap();
+        assert!(entries.is_empty());
+        let skipped = skipped.unwrap();
+        assert!(
+            skipped.contains("Test Image.img (CRC mismatch)"),
+            "{skipped}"
+        );
+    }
+
+    #[test]
+    fn encrypted_file_is_reported() {
+        let mut archive = FIXTURE.to_vec();
+        let flag = first_entry_fields(&archive) + F_CPTFLAG - F_VOLUME;
+        archive[flag + 1] |= FLAG_ENCRYPTED as u8;
+        let (entries, skipped) = parse_and_extract(&archive, &[]).unwrap();
+        assert!(entries.is_empty());
+        let skipped = skipped.unwrap();
+        assert!(skipped.contains("Test Image.img (encrypted)"), "{skipped}");
+    }
+
+    #[test]
+    fn damaged_resource_fork_keeps_the_data_fork() {
+        let mut archive = FIXTURE.to_vec();
+        // The resource fork is stored first; its first byte sizes a code table.
+        archive[CPTHDRSIZE] = 0xFF;
+        let (entries, skipped) = parse_and_extract(&archive, &[]).unwrap();
+        assert_eq!(entries[0].data_fork.len(), 1_474_560);
+        assert!(entries[0].resource_fork.is_empty());
+        let skipped = skipped.unwrap();
+        assert!(skipped.contains("resource fork: "), "{skipped}");
+    }
+
+    #[test]
+    fn declared_size_beyond_the_budget_is_refused_before_decoding() {
+        let mut archive = FIXTURE.to_vec();
+        let length = first_entry_fields(&archive) + F_DATALENGTH - F_VOLUME;
+        archive[length..length + 4].copy_from_slice(&u32::MAX.to_be_bytes());
+        let (entries, skipped) = parse_and_extract(&archive, &[]).unwrap();
+        assert!(entries.is_empty());
+        let skipped = skipped.unwrap();
+        assert!(skipped.contains("size budget"), "{skipped}");
+    }
+
+    // FIXTURE cut into segments of `sizes` packed bytes, the last one taking
+    // the rest and the index.
+    fn segmented(sizes: &[usize]) -> Vec<Vec<u8>> {
+        let index = get4(&FIXTURE[4..8]) as usize;
+        let mut segments = Vec::new();
+        let mut at = CPTHDRSIZE;
+        for (number, &size) in sizes.iter().enumerate() {
+            let mut segment = vec![CPT_SIGNATURE, number as u8 + 1, FIXTURE[2], FIXTURE[3]];
+            segment.extend_from_slice(&[0; 4]);
+            segment.extend_from_slice(&FIXTURE[at..at + size]);
+            segments.push(segment);
+            at += size;
+        }
+        let mut last = vec![CPT_SIGNATURE, sizes.len() as u8 + 1, FIXTURE[2], FIXTURE[3]];
+        last.extend_from_slice(&((index - at + CPTHDRSIZE) as u32).to_be_bytes());
+        last.extend_from_slice(&FIXTURE[at..]);
+        segments.push(last);
+        segments
+    }
+
+    #[test]
+    fn segmented_archive_decodes_like_the_whole_one() {
+        let (whole, _) = parse_and_extract(FIXTURE, &[]).unwrap();
+        // Cuts inside the resource fork, at the fork boundary and inside
+        // the data fork.
+        for sizes in [&[100][..], &[563 - 100, 700, 1], &[1, 1, 3000]] {
+            let mut segments = segmented(sizes);
+            let last = segments.pop().unwrap();
+            assert_eq!(last_segment_number(&last), Some(sizes.len() as u8 + 1));
+            let earlier: Vec<_> = segments.into_iter().map(Some).collect();
+            let (entries, skipped) = parse_and_extract(&last, &earlier).unwrap();
+            assert_eq!(skipped, None, "{sizes:?}");
+            assert_eq!(entries[0].data_fork, whole[0].data_fork);
+            assert_eq!(entries[0].resource_fork, whole[0].resource_fork);
+        }
+    }
+
+    #[test]
+    fn missing_segment_is_reported() {
+        let mut segments = segmented(&[100, 100]);
+        let last = segments.pop().unwrap();
+        let earlier = vec![Some(segments.remove(0)), None];
+        let (entries, skipped) = parse_and_extract(&last, &earlier).unwrap();
+        assert!(entries.is_empty());
+        let skipped = skipped.unwrap();
+        assert!(
+            skipped.contains("Test Image.img (segment 2 of 3 is missing)"),
+            "{skipped}"
+        );
+        // Opened without its siblings, the last segment reports the first.
+        let (_, skipped) = parse_and_extract(&last, &[]).unwrap();
+        assert!(skipped.unwrap().contains("segment 1 of 3 is missing"));
+    }
+
+    #[test]
+    fn segments_are_found_by_name_number_and_set() {
+        let segments = segmented(&[100, 100]);
+        let lookup = |names: [&'static str; 3]| {
+            let segments = segments.clone();
+            move |name: &str| {
+                names
+                    .iter()
+                    .position(|&known| known == name)
+                    .map(|at| segments[at].clone())
+            }
+        };
+        for names in [
+            ["dir/a.cpt.#1", "dir/a.cpt.#2", "dir/a.cpt.#3"],
+            ["a 1.3.#01.cpt", "a 1.3.#02.cpt", "a 1.3.#03.cpt"],
+            ["a.cpt", "a.cpt.#2", "a.cpt.#3"],
+            ["a.sea.1", "a.sea.2", "a.sea.3"],
+        ] {
+            let sibling = lookup(names);
+            let container = CompactProContainer::from_bytes_with_segments(
+                &segments[2],
+                String::new(),
+                1,
+                names[2],
+                &sibling,
+            )
+            .unwrap();
+            assert_eq!(container.skipped, None, "{names:?}");
+            assert!(
+                is_read_through_later_segment(names[0], &segments[0], &sibling),
+                "{names:?}"
+            );
+            assert!(is_read_through_later_segment(
+                names[1],
+                &segments[1],
+                &sibling
+            ));
+            assert!(!is_read_through_later_segment(
+                names[2],
+                &segments[2],
+                &sibling
+            ));
+        }
+
+        // A file with the right name from another set is not taken.
+        let mut other = segments[0].clone();
+        other[2] ^= 1;
+        let sibling = |name: &str| match name {
+            "a.#1" => Some(other.clone()),
+            "a.#2" => Some(segments[1].clone()),
+            _ => None,
+        };
+        let container = CompactProContainer::from_bytes_with_segments(
+            &segments[2],
+            String::new(),
+            1,
+            "a.#3",
+            &sibling,
+        )
+        .unwrap();
+        assert!(
+            container
+                .skipped
+                .unwrap()
+                .contains("segment 1 of 3 is missing")
+        );
+        assert!(!is_read_through_later_segment("a.#1", &other, &sibling));
     }
 }

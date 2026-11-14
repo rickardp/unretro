@@ -4,7 +4,7 @@ use crate::format::ContainerFormat;
 use crate::formats::cd_sector::{CD_USER_DATA_SIZE, RawCd};
 use crate::limits::{OutputBudget, prealloc_hint};
 use crate::sanitize_archive_path;
-use crate::{Container, ContainerInfo, Entry};
+use crate::{Container, ContainerInfo, Entry, Metadata, Timestamp};
 
 // =============================================================================
 // Constants
@@ -224,6 +224,28 @@ struct Record<'a> {
     interleaved: bool,
     name: &'a [u8],
     system_use: &'a [u8],
+    modified: Option<Timestamp>,
+}
+
+// Recording date and time (ECMA-119 9.1.5): year since 1900, month, day,
+// hour, minute, second, then the offset from GMT in quarter hours. High
+// Sierra has no offset byte, so its time is zone-less.
+fn recording_time(record: &[u8], layout: Layout) -> Option<Timestamp> {
+    let &[year, month, day, hour, minute, second, zone] = record.get(18..25)? else {
+        return None;
+    };
+    let seconds = Timestamp::civil_seconds(
+        1900 + i64::from(year),
+        u32::from(month),
+        u32::from(day),
+        u32::from(hour),
+        u32::from(minute),
+        u32::from(second),
+    )?;
+    Some(match layout {
+        Layout::Iso => Timestamp::utc(seconds - i64::from(zone as i8) * 900),
+        Layout::HighSierra => Timestamp::local(seconds),
+    })
 }
 
 impl<'a> Record<'a> {
@@ -245,6 +267,7 @@ impl<'a> Record<'a> {
             interleaved: record[26] != 0 || record[27] != 0,
             name: &record[33..name_end],
             system_use: &record[system_use_start..],
+            modified: recording_time(record, layout),
         })
     }
 
@@ -916,6 +939,7 @@ pub(crate) fn volume_label(data: &[u8]) -> Option<String> {
 struct IsoFileEntry {
     path: String,
     data: Vec<u8>,
+    modified: Option<Timestamp>,
 }
 
 // Entries left out of the listing.
@@ -1134,12 +1158,12 @@ impl<'v, 'a> Walk<'v, 'a> {
             if record.flags & FLAG_MULTI_EXTENT != 0 {
                 continue;
             }
-            self.add_file(path, &extents);
+            self.add_file(path, &extents, record.modified);
             extents.clear();
         }
     }
 
-    fn add_file(&mut self, path: String, extents: &[Extent]) {
+    fn add_file(&mut self, path: String, extents: &[Extent], modified: Option<Timestamp>) {
         let volume = self.volume;
         if extents.iter().any(|extent| extent.interleaved) {
             self.skipped
@@ -1183,7 +1207,11 @@ impl<'v, 'a> Walk<'v, 'a> {
                 &mut data,
             );
         }
-        self.files.push(IsoFileEntry { path, data });
+        self.files.push(IsoFileEntry {
+            path,
+            data,
+            modified,
+        });
     }
 
     // Boot images are listed under a reserved directory unless a file of
@@ -1235,7 +1263,11 @@ impl<'v, 'a> Walk<'v, 'a> {
             }
             let mut data = Vec::with_capacity(prealloc_hint(len));
             volume.image.append(start, len as usize, &mut data);
-            self.files.push(IsoFileEntry { path, data });
+            self.files.push(IsoFileEntry {
+                path,
+                data,
+                modified: None,
+            });
         }
         if truncated {
             self.skipped.note(format!(
@@ -1296,7 +1328,13 @@ impl Container for Iso9660Container {
     fn visit(&self, visitor: &mut dyn FnMut(&Entry<'_>) -> Result<bool>) -> Result<()> {
         for entry in &self.entries {
             let path = format!("{}/{}", self.prefix, sanitize_archive_path(&entry.path));
+            let metadata = Metadata::new().with_modified(entry.modified);
             let e = Entry::new(&path, &self.prefix, &entry.data);
+            let e = if entry.modified.is_some() {
+                e.with_metadata(&metadata)
+            } else {
+                e
+            };
 
             if !visitor(&e)? {
                 return Ok(());

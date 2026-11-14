@@ -1057,7 +1057,7 @@ mod tests {
         assert_eq!(digits.len() % 2, 0);
         digits
             .chunks(2)
-            .map(|pair| pair[0] << 4 | pair[1])
+            .map(|pair| (pair[0] << 4) | pair[1])
             .collect()
     }
 
@@ -1947,7 +1947,7 @@ mod tests {
 
         fn block(self, tables: bool, last: bool) -> Vec<u8> {
             let bits = if self.used == 0 { 8 } else { self.used } as u8;
-            let flags = (bits - 1) | 0x10 | u8::from(last) << 6 | u8::from(tables) << 7;
+            let flags = (bits - 1) | 0x10 | (u8::from(last) << 6) | (u8::from(tables) << 7);
             let size = (self.bytes.len() as u32).to_le_bytes();
             let checksum = 0x5a ^ flags ^ size[0] ^ size[1] ^ size[2];
             let mut block = vec![flags, checksum, size[0], size[1], size[2]];
@@ -2431,16 +2431,16 @@ mod tests {
         value
     }
 
-    // Decodes every compressed, unencrypted file of the single-volume RAR 5
-    // archive named by UNRETRO_RAR5_SAMPLE and compares the CRC-32 stored
-    // in its header (block layout from rar5-container.md 5 and 6). Does
-    // nothing when the variable is not set.
+    // Decodes every compressed, unencrypted file of a single-volume RAR 5
+    // archive of the samples repository and compares the CRC-32 stored in
+    // its header (block layout from rar5-container.md 5 and 6). Does
+    // nothing when `UNRETRO_SAMPLES` is not set.
     #[test]
     fn sample_archive() {
-        let Some(path) = std::env::var_os("UNRETRO_RAR5_SAMPLE") else {
+        let Some(samples) = crate::test_samples::samples_dir() else {
             return;
         };
-        let archive = std::fs::read(path).unwrap();
+        let archive = std::fs::read(samples.join("rar/test.rar")).unwrap();
         let signature = hex("52 61 72 21 1a 07 01 00");
         let mut pos = archive
             .windows(8)

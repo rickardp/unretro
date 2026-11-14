@@ -376,6 +376,8 @@ struct FileRecord {
     file_id: u32,
     file_type: [u8; 4],
     creator: [u8; 4],
+    // contentModDate: seconds since 1904, GMT (TN1150, "HFS Plus Dates").
+    modified: u32,
     file_mode: u16,
     // `iNodeNum` for hard link files.
     special: u32,
@@ -429,6 +431,7 @@ fn parse_catalog(tree: &BTree<'_>) -> Catalog {
                     file_id,
                     file_type: four_cc(data, 48),
                     creator: four_cc(data, 52),
+                    modified: be32(data, 16),
                     file_mode: be16(data, 42),
                     special: be32(data, 44),
                     data_fork: Fork::read(&data[88..88 + FORK_DATA_SIZE]),
@@ -457,6 +460,7 @@ pub(super) struct File {
     pub(super) path: String,
     pub(super) file_type: [u8; 4],
     pub(super) creator: [u8; 4],
+    pub(super) modified: u32,
     pub(super) content: Content,
 }
 
@@ -765,6 +769,7 @@ pub(super) fn read_volume(volume: &[u8], backed: Vec<Range<usize>>) -> Result<Vo
                     path,
                     file_type: target.file_type,
                     creator: target.creator,
+                    modified: target.modified,
                     content: Content::Inode(index),
                 });
             }
@@ -774,14 +779,11 @@ pub(super) fn read_volume(volume: &[u8], backed: Vec<Range<usize>>) -> Result<Vo
         let Some(forks) = reader.read_forks(file)? else {
             continue;
         };
-        // Only keep entries with actual data, as for HFS.
-        if forks.data.is_empty() && forks.resource.is_empty() {
-            continue;
-        }
         files.push(File {
             path,
             file_type: file.file_type,
             creator: file.creator,
+            modified: file.modified,
             content: Content::Own(forks),
         });
     }
@@ -1517,10 +1519,10 @@ mod tests {
     }
 
     #[test]
-    fn empty_files_are_not_listed() {
+    fn empty_files_are_listed() {
         let records = vec![file_record(2, "empty", 16, no_fork(), no_fork())];
         let (image, _) = volume(&[], &[records], 0);
-        assert!(paths(&image).is_empty());
+        assert_eq!(paths(&image), ["empty"]);
     }
 
     #[test]
@@ -1534,7 +1536,10 @@ mod tests {
         let files = listing(&image[..data_start + 2]);
         assert_eq!(
             files,
-            vec![("Folder:Hello.txt".to_string(), b"he".to_vec(), Vec::new())]
+            vec![
+                ("Top".to_string(), Vec::new(), Vec::new()),
+                ("Folder:Hello.txt".to_string(), b"he".to_vec(), Vec::new())
+            ]
         );
     }
 
@@ -1640,7 +1645,10 @@ mod tests {
         ];
         let (mut image, data) = volume(&[], &[records], 1);
         put_blocks(&mut image, data, b"tail");
-        let files = listing(&image);
+        let mut files = listing(&image);
+        // Files left with nothing are still listed, empty.
+        assert_eq!(files.len(), 3);
+        files.retain(|file| !file.1.is_empty());
         assert_eq!(files.len(), 1);
         assert_eq!(files[0].0, "partial");
         // The data block and the two reserved blocks after it.
@@ -1659,8 +1667,9 @@ mod tests {
         ];
         let (mut image, _) = volume(&[], &[records], 1);
         let files = listing(&image);
-        assert_eq!(files.len(), 1);
+        assert_eq!(files.len(), 2);
         assert_eq!(files[0].1.len(), BLOCK);
+        assert!(files[1].1.is_empty());
 
         // Special files claiming the whole address space.
         for fork in [192, 272] {
@@ -1673,7 +1682,7 @@ mod tests {
         // Record counts and offsets beyond the node.
         let leaf = catalog_start(0) as usize * BLOCK + CATALOG_NODE;
         image[leaf + 10..leaf + 12].copy_from_slice(&u16::MAX.to_be_bytes());
-        assert_eq!(listing(&image).len(), 1);
+        assert_eq!(listing(&image).len(), 2);
         for offset in [0u16, 13, 4090, u16::MAX] {
             let mut damaged = image.clone();
             damaged[leaf + CATALOG_NODE - 2..][..2].copy_from_slice(&offset.to_be_bytes());

@@ -637,7 +637,7 @@ mod tests {
         assert_eq!(digits.len() % 2, 0);
         digits
             .chunks(2)
-            .map(|pair| pair[0] << 4 | pair[1])
+            .map(|pair| (pair[0] << 4) | pair[1])
             .collect()
     }
 
@@ -1374,14 +1374,15 @@ mod tests {
         }
     }
 
-    // Real archives, checked against reference extractions. The corpus lives
-    // outside the repository; without it this test does nothing.
+    // Real archives, checked against reference extractions: `corpus/rar` of
+    // the samples repository that `UNRETRO_SAMPLES` names, whose
+    // `MANIFEST.tsv` lists paths relative to that directory. Without it this
+    // test does nothing.
     mod corpus {
         use super::super::*;
         use crate::formats::common::crc32::crc32;
         use std::path::{Path, PathBuf};
 
-        const MANIFEST: &str = "/tmp/rarcorpus/MANIFEST.tsv";
         const SIGNATURE: &[u8] = b"Rar!\x1a\x07\x00";
 
         struct Piece {
@@ -1471,9 +1472,12 @@ mod tests {
         }
 
         #[test]
-        #[ignore = "decodes the whole external corpus; run with --release -- --ignored"]
+        #[ignore = "decodes the whole samples corpus; run with --release -- --ignored"]
         fn corpus_members_match_references() {
-            let Ok(manifest) = std::fs::read_to_string(MANIFEST) else {
+            let Some(root) = crate::test_samples::corpus("rar") else {
+                return;
+            };
+            let Ok(manifest) = std::fs::read_to_string(root.join("MANIFEST.tsv")) else {
                 return;
             };
             // Rows per archive, in header order.
@@ -1503,7 +1507,7 @@ mod tests {
                 let mut packed: Vec<u8> = Vec::new();
                 let mut index = 0;
                 let mut samples_before = 0;
-                for volume in volumes(Path::new(path)) {
+                for volume in volumes(&root.join(path)) {
                     let Ok(buf) = std::fs::read(&volume) else {
                         failures.push(format!("{}: unreadable", volume.display()));
                         continue;
@@ -1558,7 +1562,7 @@ mod tests {
                             continue;
                         }
                         if row[9] != "-" {
-                            match std::fs::read(&row[9]) {
+                            match std::fs::read(root.join(&row[9])) {
                                 Ok(reference) if reference == out => {}
                                 Ok(_) => {
                                     failures.push(format!("{name}: differs from reference"));

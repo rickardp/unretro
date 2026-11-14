@@ -3,7 +3,7 @@ use crate::error::{Error, Result};
 use crate::format::ContainerFormat;
 use crate::limits::max_decompressed_size;
 use crate::sanitize_archive_path;
-use crate::{Container, ContainerInfo, Entry, Metadata};
+use crate::{Container, ContainerInfo, Entry, Metadata, Timestamp};
 
 use super::bzip2::bunzip2;
 use super::crc32::crc32;
@@ -37,6 +37,9 @@ const METHOD_XZ: u16 = 95;
 
 const EXTRA_ZIP64: u16 = 0x0001;
 const EXTRA_UNICODE_PATH: u16 = 0x7075;
+// Info-ZIP extended timestamp: a flags byte, then the modification time as
+// signed Unix seconds when bit 0 is set.
+const EXTRA_UNIX_TIME: u16 = 0x5455;
 
 // "Version made by" hosts (APPNOTE 4.4.2.2) whose file systems reserve the
 // backslash as the path separator.
@@ -157,6 +160,31 @@ fn decode_cp437(raw: &[u8]) -> String {
             None => char::from(byte),
         })
         .collect()
+}
+
+// The UTC time of an extended timestamp field when there is one, else the
+// zone-less MS-DOS time and date of the header (APPNOTE 4.4.6).
+fn modified_time(header: &[u8], extra: &[u8]) -> Option<Timestamp> {
+    let unix = extra_field(extra, EXTRA_UNIX_TIME).and_then(|field| match field {
+        [flags, a, b, c, d, ..] if flags & 1 != 0 => {
+            Some(Timestamp::utc(i64::from(i32::from_le_bytes([
+                *a, *b, *c, *d,
+            ]))))
+        }
+        _ => None,
+    });
+    unix.or_else(|| Timestamp::from_dos(le16(header, 14)?, le16(header, 12)?))
+}
+
+fn entry_metadata(entry: &CentralEntry<'_>) -> Option<Metadata> {
+    let method = compression_name(entry.method);
+    (method.is_some() || entry.modified.is_some()).then(|| {
+        let metadata = Metadata::new().with_modified(entry.modified);
+        match method {
+            Some(name) => metadata.with_compression_method(name),
+            None => metadata,
+        }
+    })
 }
 
 fn extra_field(extra: &[u8], id: u16) -> Option<&[u8]> {
@@ -347,6 +375,7 @@ struct CentralEntry<'a> {
     host: u8,
     flags: u16,
     method: u16,
+    modified: Option<Timestamp>,
     crc: u32,
     compressed: u64,
     uncompressed: u64,
@@ -410,6 +439,7 @@ fn parse_central_entry(directory: &[u8]) -> Result<CentralEntry<'_>> {
         host: header.get(5).copied().ok_or_else(truncated)?,
         flags: le16(header, 8).ok_or_else(truncated)?,
         method: le16(header, 10).ok_or_else(truncated)?,
+        modified: modified_time(header, extra),
         crc: le32(header, 16).ok_or_else(truncated)?,
         compressed,
         uncompressed,
@@ -650,8 +680,7 @@ impl ZipContainer {
                 Ok(file_data) => entries.push(ZipEntry {
                     path: name,
                     data: file_data,
-                    metadata: compression_name(entry.method)
-                        .map(|name| Metadata::new().with_compression_method(name)),
+                    metadata: entry_metadata(&entry),
                 }),
                 Err(problem) => skipped.note(&problem),
             }
@@ -746,6 +775,32 @@ mod tests {
         zip_data[local + 22..local + 26].copy_from_slice(&size.to_le_bytes());
         let central = find(zip_data, b"PK\x01\x02");
         zip_data[central + 24..central + 28].copy_from_slice(&size.to_le_bytes());
+    }
+
+    #[test]
+    fn modified_time_prefers_the_extended_timestamp() {
+        let mut header = [0u8; CENTRAL_HEADER_LEN];
+        // 1996-07-04 12:30:42.
+        header[12..14].copy_from_slice(&((12u16 << 11) | (30 << 5) | 21).to_le_bytes());
+        header[14..16].copy_from_slice(&((16u16 << 9) | (7 << 5) | 4).to_le_bytes());
+        let dos = Timestamp::civil_seconds(1996, 7, 4, 12, 30, 42).map(Timestamp::local);
+        assert_eq!(modified_time(&header, &[]), dos);
+
+        let mut extra = vec![0x55, 0x54, 5, 0, 1];
+        extra.extend_from_slice(&(-86_400i32).to_le_bytes());
+        assert_eq!(
+            modified_time(&header, &extra),
+            Some(Timestamp::utc(-86_400))
+        );
+        // Flag bit 0 clear, or the field cut short: no modification time in it.
+        assert_eq!(
+            modified_time(&header, &[0x55, 0x54, 5, 0, 2, 1, 2, 3, 4]),
+            dos
+        );
+        assert_eq!(modified_time(&header, &[0x55, 0x54, 1, 0, 1]), dos);
+
+        header[14..16].copy_from_slice(&[0, 0]);
+        assert_eq!(modified_time(&header, &[]), None);
     }
 
     #[test]
@@ -947,7 +1002,7 @@ mod tests {
             }
             extra.extend_from_slice(&entry.extra);
             put32(&mut central, CENTRAL_HEADER);
-            put16(&mut central, u16::from(entry.host) << 8 | 20);
+            put16(&mut central, (u16::from(entry.host) << 8) | 20);
             put16(&mut central, 20);
             put16(&mut central, flags);
             put16(&mut central, entry.method);

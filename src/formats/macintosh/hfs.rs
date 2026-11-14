@@ -5,7 +5,7 @@ use crate::format::ContainerFormat;
 use crate::formats::cd_sector::{CD_RAW_SECTOR_SIZE, CD_USER_DATA_SIZE, RawCd};
 use crate::limits::{BUDGET_FLOOR, OutputBudget};
 use crate::sanitize_hfs_path;
-use crate::{Container, ContainerInfo, Entry, Metadata};
+use crate::{Container, ContainerInfo, Entry, Metadata, Timestamp};
 #[cfg(all(feature = "no_std", not(feature = "std")))]
 use alloc::collections::{BTreeMap, BTreeSet};
 use core::ops::Range;
@@ -542,6 +542,8 @@ struct HfsFileEntry {
     file_id: u32,
     file_type: [u8; 4],
     creator: [u8; 4],
+    // filMdDat: zone-less seconds since 1904.
+    modified: u32,
     data_fork_size: u32,
     data_fork_extents: [ExtentDescriptor; 3],
     resource_fork_size: u32,
@@ -622,6 +624,8 @@ struct MfsFileEntry {
     name: String,
     file_type: [u8; 4],
     creator: [u8; 4],
+    // flMdDat: zone-less seconds since 1904.
+    modified: u32,
     data_fork: Vec<u8>,
     resource_fork: Vec<u8>,
 }
@@ -1088,12 +1092,17 @@ fn ndif_decompress(
         let next_offset = chunks
             .get(chunk_idx + 1)
             .map_or(header.num_blocks, |next| next.logical_offset);
-        let output_offset = (chunk.logical_offset as usize) * NDIF_BLOCK_SIZE;
+        let output_offset = (chunk.logical_offset as usize).saturating_mul(NDIF_BLOCK_SIZE);
         // Chunks that are out of order or reach past the image are skipped.
         let Some(chunk_bytes) = next_offset
             .checked_sub(chunk.logical_offset)
             .and_then(|blocks| (blocks as usize).checked_mul(NDIF_BLOCK_SIZE))
-            .filter(|&bytes| bytes <= output.len().saturating_sub(output_offset))
+            .filter(|&bytes| {
+                output
+                    .len()
+                    .checked_sub(output_offset)
+                    .is_some_and(|room| bytes <= room)
+            })
         else {
             continue;
         };
@@ -1605,6 +1614,9 @@ struct LocatedVolume<'a> {
     image: Cow<'a, [u8]>,
     start: usize,
     backed: Vec<Range<usize>>,
+    // Where the partitioned disk inside a UDIF, DiskCopy 4.2 or NDIF wrapper
+    // starts in `image`, when its partitions can be listed.
+    partitioned: Option<usize>,
 }
 
 impl<'a> LocatedVolume<'a> {
@@ -1642,8 +1654,17 @@ impl<'a> LocatedVolume<'a> {
             backed = vec![block_data];
         }
 
+        // A wrapped image that is nearly all zero-fill is not handed out by
+        // partition: only this reader leaves zero-fill uncommitted.
+        let wrapped =
+            (decoded_udif || start > 0) && (image.len() as u64) <= chunk_budget(data.len());
+        let mut partitioned = None;
+
         // Check for Apple Partition Map (APM) - used by .toast and CD images
         if let Some(apm_offset) = find_apm_hfs_partition(&image[start..]) {
+            if wrapped && super::apm::has_partition_map(&image[start..], image.len() - start) {
+                partitioned = Some(start);
+            }
             start = start
                 .checked_add(apm_offset)
                 .filter(|&start| start <= image.len())
@@ -1665,6 +1686,9 @@ impl<'a> LocatedVolume<'a> {
                     // Decompress NDIF to get raw HFS
                     let (decoded, ranges) =
                         ndif_decompress(&image[start..], &bcem, ranges_len(&backed))?;
+                    partitioned = (super::apm::has_partition_map(&decoded, decoded.len())
+                        && (decoded.len() as u64) <= chunk_budget(data.len()))
+                    .then_some(0);
                     image = Cow::Owned(decoded);
                     backed = ranges;
                     start = 0;
@@ -1676,6 +1700,7 @@ impl<'a> LocatedVolume<'a> {
             image,
             start,
             backed,
+            partitioned,
         })
     }
 
@@ -1734,6 +1759,7 @@ impl<'a> HfsVolume<'a> {
             image,
             start,
             backed,
+            ..
         } = located;
         let hfs_data = &image[start..];
         if hfs_data.len() < MDB_OFFSET + 162 {
@@ -2070,6 +2096,12 @@ impl<'a> HfsVolume<'a> {
                     file_id,
                     file_type,
                     creator,
+                    modified: u32::from_be_bytes([
+                        record_data[48],
+                        record_data[49],
+                        record_data[50],
+                        record_data[51],
+                    ]),
                     data_fork_size,
                     data_fork_extents,
                     resource_fork_size,
@@ -2452,6 +2484,12 @@ impl MfsVolume {
                 name,
                 file_type,
                 creator,
+                modified: u32::from_be_bytes([
+                    dir_data[offset + 46],
+                    dir_data[offset + 47],
+                    dir_data[offset + 48],
+                    dir_data[offset + 49],
+                ]),
                 data_fork,
                 resource_fork,
             });
@@ -2600,6 +2638,7 @@ struct HfsEntry {
     resource_fork: Vec<u8>,
     file_type: [u8; 4],
     creator: [u8; 4],
+    modified: Option<Timestamp>,
     // HFS+ hard link: the forks are those of `HfsContainer::link_targets`.
     link_target: Option<usize>,
 }
@@ -2615,17 +2654,41 @@ pub struct HfsContainer {
 
 const RESOURCE_FORK_SUFFIX: &str = "..namedfork/rsrc";
 
+// What a Macintosh disk image opens as.
+pub(crate) enum Opened {
+    Volume(HfsContainer),
+    // The disk inside a UDIF, DiskCopy 4.2 or NDIF wrapper, which has an
+    // Apple Partition Map: listed by `ApmContainer`.
+    Partitioned(Vec<u8>),
+}
+
 impl HfsContainer {
-    pub fn from_bytes(data: &[u8], prefix: String, depth: u32) -> Result<Self> {
-        Self::from_bytes_with_sibling_lookup(data, prefix, depth, |_| None)
+    // The volume alone, without the partition listing of a wrapped disk.
+    #[cfg(test)]
+    fn from_bytes(data: &[u8], prefix: String, depth: u32) -> Result<Self> {
+        match Self::open_inner(data, prefix, depth, |_| None, false)? {
+            Opened::Volume(volume) => Ok(volume),
+            Opened::Partitioned(_) => Err(Error::invalid_format("HFS: no volume")),
+        }
     }
 
-    pub fn from_bytes_with_sibling_lookup<F>(
+    // The volume of an image, or the disk inside a wrapper when it has a
+    // partition map, for listing by partition. `get_sibling` supplies the
+    // resource fork of an NDIF image.
+    pub(crate) fn open<F>(data: &[u8], prefix: String, depth: u32, get_sibling: F) -> Result<Opened>
+    where
+        F: Fn(&str) -> Option<Vec<u8>>,
+    {
+        Self::open_inner(data, prefix, depth, get_sibling, true)
+    }
+
+    fn open_inner<F>(
         data: &[u8],
         prefix: String,
         depth: u32,
         get_sibling: F,
-    ) -> Result<Self>
+        partitions: bool,
+    ) -> Result<Opened>
     where
         F: Fn(&str) -> Option<Vec<u8>>,
     {
@@ -2654,18 +2717,18 @@ impl HfsContainer {
                         resource_fork: file.resource_fork,
                         file_type: file.file_type,
                         creator: file.creator,
+                        modified: Timestamp::from_mac(file.modified, true),
                         link_target: None,
                     })
-                    .filter(|entry| !entry.data.is_empty() || !entry.resource_fork.is_empty())
                     .collect();
 
-                return Ok(Self {
+                return Ok(Opened::Volume(Self {
                     prefix,
                     entries,
                     link_targets: Vec::new(),
                     skipped: None,
                     _depth: depth,
-                });
+                }));
             }
         }
 
@@ -2673,6 +2736,12 @@ impl HfsContainer {
         let resource_fork = get_sibling(RESOURCE_FORK_SUFFIX);
 
         let located = LocatedVolume::find(data, resource_fork.as_deref())?;
+        if let Some(at) = located.partitioned.filter(|_| partitions) {
+            return Ok(Opened::Partitioned(match located.image {
+                Cow::Owned(image) if at == 0 => image,
+                image => image[at..].to_vec(),
+            }));
+        }
         if let Some(range) = located.hfs_plus_range() {
             let volume = located.read_hfs_plus(range)?;
             let entries = volume
@@ -2695,17 +2764,18 @@ impl HfsContainer {
                         resource_fork: forks.resource,
                         file_type: file.file_type,
                         creator: file.creator,
+                        modified: Timestamp::from_mac(file.modified, false),
                         link_target,
                     }
                 })
                 .collect();
-            return Ok(Self {
+            return Ok(Opened::Volume(Self {
                 prefix,
                 entries,
                 link_targets: volume.inodes,
                 skipped: volume.skipped,
                 _depth: depth,
-            });
+            }));
         }
 
         // Parse the HFS volume
@@ -2717,11 +2787,6 @@ impl HfsContainer {
         for file in &files {
             let data = volume.read_data_fork(file)?;
             let resource_fork = volume.read_resource_fork(file)?;
-            // Only keep entries with actual data
-            if data.is_empty() && resource_fork.is_empty() {
-                continue;
-            }
-
             // Build full path by walking up directory tree
             let full_path = volume.build_full_path(file);
             entries.push(HfsEntry {
@@ -2730,17 +2795,18 @@ impl HfsContainer {
                 resource_fork,
                 file_type: file.file_type,
                 creator: file.creator,
+                modified: Timestamp::from_mac(file.modified, true),
                 link_target: None,
             });
         }
 
-        Ok(Self {
+        Ok(Opened::Volume(Self {
             prefix,
             entries,
             link_targets: Vec::new(),
             skipped: None,
             _depth: depth,
-        })
+        }))
     }
 }
 
@@ -2751,7 +2817,9 @@ impl Container for HfsContainer {
 
     fn visit(&self, visitor: &mut dyn FnMut(&Entry<'_>) -> Result<bool>) -> Result<()> {
         for entry in &self.entries {
-            let metadata = Metadata::new().with_type_creator(entry.file_type, entry.creator);
+            let metadata = Metadata::new()
+                .with_type_creator(entry.file_type, entry.creator)
+                .with_modified(entry.modified);
             let (data, resource_fork) =
                 match entry.link_target.and_then(|i| self.link_targets.get(i)) {
                     Some(target) => (&target.data, &target.resource),
@@ -3501,6 +3569,15 @@ mod tests {
         vabm[64..66].copy_from_slice(&[0x00, 0x20]);
         let fork = MfsVolume::read_fork(&volume, &vabm, 2, 100, 0, 0, 4);
         assert!(fork.is_empty());
+    }
+
+    #[test]
+    fn mfs_file_with_two_empty_forks_is_listed() {
+        let volume = HfsContainer::from_bytes(&mfs_image(512, 8 * 512, 1, 0), "v".into(), 8);
+        let entries = volume.unwrap().entries;
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].path, "v/A");
+        assert!(entries[0].data.is_empty() && entries[0].resource_fork.is_empty());
     }
 
     #[test]
@@ -4413,7 +4490,8 @@ mod tests {
         let (image, _) = crafted_volume(&leaves, &catalog, 0);
 
         let container = HfsContainer::from_bytes(&image, "vol".to_string(), 8).unwrap();
-        assert!(container.entries.is_empty());
+        assert_eq!(container.entries.len(), 4);
+        assert!(container.entries.iter().all(|entry| entry.data.is_empty()));
     }
 
     // The layout `hdiutil convert` gives a partitioned image: one table per
@@ -4604,6 +4682,33 @@ mod tests {
                 assert_eq!(container_files(&diskcopy), expected_files(2));
             }
         }
+    }
+
+    #[test]
+    fn wrapped_disk_with_a_partition_map_is_handed_out_whole() {
+        let volume = fragmented_catalog_volume(2, 3);
+        let mut apm = vec![0u8; 4 * 512];
+        put_apm(&mut apm, 4);
+        let blocks = (volume.len() / 512) as u32;
+        apm[512 + 12..512 + 16].copy_from_slice(&blocks.to_be_bytes());
+        apm.extend_from_slice(&volume);
+
+        let open = |data: &[u8]| HfsContainer::open(data, "v".to_string(), 8, |_| None).unwrap();
+        for tag_len in [0, 12] {
+            let wrapped = diskcopy_image(&apm, tag_len, 0x5A);
+            let Opened::Partitioned(disk) = open(&wrapped) else {
+                panic!("tag_len {tag_len}: opened as a volume");
+            };
+            assert_eq!(disk, apm);
+            // The volume alone is still reachable.
+            assert_eq!(container_files(&wrapped), expected_files(2));
+        }
+        // Unwrapped, the loader reads the map itself.
+        assert!(matches!(open(&apm), Opened::Volume(_)));
+        assert!(matches!(
+            open(&diskcopy_image(&volume, 0, 0)),
+            Opened::Volume(_)
+        ));
     }
 
     #[test]

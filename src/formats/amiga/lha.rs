@@ -6,17 +6,18 @@
 use crate::compat::{FastMap, String, ToString, Vec, format};
 use crate::error::{Error, Result};
 use crate::format::ContainerFormat;
+use crate::limits::BUDGET_FLOOR;
 use crate::sanitize_archive_path;
-use crate::{Container, ContainerInfo, Entry, Metadata};
+use crate::{Container, ContainerInfo, Entry, Metadata, Timestamp};
 
 use super::lzh::{self, EntryKind};
 
-// Bytes decoded per archive, as a multiple of the bytes its entries occupy.
-// All entries are held in memory at once, so this is also the memory
-// amplification bound. The static Huffman methods can express far more
-// (methods.md 8.20). There is no minimum: one would apply again to every
-// nested archive, and seven packed bytes are enough to claim 16 MiB.
-const BUDGET_RATIO: u64 = 1024;
+// Bytes decoded per archive, as a multiple of the bytes its entries occupy,
+// and at least `BUDGET_FLOOR`. All entries are held in memory at once, so
+// this is also the memory amplification bound. The ratio is what `-lh5-`
+// encoders reach on constant data such as a blank disk image (256 bytes per
+// bit); the format itself can express far more (methods.md 8.20).
+const BUDGET_RATIO: u64 = 2048;
 
 /// Check if data starts with a valid LHA entry header.
 #[must_use]
@@ -46,7 +47,7 @@ impl LhaContainer {
         // Junk before the first header and bytes after the end marker buy
         // nothing.
         let covered = archive.end.saturating_sub(archive.start) as u64;
-        let mut budget = lzh::Budget::new(covered.saturating_mul(BUDGET_RATIO));
+        let mut budget = lzh::Budget::new(covered.saturating_mul(BUDGET_RATIO).max(BUDGET_FLOOR));
         let mut entries = Vec::new();
         let mut skipped = Skipped::default();
         let listing_end = archive.incomplete.then(|| archive.findings.last().cloned());
@@ -63,7 +64,13 @@ impl LhaContainer {
                 Ok(data) => entries.push(LhaEntry {
                     path: escape_c1(&entry.path),
                     data,
-                    metadata: compression_metadata(&entry.method_id),
+                    metadata: entry_metadata(
+                        &entry.method_id,
+                        entry.modified.map(|seconds| Timestamp {
+                            seconds,
+                            local: entry.modified_local,
+                        }),
+                    ),
                 }),
                 Err(err) => skipped.entry(&entry.path, &err),
             }
@@ -141,12 +148,13 @@ fn escape_c1(path: &str) -> String {
 }
 
 // The three characters of a "-xxx-" identifier; nothing for stored data.
-fn compression_metadata(method_id: &[u8; 5]) -> Option<Metadata> {
+fn entry_metadata(method_id: &[u8; 5], modified: Option<Timestamp>) -> Option<Metadata> {
+    let metadata = Metadata::new().with_modified(modified);
     if matches!(method_id, b"-lh0-" | b"-lz4-") {
-        return None;
+        return modified.map(|_| metadata);
     }
     let name = String::from_utf8_lossy(&method_id[1..4]).into_owned();
-    Some(Metadata::new().with_compression_method(name))
+    Some(metadata.with_compression_method(name))
 }
 
 impl Container for LhaContainer {
@@ -348,7 +356,7 @@ mod tests {
         assert!(message.contains("corrupt"), "{message}");
 
         // The same with a claim above the allowance: refused, not charged.
-        let mut archive = entry(b"-lh5-", b"BAD.BIN", &[0xFF; 40], 16 << 20, 0);
+        let mut archive = entry(b"-lh5-", b"BAD.BIN", &[0xFF; 40], (16 << 20) + 1, 0);
         archive.extend_from_slice(&stored_archive(b"GOOD.TXT", b"good", 4));
         let container = open(&archive);
         assert_eq!(paths(&container), ["GOOD.TXT"]);
@@ -357,11 +365,19 @@ mod tests {
     }
 
     #[test]
-    fn allowance_follows_the_archive_length_without_a_minimum() {
-        // 39 bytes that would unpack to 16 MiB.
-        let mut bomb = run_entry(b"B", 1, 0xFFFF * 256, b' ');
+    fn allowance_follows_the_archive_length_above_the_floor() {
+        // A blank disk image: 39 bytes that unpack to just under 16 MiB.
+        let mut blank = run_entry(b"B", 1, 0xFFFF * 256, b' ');
+        blank.push(0);
+        assert!(blank.len() < 40);
+        let container = open(&blank);
+        assert_eq!(container.entries[0].data.len(), 0xFFFF * 256);
+        assert_eq!(container.skipped_entries(), None);
+
+        // 46 bytes that would unpack to twice that.
+        let mut bomb = run_entry(b"B", 2, 2 * 0xFFFF * 256, b' ');
         bomb.push(0);
-        assert!(bomb.len() < 40);
+        assert!(bomb.len() < 48);
         let container = open(&bomb);
         assert!(container.entries.is_empty());
         let message = container.skipped_entries().unwrap();
@@ -372,7 +388,7 @@ mod tests {
         let padded = [&[0x55; 4096][..], &bomb, &[0x55; 1 << 20]].concat();
         assert!(open(&padded).entries.is_empty());
 
-        // What fits in 1024 times the entry's own bytes is delivered.
+        // What fits is delivered.
         let mut small = run_entry(b"S", 1, 32 * 1024, b' ');
         small.push(0);
         assert_eq!(open(&small).entries[0].data, vec![b' '; 32 * 1024]);
@@ -380,14 +396,14 @@ mod tests {
 
     #[test]
     fn allowance_covers_all_entries_together() {
-        // 64 entries of 60,000 bytes each from seven packed bytes.
-        const EACH: u32 = 60_000;
+        // 64 entries of 600,000 bytes each from seven packed bytes.
+        const EACH: u32 = 600_000;
         let mut archive = Vec::new();
         for index in 0..64u8 {
             archive.extend_from_slice(&run_entry(&[b'A' + index], 1, EACH, b' '));
         }
         archive.push(0);
-        let allowance = (archive.len() as u64 - 1) * BUDGET_RATIO;
+        let allowance = ((archive.len() as u64 - 1) * BUDGET_RATIO).max(BUDGET_FLOOR);
         let container = open(&archive);
         let total: u64 = container.entries.iter().map(|e| e.data.len() as u64).sum();
         assert!(total <= allowance, "{total}");

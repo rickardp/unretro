@@ -20,6 +20,8 @@ mod metadata;
 
 // Memory mapping support
 mod source;
+#[cfg(all(test, feature = "std"))]
+mod test_samples;
 
 /// Internal format implementations.
 pub(crate) mod formats;
@@ -59,7 +61,7 @@ pub use loader::{
 };
 #[cfg(feature = "std")]
 pub use loader::{ParsedPath, parse_virtual_path};
-pub use metadata::Metadata;
+pub use metadata::{Metadata, Timestamp};
 
 use crate::compat::String;
 

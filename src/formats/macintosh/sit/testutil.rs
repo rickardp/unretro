@@ -1,12 +1,13 @@
 // Shared helpers for unit tests: synthetic archives in `testdata/stuffit/`
-// and the optional local oracle named by `UNRETRO_STUFFIT_ORACLE`.
+// and the optional corpus `corpus/stuffit` of the samples repository.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use crate::error::Result;
 
-pub(super) const ORACLE_ENV: &str = "UNRETRO_STUFFIT_ORACLE";
+// Directory of the corpus below the samples that `UNRETRO_SAMPLES` names.
+pub(super) const ORACLE_ENV: &str = "UNRETRO_SAMPLES/corpus/stuffit";
 
 // Expected result of one fork from manifest.tsv. `len`/`fnv64` are the `ref_*`
 // columns when present, else the crate-derived ones (known wrong for some
@@ -82,9 +83,7 @@ pub(super) fn testdata_dir() -> PathBuf {
 }
 
 pub(super) fn oracle_dir() -> Option<PathBuf> {
-    let dir = std::env::var_os(ORACLE_ENV)
-        .filter(|value| !value.is_empty())
-        .map(PathBuf::from);
+    let dir = crate::test_samples::corpus("stuffit");
     if dir.is_none() {
         static NOTICE: std::sync::Once = std::sync::Once::new();
         // Written to the stream itself: the test harness captures `eprintln!`
@@ -93,7 +92,7 @@ pub(super) fn oracle_dir() -> Option<PathBuf> {
             use std::io::Write;
             let _ = writeln!(
                 std::io::stderr(),
-                "{ORACLE_ENV} not set, skipping the StuffIt checks against real archives"
+                "{ORACLE_ENV} not found, skipping the StuffIt checks against real archives"
             );
         });
     }
@@ -109,10 +108,10 @@ pub(super) fn read_testdata(name: &str) -> Vec<u8> {
     read(&testdata_dir().join(name))
 }
 
-// The oracle's `archive` column holds absolute paths; relative ones resolve
-// against the oracle directory. Panics when the variable is unset.
+// The corpus's `archive` column is relative to the corpus directory.
+// Panics when the corpus is absent.
 pub(super) fn read_oracle(archive: &str) -> Vec<u8> {
-    let dir = oracle_dir().unwrap_or_else(|| panic!("{ORACLE_ENV} is not set"));
+    let dir = oracle_dir().unwrap_or_else(|| panic!("{ORACLE_ENV} not found"));
     read(&dir.join(archive))
 }
 
@@ -124,7 +123,7 @@ pub(super) fn testdata_forks() -> Vec<ForkRow> {
     parse_forks(&read_text(&testdata_dir().join("forks.tsv")))
 }
 
-// `None` when `UNRETRO_STUFFIT_ORACLE` is unset: the calling test must then
+// `None` when the corpus is absent: the calling test must then
 // return without failing (`oracle_dir` has printed the skip notice).
 pub(super) fn oracle_manifest() -> Option<Vec<ManifestRow>> {
     let dir = oracle_dir()?;

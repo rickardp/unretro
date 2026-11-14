@@ -9,7 +9,7 @@ use crate::error::{Error, Result};
 use crate::format::ContainerFormat;
 use crate::limits::{BUDGET_FLOOR, OutputBudget, prealloc_hint};
 use crate::sanitize_archive_path;
-use crate::{Container, ContainerInfo, Entry, MAX_DECOMPRESSED_SIZE, Metadata};
+use crate::{Container, ContainerInfo, Entry, MAX_DECOMPRESSED_SIZE, Metadata, Timestamp};
 
 // =============================================================================
 // Constants
@@ -52,6 +52,7 @@ const DIRECT: usize = 12;
 
 const INO_MODE: usize = 0;
 const INO_SIZE: usize = 8;
+const INO_MTIME: usize = 24;
 const INO_DIRECT: usize = 40;
 const INO_INDIRECT: usize = 88;
 
@@ -122,9 +123,9 @@ impl Order {
             u64::from(self.u32(data, offset + 4)),
         );
         if self.little {
-            second << 32 | first
+            (second << 32) | first
         } else {
-            first << 32 | second
+            (first << 32) | second
         }
     }
 }
@@ -137,6 +138,8 @@ impl Order {
 struct Inode {
     mode: u16,
     size: u64,
+    // Modification time, seconds since 1970 UTC (ufs.md 6.1).
+    mtime: i32,
     // Fragment numbers; 0 is a hole. Only meaningful for files and
     // directories: links and devices keep other things here.
     direct: [i32; DIRECT],
@@ -329,6 +332,7 @@ impl<'a> Volume<'a> {
         Some(Inode {
             mode: order.u16(raw, INO_MODE),
             size: order.u64(raw, INO_SIZE),
+            mtime: order.i32(raw, INO_MTIME),
             direct,
             indirect,
         })
@@ -440,6 +444,7 @@ struct UfsFile {
     path: String,
     data: Vec<u8>,
     mode: u16,
+    mtime: i32,
 }
 
 // Entries left out of the listing.
@@ -676,6 +681,8 @@ impl<'v, 'a> Walk<'v, 'a> {
             .is_ok_and(|total| self.budget.charge(total, "UFS").is_ok())
     }
 
+    // The insert happens only after the checks between it and the lookup.
+    #[allow(clippy::map_entry)]
     fn queue_dir(&mut self, number: u32, inode: Inode, path: String, depth: u32) {
         if self.entered.contains_key(&number) {
             self.skipped.note(format!(
@@ -743,6 +750,7 @@ impl<'v, 'a> Walk<'v, 'a> {
                 path,
                 data,
                 mode: inode.mode,
+                mtime: inode.mtime,
             });
         }
     }
@@ -827,7 +835,9 @@ impl Container for UfsContainer {
     fn visit(&self, visitor: &mut dyn FnMut(&Entry<'_>) -> Result<bool>) -> Result<()> {
         for entry in &self.entries {
             let path = format!("{}/{}", self.prefix, sanitize_archive_path(&entry.path));
-            let metadata = Metadata::new().with_mode(unix_mode(entry.mode));
+            let metadata = Metadata::new()
+                .with_mode(unix_mode(entry.mode))
+                .with_modified(Some(Timestamp::utc(i64::from(entry.mtime))));
             let e = Entry::new(&path, &self.prefix, &entry.data).with_metadata(&metadata);
 
             if !visitor(&e)? {
@@ -1623,6 +1633,7 @@ mod tests {
         let mut inode = Inode {
             mode: REG,
             size: u64::MAX,
+            mtime: 0,
             direct: [7; DIRECT],
             indirect: [0; 3],
         };

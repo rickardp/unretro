@@ -158,6 +158,8 @@ Verification: a second throwaway script decoded each label and checked each chec
 
 ## manifest.tsv
 
+Stored gzipped, as `manifest.tsv.gz`.
+
 Tab-separated with a header line; one row per name, in the order the directories store them, depth first.
 
 | Column | Content |

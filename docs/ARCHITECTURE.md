@@ -190,6 +190,11 @@ Design intent:
     volume formats. `hfsplus.rs` is the HFS Plus/HFSX volume reader it dispatches to on
     the volume signature (clean-room, from Apple Technical Note TN1150); it has no
     container of its own and shares `ForkBudget` with the HFS reader.
+  - `compactpro.rs` reads segmented archives from their last segment, the only one with
+    a directory (`CompactProContainer::from_bytes_with_segments`). The loader passes a
+    lookup for the earlier segments, files beside the archive on disk or entries of the
+    parent container, as for ARJ and RAR volumes, and leaves an earlier segment out of
+    the listing when the next one beside it reads it.
   - `stuffit.rs` is the container glue (paths, forks as entries, output budget,
     skipped-entry diagnostics); `sit/` holds the classic and StuffIt 5 parsers and one
     decoder per compression method. `sit/` is written only from the prose specification
@@ -207,7 +212,8 @@ Design intent:
     partition maps are resolved to image sectors first (physical, VAT, sparable,
     metadata), then the directory tree is walked from the file set descriptor. Both
     are clean-room, written from the standards only. The loader probes ISO 9660 before
-    UDF, so bridge discs stay ISO 9660 unless their ISO root directory is unreadable.
+    UDF, so bridge discs stay ISO 9660 unless their ISO root directory is unreadable or
+    their UDF partition is a writable one (packet-written discs).
   - `rar.rs` is the container glue for all three RAR layouts (RAR 1.3/1.4, RAR 1.50 to
     4.x, RAR 5): volume joining, the choice of decoder by unpack version, solid-chain
     state, size and checksum verification, skipped-entry diagnostics, and the search

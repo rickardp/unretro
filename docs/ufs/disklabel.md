@@ -338,7 +338,10 @@ bytes, a consistent self-position and a sane partition are required
 together. Note that byte 0 may legitimately hold a PC boot sector with
 the `55 aa` signature (Intel floppies) or another foreign header
 (OS42-CD); the label still takes precedence because the PC partition
-table of such a floppy is empty.
+table of such a floppy is empty. The converse is applied too: when the
+boot sector has the `55 aa` signature and a partition table entry in
+use, a label at any candidate offset other than 0 is taken as a leftover
+and ignored, so that the PC partitions are listed.
 
 ## 7. Computing a partition's byte range
 
@@ -392,7 +395,12 @@ Then (DECISION):
   file system reader copes with a short partition.
 - `back` is not subtracted from anything: the partition's own `size`
   already excludes it (REFERENCE-ONLY).
-- Overlapping partitions are not an error; each is yielded as it is.
+- Overlapping partitions are not an error in the format. This
+  repository's reader nevertheless yields a range only once: a partition
+  that shares bytes with one already yielded is left out and counted in a
+  diagnostic, and so is a partition that would contain the label copy
+  describing it (it would be found inside itself again). Without this a
+  crafted label multiplies its data at every level of nesting.
 
 CONFIRMED for `base` = 0: on all ten images the UFS superblock magic is
 found at (first byte within the data) + 8192 + 1372, and on the nine

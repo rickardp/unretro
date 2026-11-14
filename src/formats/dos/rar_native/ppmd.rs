@@ -1781,7 +1781,7 @@ impl Ppmd {
             7 => usize::from(self.decode_symbol(src)?) + 7,
             8 => {
                 let high = usize::from(self.decode_symbol(src)?);
-                high << 8 | usize::from(self.decode_symbol(src)?)
+                (high << 8) | usize::from(self.decode_symbol(src)?)
             }
             short => usize::from(short),
         };
@@ -1809,7 +1809,7 @@ mod tests {
             .collect();
         digits
             .chunks(2)
-            .map(|pair| pair[0] << 4 | pair[1])
+            .map(|pair| (pair[0] << 4) | pair[1])
             .collect()
     }
 

@@ -205,6 +205,7 @@ pub struct BinHexContainer {
     resource_fork: Vec<u8>,
     file_type: [u8; 4],
     creator: [u8; 4],
+    skipped: Option<String>,
 }
 
 impl BinHexContainer {
@@ -240,7 +241,12 @@ impl BinHexContainer {
         )?;
 
         let data_fork = decoder.read_fork(data_len, "data fork")?;
-        let resource_fork = decoder.read_fork(resource_len, "resource fork")?;
+        // The data fork before it is intact, so a damaged or cut-off
+        // resource fork is left out instead of failing the file.
+        let (resource_fork, skipped) = match decoder.read_fork(resource_len, "resource fork") {
+            Ok(fork) => (fork, None),
+            Err(err) => (Vec::new(), Some(format!("{err}"))),
+        };
 
         Ok(Self {
             prefix,
@@ -249,6 +255,7 @@ impl BinHexContainer {
             resource_fork,
             file_type,
             creator,
+            skipped,
         })
     }
 
@@ -294,6 +301,10 @@ impl Container for BinHexContainer {
         } else {
             None
         }
+    }
+
+    fn skipped_entries(&self) -> Option<String> {
+        self.skipped.clone()
     }
 
     fn info(&self) -> ContainerInfo {
@@ -600,10 +611,13 @@ mod tests {
         let mut stream = with_crc(&header(b"a", 3, 1));
         stream.extend(with_crc(b"xyz"));
         stream.extend_from_slice(b"r\x12\x34");
-        let err = error_of(&file(&stream));
+        let container = decode(&file(&stream)).unwrap_or_else(|err| panic!("{err}"));
+        assert_eq!(container.data_fork, b"xyz");
+        assert!(container.resource_fork.is_empty());
+        let skipped = container.skipped.expect("the resource fork is reported");
         assert!(
-            err.contains("Invalid BinHex file: resource fork CRC mismatch"),
-            "{err}"
+            skipped.contains("Invalid BinHex file: resource fork CRC mismatch"),
+            "{skipped}"
         );
     }
 
@@ -619,10 +633,18 @@ mod tests {
             .iter()
             .rposition(|&b| b == b':')
             .expect("closing colon");
+        // A cut inside the resource fork still delivers the data fork.
         for cut in 0..end {
-            assert!(decode(&REFERENCE[..cut]).is_err(), "cut at {cut}");
+            match decode(&REFERENCE[..cut]) {
+                Err(_) => {}
+                Ok(container) => {
+                    assert_eq!(container.data_fork, reference_data_fork(), "cut at {cut}");
+                    assert!(container.resource_fork.is_empty(), "cut at {cut}");
+                    assert!(container.skipped.is_some(), "cut at {cut}");
+                }
+            }
         }
-        assert!(decode(&REFERENCE[..end]).is_ok());
+        assert!(decode(&REFERENCE[..end]).is_ok_and(|c| c.skipped.is_none()));
 
         let input = plain_file(b"a", b"xyz", b"rsrc");
         let err = error_of(&input[..MARKER_LINE.len() + 10]);
@@ -635,10 +657,13 @@ mod tests {
             err.contains("Invalid BinHex file: truncated data fork"),
             "{err}"
         );
-        let err = error_of(&input[..input.len() - 4]);
+        let skipped = decode(&input[..input.len() - 4])
+            .unwrap_or_else(|err| panic!("{err}"))
+            .skipped
+            .expect("the resource fork is reported");
         assert!(
-            err.contains("Invalid BinHex file: truncated resource fork"),
-            "{err}"
+            skipped.contains("Invalid BinHex file: truncated resource fork"),
+            "{skipped}"
         );
     }
 
@@ -671,10 +696,12 @@ mod tests {
         // A maximal run still stops at the end of the input.
         let mut stream = with_crc(&header(b"big", 0, u32::MAX));
         stream.extend_from_slice(&[0, 0, 0x41, 0x90, 0xFF]);
-        let err = error_of(&file(&stream));
+        let container = decode(&file(&stream)).unwrap_or_else(|err| panic!("{err}"));
+        assert!(container.resource_fork.is_empty());
+        let skipped = container.skipped.expect("the resource fork is reported");
         assert!(
-            err.contains("Invalid BinHex file: truncated resource fork"),
-            "{err}"
+            skipped.contains("Invalid BinHex file: truncated resource fork"),
+            "{skipped}"
         );
     }
 

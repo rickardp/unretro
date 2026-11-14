@@ -152,7 +152,7 @@ Invalid combinations raise `ValueError`:
   ISO 9660 section of the usage guide.
 - `ContainerFormat.Udf` covers UDF disc images (revisions 1.02 to 2.60; physical, VAT,
   sparable and metadata partitions). A bridge disc with a usable ISO 9660 volume keeps
-  opening as `Iso9660`. Named streams and extended attributes are not read; see the UDF
+  opening as `Iso9660`, unless its UDF volume is a writable one (packet-written discs). Named streams and extended attributes are not read; see the UDF
   section of the usage guide.
 - `ContainerFormat.Rar` covers RAR archives, decoded natively (written from the
   specifications in [docs/rar/](../../docs/rar/README.md)): the RAR 1.3/1.4 container,
@@ -162,6 +162,15 @@ Invalid combinations raise `ValueError`:
 - `ContainerFormat.Arj` covers ARJ archives (methods 0-4, decoded natively). Garbled
   (password-protected) files are left out and reported; multi-volume sets are joined
   through their first volume when the later volumes sit next to it; see the ARJ
+  section of the usage guide.
+- `ContainerFormat.CompactPro` covers CompactPro (`.cpt`) archives, both fork encodings
+  (run-length, and run-length with LZH). Each file's CRC-32 is verified; files that
+  fail it and encrypted files are left out. Segmented archives (`Name.cpt.#1`, `Name.cpt.#2`, ...) are read through
+  their last segment, with the earlier ones found beside it; see the CompactPro section
+  of the usage guide.
+- `ContainerFormat.Adf` covers Amiga disk images (OFS and FFS, including the
+  international and directory-cache variants; `.adz` and `.adf.gz` through the gzip
+  layer). Long-filename volumes are not supported and links are not listed; see the ADF
   section of the usage guide.
 - `ContainerFormat.StuffIt` covers classic and StuffIt 5 archives, decoded natively
   (written from the specification in [docs/stuffit/](../../docs/stuffit/README.md)).
@@ -190,7 +199,8 @@ Invalid combinations raise `ValueError`:
   label's name for a single partition) that opens as the file system it holds.
 - `ContainerFormat.Ufs` covers UFS1 volumes in both byte orders and both the 4.3BSD and
   4.4BSD layouts, bare or inside a NeXT disk label. `Metadata.mode` carries the
-  permission bits; timestamps and owners are not exposed, symbolic links and device
+  permission bits and `Metadata.modified` the modification time; owners are not
+  exposed, symbolic links and device
   nodes are not listed, and UFS2 is not read. See the UFS section of the usage guide.
 - `ContainerFormat.Bfs` covers Be File System volumes of BeOS (Intel and PowerPC) and
   Haiku, bare or inside an MBR partition. `Metadata.mode` carries the permission bits;
@@ -199,9 +209,17 @@ Invalid combinations raise `ValueError`:
 - `ContainerFormat.LisaFs` covers Apple Lisa file system volumes in DiskCopy 4.2 images
   with tag data, DART images and raw 532-byte-block ProFile dumps (with or without a BLU
   header). Images without tag data are not Lisa volumes; a Macintosh disk in a `.dc42`
-  file opens as `Hfs`. Entries carry no metadata (no file labels or timestamps); see
+  file opens as `Hfs`. Entries carry the modification date only (no file labels); see
   the Apple Lisa section of the usage guide.
 - `Entry.metadata` exposes optional structured metadata when available.
+- `Metadata.modified` is the modification time in seconds since 1970-01-01 00:00:00, or
+  `None`. `Metadata.modified_is_local` is `True` when the container stores zone-less
+  wall-clock time (ZIP, LHA, ARJ, FAT, HFS, MFS, StuffIt and others) instead of UTC;
+  build such a value with `datetime.fromtimestamp(m.modified, timezone.utc)` and read
+  it as a naive local time. The "Modification Times" table of the usage guide lists the
+  source per format.
+- A partitioned disk inside a `.dmg`, NDIF or DiskCopy 4.2 file is listed by partition
+  like a raw one; `detect_format` reports the file as `Hfs`.
 - Classic Mac resources are yielded as `<owner>/..namedfork/rsrc/<TYPE>/<name or #id>`
   (`with_numeric_identifiers()` forces `#id`). AppleDouble sidecars in plain directories
   are paired like in archives; standalone AppleDouble files and bare resource-fork files

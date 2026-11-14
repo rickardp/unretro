@@ -3,7 +3,7 @@ use crate::error::{Error, Result};
 use crate::format::ContainerFormat;
 use crate::limits::{checked_output_size, zeroed_buffer};
 use crate::sanitize_archive_path;
-use crate::{Container, ContainerInfo, Entry, Metadata};
+use crate::{Container, ContainerInfo, Entry, Metadata, Timestamp};
 
 const BLOCK: usize = 512;
 
@@ -12,6 +12,7 @@ const BLOCK: usize = 512;
 const NAME: (usize, usize) = (0, 100);
 const MODE: (usize, usize) = (100, 8);
 const SIZE: (usize, usize) = (124, 12);
+const MTIME: (usize, usize) = (136, 12);
 const CHECKSUM: (usize, usize) = (148, 8);
 const TYPEFLAG: usize = 156;
 const MAGIC: (usize, usize) = (257, 6);
@@ -38,8 +39,12 @@ const MAX_EXTENSION_SIZE: u64 = 1024 * 1024;
 
 // Expanded sparse files may total this many times the archive size, about
 // what a DEFLATE stream reaches (258 bytes from a two-bit length/distance
-// pair). There is no minimum: one would apply again to every nested archive.
+// pair), and at least `SPARSE_FLOOR`.
 const SPARSE_EXPANSION: u64 = 1024;
+
+// Holes cost no archive bytes, so a mostly empty disk image is far larger
+// than any ratio of its archive allows.
+const SPARSE_FLOOR: u64 = 1024 * 1024 * 1024;
 
 #[must_use]
 pub fn is_tar_archive(data: &[u8]) -> bool {
@@ -262,12 +267,34 @@ enum PaxSize {
     Unreadable,
 }
 
+// A pax time: decimal seconds since the epoch, optionally negative and with
+// a fraction, which is dropped towards the earlier second.
+fn pax_time(value: &[u8]) -> Option<Timestamp> {
+    let mut parts = value.splitn(2, |&byte| byte == b'.');
+    let whole = parts.next()?;
+    let fraction = parts.next().unwrap_or_default();
+    if !fraction.iter().all(u8::is_ascii_digit) {
+        return None;
+    }
+    let (negative, digits) = match whole.split_first() {
+        Some((b'-', digits)) => (true, digits),
+        _ => (false, whole),
+    };
+    let seconds = i64::try_from(parse_decimal(digits)?).ok()?;
+    Some(Timestamp::utc(if negative {
+        -seconds - i64::from(fraction.iter().any(|&digit| digit != b'0'))
+    } else {
+        seconds
+    }))
+}
+
 // Values from pax extended headers. An empty value deletes the keyword, so
 // it is kept to mask a global value of the same name.
 #[derive(Default)]
 struct PaxFields<'a> {
     path: Option<&'a [u8]>,
     size: Option<PaxSize>,
+    mtime: Option<&'a [u8]>,
     sparse_major: Option<&'a [u8]>,
     sparse_minor: Option<&'a [u8]>,
     sparse_name: Option<&'a [u8]>,
@@ -286,6 +313,7 @@ impl<'a> PaxFields<'a> {
         for (keyword, value) in (PaxRecords { rest: body }) {
             match keyword {
                 b"path" => self.path = Some(value),
+                b"mtime" => self.mtime = Some(value),
                 b"size" => {
                     self.size = Some(if value.is_empty() {
                         PaxSize::Deleted
@@ -478,7 +506,7 @@ impl<'a> Reader<'a> {
             long_name: None,
             sparse_budget: (data.len() as u64)
                 .saturating_mul(SPARSE_EXPANSION)
-                .min(crate::MAX_DECOMPRESSED_SIZE),
+                .clamp(SPARSE_FLOOR, crate::MAX_DECOMPRESSED_SIZE),
             name_budget: data.len(),
             entries: Vec::new(),
             skipped: Skipped::default(),
@@ -671,9 +699,20 @@ impl<'a> Reader<'a> {
             }
         };
 
-        let metadata = parse_number(field(block, MODE))
-            .and_then(|mode| u32::try_from(mode).ok())
-            .map(|mode| Metadata::new().with_mode(format_unix_mode(mode)));
+        let mode = parse_number(field(block, MODE)).and_then(|mode| u32::try_from(mode).ok());
+        let modified = effective(local.mtime, self.global.mtime)
+            .and_then(pax_time)
+            .or_else(|| {
+                let seconds = parse_number(field(block, MTIME))?;
+                i64::try_from(seconds).ok().map(Timestamp::utc)
+            });
+        let metadata = (mode.is_some() || modified.is_some()).then(|| {
+            let metadata = Metadata::new().with_modified(modified);
+            match mode {
+                Some(mode) => metadata.with_mode(format_unix_mode(mode)),
+                None => metadata,
+            }
+        });
 
         self.entries.push(TarEntry {
             path,
@@ -1811,12 +1850,36 @@ mod tests {
     }
 
     #[test]
-    fn unreadable_mode_leaves_metadata_out() {
+    fn unreadable_mode_is_left_out() {
         let mut header = header("a.txt", b'0', 0);
         header[100..108].copy_from_slice(b"rwxrwxr\0");
         seal(&mut header);
         let container = open(&archive(&[header.to_vec()]));
-        assert!(container.entries[0].metadata.is_none());
+        let metadata = container.entries[0].metadata.as_ref();
+        assert!(metadata.is_none_or(|metadata| metadata.mode.is_none()));
+    }
+
+    #[test]
+    fn modification_time_comes_from_the_header_or_a_pax_record() {
+        let mut plain = header("a.txt", b'0', 0);
+        plain[136..148].copy_from_slice(b"07346545000\0");
+        seal(&mut plain);
+        let mut extended = header("b.txt", b'0', 0);
+        extended[136..148].copy_from_slice(b"00000000001\0");
+        seal(&mut extended);
+        let mut members = vec![plain.to_vec()];
+        members.push(pax(b'x', &[("mtime", b"1794487049.426751149")]));
+        members.push(extended.to_vec());
+        let container = open(&archive(&members));
+        let modified = |index: usize| container.entries[index].metadata.as_ref()?.modified;
+        assert_eq!(modified(0), Some(Timestamp::utc(0o7_346_545_000)));
+        assert_eq!(modified(1), Some(Timestamp::utc(1_794_487_049)));
+
+        assert_eq!(pax_time(b"-1.5"), Some(Timestamp::utc(-2)));
+        assert_eq!(pax_time(b"-1.0"), Some(Timestamp::utc(-1)));
+        assert_eq!(pax_time(b"12"), Some(Timestamp::utc(12)));
+        assert_eq!(pax_time(b"1.x"), None);
+        assert_eq!(pax_time(b""), None);
     }
 
     #[test]
@@ -2092,13 +2155,16 @@ mod tests {
 
     #[test]
     fn sparse_expansion_is_bounded_by_the_budget() {
-        // Each claims 4 MiB of holes; the budget for this archive is 1024
-        // times its 6144 bytes, so only the first is expanded.
+        // Each claims 768 MiB, mostly holes; the budget for this archive
+        // is the 1 GiB floor, so only the first is expanded.
         let hole = |name: &str| {
             [
                 pax(
                     b'x',
-                    &[("GNU.sparse.size", b"4194304"), ("GNU.sparse.map", b"0,4")],
+                    &[
+                        ("GNU.sparse.size", b"805306368"),
+                        ("GNU.sparse.map", b"0,4"),
+                    ],
                 ),
                 member(name, b'0', b"data"),
             ]
@@ -2113,7 +2179,7 @@ mod tests {
         let container = open(&data);
         assert_eq!(container.entries.len(), 2);
         assert_eq!(container.entries[0].path, "one.bin");
-        assert_eq!(container.entries[0].data.len(), 4 * 1024 * 1024);
+        assert_eq!(container.entries[0].data.len(), 768 * 1024 * 1024);
         assert_eq!(&container.entries[0].data[..5], b"data\0");
         assert_eq!(container.entries[1].path, "z.txt");
         let message = container.skipped_entries().unwrap();
@@ -2212,17 +2278,22 @@ mod tests {
     }
 
     #[test]
-    fn sparse_budget_has_no_floor() {
-        // What nesting many tiny archives would otherwise multiply.
-        let data = archive(&[
-            pax(
-                b'x',
-                &[("GNU.sparse.size", b"16777216"), ("GNU.sparse.map", b"")],
-            ),
-            member("zeros.bin", b'0', b""),
-        ]);
+    fn sparse_budget_has_a_floor() {
+        // A blank disk image: all hole, whatever the archive size.
+        let blank = |size: &[u8]| {
+            archive(&[
+                pax(b'x', &[("GNU.sparse.size", size), ("GNU.sparse.map", b"")]),
+                member("zeros.bin", b'0', b""),
+            ])
+        };
+        let data = blank(b"16777216");
         assert_eq!(data.len(), 2560);
         let container = open(&data);
+        assert_eq!(container.entries[0].data.len(), 16 * 1024 * 1024);
+        assert_eq!(container.skipped_entries(), None);
+
+        // One byte over the floor.
+        let container = open(&blank(b"1073741825"));
         assert!(container.entries.is_empty());
         let message = container.skipped_entries().unwrap();
         assert_eq!(

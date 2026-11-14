@@ -361,7 +361,7 @@ impl Encoder {
         }
         assert!(code < 1 << self.width);
         for bit in 0..self.width {
-            self.bit(code >> bit & 1 != 0);
+            self.bit((code >> bit) & 1 != 0);
         }
         if self.free() == self.limit {
             self.out.codes_on_full_table += 1;

@@ -535,8 +535,8 @@ On real files downloaded in full (section 8.1):
   hybrid lists its 10 Mac files and, under `iso9660.img/`, the 10 files of
   its Joliet tree.
 - The counts that `tests/toast_fixtures.rs` asserts for the Mac side are
-  the files this tool lists: the reference's files, less those with two
-  empty forks, plus the desktop database files.
+  the files this tool lists: the reference's files, those with two empty
+  forks included, plus the desktop database files.
 
 On sparse reconstructions of the sampled files (head, volume headers and
 tail in place, zeros elsewhere): all 126 open with the expected top-level
@@ -633,8 +633,9 @@ Each gap gives the reproduction that showed it with the release build
 (`target/release/unretro`, called `unretro` below), and under **Status**
 what was done. `$T` is `~/.cache/unretro-specimens/toast`. The fixtures of
 `testdata/toast/` and `tests/toast_fixtures.rs` hold every fixed gap in
-place; the same test checks the specimens under `$T` when
-`UNRETRO_SPECIMENS` names their directory.
+place; the same test checks `corpus/toast` of the samples repository
+(`full/` and `synthetic/`, laid out as under `$T`) when `UNRETRO_SAMPLES`
+names the samples and that directory exists.
 
 ### G1. 2056-byte sector images were not recognised
 

@@ -108,6 +108,8 @@ pub(crate) struct LzhEntry {
     // Seconds since 1970-01-01 by container.md 7.3; the zone-less MS-DOS
     // field is taken as UTC. `None` = no timestamp.
     pub modified: Option<i64>,
+    // Whether `modified` came from the zone-less MS-DOS field.
+    pub modified_local: bool,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -336,6 +338,7 @@ mod tests {
             level: 0,
             os_id: None,
             modified: None,
+            modified_local: false,
         }
     }
 

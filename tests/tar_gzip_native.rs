@@ -773,8 +773,9 @@ fn sparse_member_far_larger_than_the_archive() {
 }
 
 #[test]
-fn nested_archives_do_not_each_get_a_sparse_allowance() {
-    // 500 inner archives of 2560 bytes, each claiming a 16 MiB hole.
+fn nested_sparse_allowances_stop_at_the_nesting_budget() {
+    // 600 inner archives of 2560 bytes, each a 16 MiB hole: every one is
+    // within its own allowance, so the traversal as a whole has to stop.
     let inner = archive(&[
         pax(
             b'x',
@@ -782,7 +783,7 @@ fn nested_archives_do_not_each_get_a_sparse_allowance() {
         ),
         member("zeros.bin", b""),
     ]);
-    let members: Vec<Vec<u8>> = (0..500)
+    let members: Vec<Vec<u8>> = (0..600)
         .map(|i| member(&format!("inner{i:03}.tar"), &inner))
         .collect();
     let data = archive(&members);
@@ -795,7 +796,7 @@ fn nested_archives_do_not_each_get_a_sparse_allowance() {
         })
         .unwrap();
     assert!(
-        delivered <= 2 * data.len() as u64,
+        delivered <= 2 * unretro::MAX_DECOMPRESSED_SIZE + (32 << 20),
         "{delivered} bytes from {}",
         data.len()
     );
@@ -803,7 +804,9 @@ fn nested_archives_do_not_each_get_a_sparse_allowance() {
         report
             .diagnostics
             .iter()
-            .any(|diagnostic| diagnostic.message.contains("budget"))
+            .any(|diagnostic| diagnostic.message.contains("budget")),
+        "{:?}",
+        report.diagnostics.last()
     );
 }
 

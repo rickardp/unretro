@@ -104,7 +104,7 @@ using transparent compression (decmpfs) are not decoded; see
 UDF disc images (revisions 1.02 to 2.60; physical, virtual/VAT, sparable and metadata
 partitions) are read natively wherever `dos` is enabled, including `no_std` and
 `wasm32`, as `ContainerFormat::Udf`. A bridge disc with a usable ISO 9660 volume keeps
-opening as ISO 9660. ISO 9660 images also cover High Sierra volumes, El Torito boot
+opening as ISO 9660, unless its UDF volume is a writable one (packet-written discs). ISO 9660 images also cover High Sierra volumes, El Torito boot
 images (listed under `..eltorito/`) and multi-session images (the last session is
 presented); see [docs/USAGE.md](docs/USAGE.md#udf-disc-images) and
 [docs/USAGE.md](docs/USAGE.md#iso-9660-cd-rom-images).
@@ -168,10 +168,13 @@ Apple Lisa file system volumes (on-disk versions 14, 15 and 17) are read nativel
 wherever `lisa` is enabled, including `no_std` and `wasm32`, as
 `ContainerFormat::LisaFs`: DiskCopy 4.2 images with tag data (3.5-inch, Twiggy and
 hard-disk images), DART images, and raw 532-byte-block ProFile dumps with or without a
-BLU header. Images without tag data cannot be read, and timestamps and file labels are
-not surfaced. The reader was written from the format specification in
+BLU header. Images without tag data cannot be read; file labels are not surfaced. The reader was written from the format specification in
 [docs/lisa/](docs/lisa/README.md); see
 [docs/USAGE.md](docs/USAGE.md#apple-lisa-disk-images).
+
+Segmented Compact Pro archives (`Name.cpt.#1`, `Name.cpt.#2`, ...) are read through their
+last segment, which finds the earlier ones next to it; see
+[docs/USAGE.md](docs/USAGE.md#compactpro-archives).
 
 Classic Mac resources always appear as `<owner>/..namedfork/rsrc/<TYPE>/<name or #id>`,
 whether the fork comes from MacBinary/AppleSingle/archives/HFS, an AppleDouble sidecar

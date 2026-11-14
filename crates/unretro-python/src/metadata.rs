@@ -29,6 +29,14 @@ pub struct PyMetadata {
     /// Mac creator code (e.g., "MOSS", "ttxt").
     #[pyo3(get)]
     pub creator_code: Option<String>,
+
+    /// Modification time in seconds since 1970-01-01 00:00:00.
+    #[pyo3(get)]
+    pub modified: Option<i64>,
+
+    /// True when `modified` is zone-less wall-clock time rather than UTC.
+    #[pyo3(get)]
+    pub modified_is_local: bool,
 }
 
 #[pymethods]
@@ -40,6 +48,7 @@ impl PyMetadata {
             && self.mode.is_none()
             && self.type_code.is_none()
             && self.creator_code.is_none()
+            && self.modified.is_none()
     }
 
     fn __repr__(&self) -> String {
@@ -91,6 +100,8 @@ impl From<&Metadata> for PyMetadata {
             mode: m.mode.clone(),
             type_code: m.type_code.as_ref().map(format_mac_ostype),
             creator_code: m.creator_code.as_ref().map(format_mac_ostype),
+            modified: m.modified.map(|time| time.seconds),
+            modified_is_local: m.modified.is_some_and(|time| time.local),
         }
     }
 }

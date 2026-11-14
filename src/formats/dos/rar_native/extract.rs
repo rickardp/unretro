@@ -426,12 +426,15 @@ fn escape(text: &str) -> String {
         .collect()
 }
 
-// One archive set per line, volume paths separated by tabs.
-fn read_list(variable: &str) -> Vec<String> {
-    let Ok(list) = std::env::var(variable) else {
+// The archive sets of `corpus/rar/sets.tsv` in the samples repository that
+// `UNRETRO_SAMPLES` names, when `switch` is set: one set per line, volume
+// paths relative to `corpus/rar` and separated by tabs.
+fn read_list(switch: &str) -> Vec<String> {
+    if std::env::var_os(switch).is_none() {
         return Vec::new();
-    };
-    let text = std::fs::read_to_string(&list).expect("list file");
+    }
+    let corpus = crate::test_samples::corpus("rar").expect("corpus/rar of the samples");
+    let text = std::fs::read_to_string(corpus.join("sets.tsv")).expect("sets.tsv");
     text.lines()
         .filter(|line| !line.is_empty() && !line.starts_with('#'))
         .map(str::to_string)
@@ -439,7 +442,10 @@ fn read_list(variable: &str) -> Vec<String> {
 }
 
 fn read_volumes(line: &str) -> std::io::Result<Vec<Vec<u8>>> {
-    line.split('\t').map(std::fs::read).collect()
+    let corpus = crate::test_samples::corpus("rar").unwrap_or_default();
+    line.split('\t')
+        .map(|volume| std::fs::read(corpus.join(volume)))
+        .collect()
 }
 
 fn env_number(name: &str, default: u64) -> u64 {
@@ -481,12 +487,12 @@ fn describe(outcome: &Outcome) -> (&'static str, String, String, String) {
     }
 }
 
-// RAR_E2E_LIST names a file with one archive set per line, volume paths
-// separated by tabs; RAR_E2E_START skips that many lines (to resume after
-// an abort); RAR_E2E_TIMEOUT is seconds per set before the process aborts;
+// RAR_E2E_LIST=1 reads the sets of the samples corpus (`read_list`);
+// RAR_E2E_START skips that many lines (to resume after an abort);
+// RAR_E2E_TIMEOUT is seconds per set before the process aborts;
 // RAR_E2E_LIMIT bounds each member. RAR_E2E_BUILTIN adds the document
-// vectors, and RAR_E2E_DUMP names a directory to write those to, for other
-// tools. Prints one `E2ESET` line per set (number, format or error, ms,
+// vectors, and RAR_E2E_DUMP=1 writes those to `unretro-rar-vectors` in the
+// system's temporary directory, for other tools. Prints one `E2ESET` line per set (number, format or error, ms,
 // notes, paths) and one `E2E` line per member:
 // set, index, status, size, CRC-32, kind, name, detail.
 #[test]
@@ -503,7 +509,11 @@ fn e2e_list() {
         }
     }
     if std::env::var("RAR_E2E_BUILTIN").is_ok() {
-        let dump = std::env::var("RAR_E2E_DUMP").ok();
+        let dump = std::env::var_os("RAR_E2E_DUMP")
+            .map(|_| std::env::temp_dir().join("unretro-rar-vectors"));
+        if let Some(directory) = &dump {
+            std::fs::create_dir_all(directory).expect("dump directory");
+        }
         for (offset, (name, volumes)) in vectors::sets().into_iter().enumerate() {
             let mut paths = Vec::new();
             for (index, volume) in volumes.iter().enumerate() {
@@ -515,7 +525,7 @@ fn e2e_list() {
                     _ => format!("{stem}.part{}.rar", index + 1),
                 };
                 if let Some(directory) = &dump {
-                    let path = std::path::Path::new(directory).join(&file);
+                    let path = directory.join(&file);
                     std::fs::write(&path, volume).expect("dump");
                     paths.push(path.to_string_lossy().into_owned());
                 } else {
@@ -676,7 +686,7 @@ fn fix_checksums4(volume: &mut [u8]) {
                 } else {
                     0
                 };
-                low | high << 32
+                low | (high << 32)
             }
             0x77 | 0x78 => le32(volume, position + 7).unwrap_or(0),
             0x72 | 0x73 | 0x7b => 0,
@@ -1000,7 +1010,7 @@ fn fuzz(
     stats
 }
 
-// RAR_E2E_FUZZ_LIST: sets as for `e2e_list`; RAR_E2E_FUZZ_BUILTIN=1 adds the
+// RAR_E2E_FUZZ_LIST=1: sets as for `e2e_list`; RAR_E2E_FUZZ_BUILTIN=1 adds the
 // document vectors; RAR_E2E_FUZZ_CASES (default 3000), RAR_E2E_FUZZ_SEED,
 // RAR_E2E_FUZZ_TIMEOUT seconds per case before the process aborts.
 #[test]
@@ -1110,7 +1120,7 @@ mod vectors {
         assert_eq!(digits.len() % 2, 0);
         digits
             .chunks(2)
-            .map(|pair| pair[0] << 4 | pair[1])
+            .map(|pair| (pair[0] << 4) | pair[1])
             .collect()
     }
 
@@ -1167,8 +1177,8 @@ mod vectors {
             let packed = hex(member.packed);
             let info = u64::from(member.version)
                 | if member.solid { 0x40 } else { 0 }
-                | 3 << 7
-                | u64::from(member.exponent) << 10;
+                | (3 << 7)
+                | (u64::from(member.exponent) << 10);
             let mut body = vec![2, 2];
             push_vint(&mut body, packed.len() as u64);
             body.push(4);

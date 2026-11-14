@@ -625,8 +625,8 @@ fn find_archive(volume: &[u8]) -> Option<usize> {
             .position(|bytes| bytes == SIGNATURE)?;
         let start = from + found;
         let first_block = start + SIGNATURE.len();
-        if let Ok(block) = read_block(volume, first_block)
-            && (block.kind == BLOCK_MAIN || block.kind == BLOCK_ENCRYPTION)
+        if read_block(volume, first_block)
+            .is_ok_and(|block| block.kind == BLOCK_MAIN || block.kind == BLOCK_ENCRYPTION)
         {
             return Some(first_block);
         }
@@ -1539,13 +1539,15 @@ impl Verifier {
     }
 
     pub(crate) fn finish(self) -> Result<()> {
-        if let Some((expected, state)) = self.crc32
-            && expected != !state
+        if self
+            .crc32
+            .is_some_and(|(expected, state)| expected != !state)
         {
             return Err(Error::decompression("RAR: CRC-32 mismatch"));
         }
-        if let Some((expected, hasher)) = self.blake2sp
-            && expected != hasher.finish()
+        if self
+            .blake2sp
+            .is_some_and(|(expected, hasher)| expected != hasher.finish())
         {
             return Err(Error::decompression("RAR: BLAKE2sp mismatch"));
         }

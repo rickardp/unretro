@@ -258,7 +258,7 @@ impl Code {
                     .copied()
                     .unwrap_or(0);
                 if let Some(entries) = self.quick.get_mut(code << shift..(code + 1) << shift) {
-                    entries.fill(symbol << 4 | len as u16);
+                    entries.fill((symbol << 4) | len as u16);
                 }
             }
         }
@@ -1732,17 +1732,17 @@ mod tests {
     }
 
     // Decodes every version 29/36 member of a real RAR4 archive and compares
-    // the CRC-32. Does nothing unless UNRETRO_RAR29_SAMPLE names the volumes
-    // of one set, in order, separated by ':'.
+    // the CRC-32: an archive of the samples repository. Does nothing when
+    // `UNRETRO_SAMPLES` is not set.
     #[test]
     fn sample_archive() {
         use super::super::container4::{Content, DecoderKind, read_archive};
-        let Ok(paths) = std::env::var("UNRETRO_RAR29_SAMPLE") else {
+        let Some(samples) = crate::test_samples::samples_dir() else {
             return;
         };
-        let files: Vec<Vec<u8>> = paths
-            .split(':')
-            .map(|path| std::fs::read(path).unwrap())
+        let files: Vec<Vec<u8>> = ["rar/win311.rar"]
+            .into_iter()
+            .map(|path| std::fs::read(samples.join(path)).unwrap())
             .collect();
         let volumes: Vec<&[u8]> = files.iter().map(|file| file.as_slice()).collect();
         let archive = read_archive(&volumes).unwrap();

@@ -49,6 +49,8 @@ cargo test --no-default-features --features std,common
 cargo test --no-default-features --features std,xz
 cargo test --no-default-features --features std,macintosh
 cargo test --no-default-features --features std,amiga
+cargo test --no-default-features --features std,game
+cargo test --no-default-features --features std,dos
 cargo test --no-default-features --features std,next
 cargo test --no-default-features --features std,beos
 cargo test --no-default-features --features std,lisa
@@ -97,15 +99,14 @@ wrong against the test data, fix the specification first.
 - `testdata/stuffit/` holds synthetic archives with `manifest.tsv` (expected paths, fork
   lengths and FNV-1a 64 hashes) and `forks.tsv`; `tests/stuffit_fixtures.rs` checks them
   through the public API, and the unit tests under `sit/` check each decoder.
-- The same tests also check a local manifest of real archives when
-  `UNRETRO_STUFFIT_ORACLE` names its directory (never committed). When it is unset
-  they print `UNRETRO_STUFFIT_ORACLE not set, skipping ...` and pass, so a green
-  default run says nothing about real archives (all real method 13 and 15 forks are
-  only there):
+- The same tests also check `corpus/stuffit` of the samples repository when
+  `UNRETRO_SAMPLES` is set: real archives with a manifest of what `unar` found in
+  them. Unset, they print a skip notice and pass, so a green default run says nothing
+  about real archives:
 
 ```bash
-UNRETRO_STUFFIT_ORACLE=/path/to/oracle cargo test --all-features --test stuffit_fixtures
-UNRETRO_STUFFIT_ORACLE=/path/to/oracle cargo test --all-features --lib sit::
+UNRETRO_SAMPLES=/path/to/unretro-samples/data cargo test --all-features --test stuffit_fixtures
+UNRETRO_SAMPLES=/path/to/unretro-samples/data cargo test --all-features --lib sit::
 ```
 
 - The reader builds for `no_std` + `alloc`, but its unit tests (like the rest of the
@@ -163,10 +164,11 @@ specification. There is no vendored RAR code.
   printed in the specifications, each constant naming its document and vector.
 - The reader builds for `no_std` + `alloc`; check it with
   `cargo check --lib --target wasm32-unknown-unknown --no-default-features --features no_std,dos`.
-- The RAR 1.5 tests also check a local corpus of real archives when
-  `UNRETRO_RAR_CORPUS` names its directory, and skip silently otherwise; the RAR 2.0
-  corpus test is `#[ignore]`d (`cargo test --lib rar20 -- --include-ignored`). A green
-  default run therefore says nothing about real archives.
+- With `UNRETRO_SAMPLES` set, the RAR 5 and RAR 2.9 tests decode `rar/test.rar` and
+  `rar/win311.rar` of the samples. The RAR 1.5 tests also check `corpus/rar` there
+  (`archives/<id>/`, `old13/archives/<id>/`, `MANIFEST.tsv` with paths relative to the
+  corpus) and skip silently while it is absent; the RAR 2.0 corpus test is `#[ignore]`d
+  (`cargo test --lib rar20 -- --include-ignored`).
 
 ## LHA Reader
 
@@ -180,13 +182,13 @@ against the test data, fix the specification first.
   `tests/lha_fixtures.rs` checks them through the public API, and the unit tests under
   `lzh/` check the header parser and each decoder. Forms the specification describes
   that no fixture holds (and hostile inputs) are built byte by byte in those tests.
-- The same tests also check a local manifest of real archives when `UNRETRO_LHA_ORACLE`
-  names its directory (never committed). When it is unset they print
-  `UNRETRO_LHA_ORACLE not set, skipping ...` and pass:
+- The same tests also check `corpus/lha` of the samples repository when
+  `UNRETRO_SAMPLES` is set (a manifest of what other tools found in the samples' LHA
+  archives). Unset, they print a skip notice and pass:
 
 ```bash
-UNRETRO_LHA_ORACLE=/path/to/oracle cargo test --all-features --test lha_fixtures
-UNRETRO_LHA_ORACLE=/path/to/oracle cargo test --all-features --lib lzh::
+UNRETRO_SAMPLES=/path/to/unretro-samples/data cargo test --all-features --test lha_fixtures
+UNRETRO_SAMPLES=/path/to/unretro-samples/data cargo test --all-features --lib lzh::
 ```
 
 - Check the `no_std` build with
@@ -207,7 +209,7 @@ wrong against the test data, fix the specification first.
 | Toast images, hybrid discs, XA sector framings | `src/loader.rs` (`xa_framed_volume`, probe order), `src/formats/hybrid.rs`, `src/formats/cd_sector.rs` | `docs/toast/` | `testdata/toast/`, `tests/toast_fixtures.rs`, unit tests |
 | NeXT disk label, UFS1 | `src/formats/next/` | `docs/ufs/` | `testdata/ufs/`, `tests/ufs_fixtures.rs` |
 | Be File System | `src/formats/beos/bfs.rs` | `docs/bfs/` | `testdata/bfs/`, `tests/bfs_fixtures.rs` |
-| Lisa file system and tagged images, DiskCopy 4.2 and DART | `src/formats/lisa/` (DiskCopy 4.2 header rule also in `src/formats/macintosh/hfs.rs`) | `docs/lisa/` | `tests/lisa_fixtures.rs`, `tests/diskcopy_specimens.rs`, unit tests |
+| Lisa file system and tagged images, DiskCopy 4.2 and DART | `src/formats/lisa/` (DiskCopy 4.2 header rule also in `src/formats/macintosh/hfs.rs`) | `docs/lisa/` | `tests/diskcopy_fixtures.rs`, unit tests, `unretro-samples` `data/lisa/` |
 
 - Each `testdata/` directory holds generated images or streams with a `manifest.tsv`
   (expected paths, sizes and FNV-1a 64 hashes, confirmed by independent tools, not
@@ -215,9 +217,10 @@ wrong against the test data, fix the specification first.
   made).
   The fixture tests check them through the public API; forms that no fixture holds and
   hostile inputs are built byte by byte in the unit tests next to each reader.
-- No Lisa image is committed: without specimens the Lisa reader is covered by unit tests
-  on synthetic structures (`src/formats/lisa/lisafs_tests.rs`, `image.rs`) and by the
-  hand-built DiskCopy 4.2 and DART cases in `tests/diskcopy_specimens.rs`.
+- No Lisa image is committed here: the Lisa reader is covered by unit tests on
+  synthetic structures (`src/formats/lisa/lisafs_tests.rs`, `image.rs`), by the
+  hand-built DiskCopy 4.2 and DART cases in `tests/diskcopy_fixtures.rs`, and by the
+  real images of `unretro-samples`.
 - Real media is covered through the sample-data process above: the `unretro-samples`
   repository holds small real images under `data/next/`, `data/beos/`, `data/lisa/` and
   `data/mac-classic/` (DiskCopy 4.2 and DART) with `.expect` listings, checked by
@@ -225,45 +228,29 @@ wrong against the test data, fix the specification first.
   as they are: cut them down first (a prefix of the image where the volume still
   opens, or file contents zeroed while the listing stays the same) and say so in the
   file name (`.min`, `-first16m`).
-- The full-size images those samples were taken from, and their listings from
-  independent tools, are an optional local check and are never committed. They live in
-  a local directory (so far `~/.cache/unretro-specimens/`) that the fixture tests read
-  when `UNRETRO_SPECIMENS` names it. When it is unset, or an image is missing, those
-  tests return and pass; the `nrg_fixtures` and `toast_fixtures` tests instead fail on a
-  missing image once their family's directory (`nrg/`, `toast/full/`) exists:
-
-```bash
-UNRETRO_SPECIMENS=~/.cache/unretro-specimens cargo test --test ufs_fixtures --test bfs_fixtures \
-  --test cue_fixtures --test lisa_fixtures --test diskcopy_specimens \
-  --test nrg_fixtures --test toast_fixtures -- --nocapture
-UNRETRO_SPECIMENS=~/.cache/unretro-specimens cargo test --lib lisa::
-```
-
-- Layout of that directory: one subdirectory per family, each with a `SOURCES.tsv`
-  (`NOTES.md` in `nrg/` and `toast/`; where every image came from: its URL, SHA-256 and
-  a description; the tests do not read it) and the expected results next to the images:
-  - `next/` and `beos/`: `<image>.manifest.tsv` beside each image, in the column layout
-    of the committed `manifest.tsv` of `testdata/ufs/` and `testdata/bfs/`.
-  - `ufs/`: `<stem>.manifest.tsv` beside `<stem>.img` (`path`, `kind`, `mode`, `size`,
-    `sha256`, no header line; path, size and mode are checked).
-  - `lisa/` and `diskcopy/`: `<image>.info.txt` (`key: value` lines; `expect` is `lisa`,
-    `mac` or `reject`, `wrapper` is `diskcopy42`, `dart` or `raw532`) and
-    `<image>.manifest.tsv` (`path`, `kind`, `size`, `fnv64`, `note`). Images are found
-    by their `.info.txt` file.
-  - `cue/`: one subdirectory per disc holding its `.cue` files. Only detection and
-    opening are checked, since the track files are not kept.
-  - `nrg/`: `libcdio-testdata/` and `crafted/` hold the whole images of
-    `docs/nrg/nrg.md` (sections 11.2 and 12); every entry is checked against the
-    SHA-256 the document gives. The other directories hold only the last 8 KiB of a
-    real image and are not read by the tests.
-  - `toast/`: `full/<item>/<file>` (real images; top-level format, file counts and the
-    ISO 9660 side of hybrids as `docs/toast/README.md` records them) and `synthetic/`
-    (purpose-built images; a framed image must list what its cooked image lists).
-  - The image names the NeXT, UFS and BFS tests look for are listed in the test files.
+- `UNRETRO_SAMPLES` is the only place a test may read data from outside this
+  repository. A checked-in test never names a cache directory, a home directory, a
+  temporary directory or a second environment variable that holds a path. Use
+  `tests/common/mod.rs` (`samples_dir`, `corpus`) in integration tests and
+  `src/test_samples.rs` in unit tests.
+- Besides the `.expect` listings, the samples hold `corpus/<family>/`: data that tests
+  check byte for byte against a manifest or a digest. Paths in a corpus manifest are
+  relative to the corpus directory. A test whose corpus is absent prints a notice and
+  passes. `scripts/update-expect.sh` writes no `.expect` file there.
+  - `corpus/nrg/`: `libcdio-testdata/` and `crafted/`, the whole images of
+    `docs/nrg/nrg.md` (sections 11.2 and 12), each checked against the SHA-256 the
+    document gives.
+  - `corpus/lha/`, `corpus/stuffit/`: `manifest.tsv` (and `forks.tsv`) in the layout of
+    `testdata/lha/` and `testdata/stuffit/`.
+  - `corpus/toast/`: `full/<item>/<file>` (real images; top-level format, file counts
+    and the ISO 9660 side of hybrids as `docs/toast/README.md` records them) and
+    `synthetic/` (purpose-built images; a framed image must list what its cooked image
+    lists). Not in the samples yet.
+  - `corpus/rar/`: see the RAR notes above. Not in the samples yet.
 - The single-feature runs (`--features std,next`, `std,beos`, `std,lisa`) compile each
   reader without the other families. Tests that reach a fixture through another layer
   are gated on that layer's feature (`common` for the gzip-packed BFS fixtures and the
-  nested checks, `dos` for the MBR cases, `macintosh` for `tests/diskcopy_specimens.rs`),
+  nested checks, `dos` for the MBR cases, `macintosh` for `tests/diskcopy_fixtures.rs`),
   so the complete fixture checks run under the default features.
 - Check the `no_std` builds with
   `cargo check --no-default-features --features no_std,next`, `no_std,beos`,

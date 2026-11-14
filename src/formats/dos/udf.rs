@@ -9,7 +9,7 @@ use crate::format::ContainerFormat;
 use crate::formats::cd_sector::{CD_USER_DATA_SIZE, RawCd};
 use crate::limits::{BUDGET_FLOOR, OutputBudget, prealloc_hint};
 use crate::sanitize_archive_path;
-use crate::{Container, ContainerInfo, Entry};
+use crate::{Container, ContainerInfo, Entry, Metadata, Timestamp};
 
 // =============================================================================
 // Constants
@@ -125,7 +125,7 @@ fn le32(bytes: &[u8], at: usize) -> u32 {
 }
 
 fn le64(bytes: &[u8], at: usize) -> u64 {
-    u64::from(le32(bytes, at)) | u64::from(le32(bytes, at + 4)) << 32
+    u64::from(le32(bytes, at)) | (u64::from(le32(bytes, at + 4)) << 32)
 }
 
 // =============================================================================
@@ -335,6 +335,8 @@ struct Area {
 struct PartitionDescriptor {
     sequence: u32,
     number: u16,
+    // 1 read-only, 2 write-once, 3 rewritable, 4 overwritable.
+    access: u32,
     area: Area,
 }
 
@@ -407,6 +409,7 @@ impl Sequence {
         let descriptor = PartitionDescriptor {
             sequence,
             number: le16(bytes, 22),
+            access: le32(bytes, 184),
             area: Area {
                 start: u64::from(le32(bytes, 188)),
                 blocks: u64::from(le32(bytes, 192)),
@@ -431,6 +434,12 @@ impl Sequence {
             .iter()
             .find(|partition| partition.number == number)
             .map(|partition| partition.area)
+    }
+
+    fn writable(&self) -> bool {
+        self.partitions
+            .iter()
+            .any(|partition| (2..=4).contains(&partition.access))
     }
 }
 
@@ -558,7 +567,7 @@ impl Addr {
     }
 
     const fn key(self) -> u64 {
-        (self.part as u64) << 32 | self.block as u64
+        ((self.part as u64) << 32) | self.block as u64
     }
 }
 
@@ -608,6 +617,44 @@ struct Icb<'a> {
     block: Cow<'a, [u8]>,
     // Allocation descriptors, or the data itself, within `block`.
     area: (usize, usize),
+    modified: Option<Timestamp>,
+}
+
+// A timestamp (ECMA-167 1/7.3): type and time zone, year, month, day, hour,
+// minute, second, then fractions. Type 1 with an offset in minutes from UTC
+// gives an instant; anything else is zone-less.
+fn timestamp(field: &[u8]) -> Option<Timestamp> {
+    let &[
+        zone_lo,
+        zone_hi,
+        year_lo,
+        year_hi,
+        month,
+        day,
+        hour,
+        minute,
+        second,
+        ..,
+    ] = field
+    else {
+        return None;
+    };
+    let seconds = Timestamp::civil_seconds(
+        i64::from(i16::from_le_bytes([year_lo, year_hi])),
+        u32::from(month),
+        u32::from(day),
+        u32::from(hour),
+        u32::from(minute),
+        u32::from(second),
+    )?;
+    let type_and_zone = u16::from_le_bytes([zone_lo, zone_hi]);
+    // Sign-extended 12-bit offset; -2047 means not specified.
+    let offset = ((type_and_zone << 4) as i16) >> 4;
+    Some(if type_and_zone >> 12 == 1 && offset != -2047 {
+        Timestamp::utc(seconds - i64::from(offset) * 60)
+    } else {
+        Timestamp::local(seconds)
+    })
 }
 
 impl Icb<'_> {
@@ -629,6 +676,7 @@ struct Volume<'a> {
     maps: Vec<Map>,
     root: Addr,
     label: Option<String>,
+    writable: bool,
 }
 
 impl<'a> Volume<'a> {
@@ -697,6 +745,7 @@ impl<'a> Volume<'a> {
             maps: Vec::with_capacity(specs.len()),
             root: Addr::default(),
             label: dstring(&lvd[84..212]),
+            writable: sequence.writable(),
         };
         for spec in &specs {
             let map = match spec {
@@ -1085,6 +1134,16 @@ impl<'a> Volume<'a> {
                 size: le64(&block, 56),
                 at,
                 area: (start as usize, end as usize),
+                // Modification time: after the access time, which follows
+                // the logical blocks recorded (and the object size of an
+                // extended file entry).
+                modified: block
+                    .get(if id == TAG_FILE_ENTRY {
+                        84..96
+                    } else {
+                        92..104
+                    })
+                    .and_then(timestamp),
                 block,
             });
         }
@@ -1252,6 +1311,12 @@ pub fn is_udf_image(data: &[u8]) -> bool {
     Volume::open(data).is_some()
 }
 
+// Whether the volume was made to be written to in place or appended to. An
+// ISO 9660 volume beside one of these cannot have followed its changes.
+pub(crate) fn is_writable_volume(data: &[u8]) -> bool {
+    Volume::open(data).is_some_and(|volume| volume.writable)
+}
+
 pub(crate) fn volume_label(data: &[u8]) -> Option<String> {
     Volume::open(data)?.label
 }
@@ -1263,6 +1328,7 @@ pub(crate) fn volume_label(data: &[u8]) -> Option<String> {
 struct UdfFileEntry {
     path: String,
     data: Vec<u8>,
+    modified: Option<Timestamp>,
 }
 
 // Entries left out of the listing.
@@ -1495,6 +1561,7 @@ impl<'v, 'a> Walk<'v, 'a> {
                 Some(data) if self.charge(icb.size, &path) => self.files.push(UdfFileEntry {
                     path,
                     data: data.to_vec(),
+                    modified: icb.modified,
                 }),
                 Some(_) => {}
                 None => self.problem(format!("file '{path}' is shorter than its recorded length")),
@@ -1532,7 +1599,11 @@ impl<'v, 'a> Walk<'v, 'a> {
         }
         let mut data = Vec::with_capacity(prealloc_hint(icb.size));
         volume.append(&pieces, icb.size, &mut data);
-        self.files.push(UdfFileEntry { path, data });
+        self.files.push(UdfFileEntry {
+            path,
+            data,
+            modified: icb.modified,
+        });
     }
 }
 
@@ -1604,7 +1675,13 @@ impl Container for UdfContainer {
     fn visit(&self, visitor: &mut dyn FnMut(&Entry<'_>) -> Result<bool>) -> Result<()> {
         for entry in &self.entries {
             let path = format!("{}/{}", self.prefix, sanitize_archive_path(&entry.path));
+            let metadata = Metadata::new().with_modified(entry.modified);
             let e = Entry::new(&path, &self.prefix, &entry.data);
+            let e = if entry.modified.is_some() {
+                e.with_metadata(&metadata)
+            } else {
+                e
+            };
 
             if !visitor(&e)? {
                 return Ok(());
@@ -1706,7 +1783,7 @@ mod tests {
     }
 
     fn short_ad(kind: u32, len: u32, block: u32) -> Vec<u8> {
-        let mut ad = (kind << 30 | len).to_le_bytes().to_vec();
+        let mut ad = ((kind << 30) | len).to_le_bytes().to_vec();
         ad.extend_from_slice(&block.to_le_bytes());
         ad
     }
@@ -1719,7 +1796,7 @@ mod tests {
     }
 
     fn ext_ad(kind: u32, len: u32, recorded: u32, information: u32, at: (u16, u32)) -> Vec<u8> {
-        let mut ad = (kind << 30 | len).to_le_bytes().to_vec();
+        let mut ad = ((kind << 30) | len).to_le_bytes().to_vec();
         ad.extend_from_slice(&recorded.to_le_bytes());
         ad.extend_from_slice(&information.to_le_bytes());
         ad.extend_from_slice(&at.1.to_le_bytes());
@@ -2135,6 +2212,21 @@ mod tests {
         let mut disc = plain(2048);
         disc.short_file(ROOT, 0, &[]);
         assert!(!is_udf_image(&disc.data));
+    }
+
+    #[test]
+    fn partition_access_type_tells_writable_volumes() {
+        let mut disc = plain(2048);
+        assert!(!is_writable_volume(&disc.data));
+        for (access, writable) in [(1u32, false), (2, true), (3, true), (4, true), (5, false)] {
+            for start in [VDS, RESERVE_VDS] {
+                let mut pd = partition_descriptor(0, PART, PART_BLOCKS);
+                pd[184..188].copy_from_slice(&access.to_le_bytes());
+                disc.desc(start, start, TAG_PARTITION, pd);
+            }
+            assert_eq!(is_writable_volume(&disc.data), writable, "access {access}");
+            assert_eq!(paths(&disc.data), PLAIN_PATHS);
+        }
     }
 
     #[test]

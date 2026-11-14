@@ -104,9 +104,11 @@ cleared and contain garbage.
   (section 4.2).
 - Output: for each user file, a path and its contents; nothing for
   system structures, pipes, event channels, deleted entries.
-- The public metadata of this crate has no fields for Lisa timestamps,
-  labels, passwords or tags. Sections 7 and 12 describe them so they can
-  be added later; a reader built today ignores them.
+- The public metadata of this crate carries a modification time: the
+  reader reports DTM of the hint entry (section 7.1), converted as section
+  12 says and marked as zone-less. It has no fields for the other
+  timestamps, labels, passwords or tags; sections 7 and 12 describe them so
+  they can be added later.
 
 ## 3. Sector tags
 

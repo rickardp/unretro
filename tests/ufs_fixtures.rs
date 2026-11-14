@@ -1,10 +1,9 @@
 //! UFS1 and NeXT disklabel fixtures from `testdata/ufs/` (see its README for
-//! how they were made), and real media from `$UNRETRO_SPECIMENS/next/` and
-//! `$UNRETRO_SPECIMENS/ufs/` when present.
+//! how they were made).
 //!
-//! Expected paths, sizes, FNV-1a hashes and modes are in `manifest.tsv` and
-//! in the manifests next to the specimens, written from what other readers
-//! (The Sleuth Kit, the Linux `ufs` driver) found, not taken from this crate.
+//! Expected paths, sizes, FNV-1a hashes and modes are in `manifest.tsv.gz`,
+//! written from what other readers (The Sleuth Kit, the Linux `ufs` driver)
+//! found, not taken from this crate.
 #![cfg(feature = "next")]
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -267,7 +266,7 @@ fn assert_clean(listing: &Listing, what: &str) {
 }
 
 fn fixture_manifest() -> String {
-    String::from_utf8(fixture("manifest.tsv")).unwrap()
+    String::from_utf8(gunzip(&fixture("manifest.tsv.gz"))).unwrap()
 }
 
 // A bare volume: detected by content with or without a helpful name, and
@@ -394,9 +393,7 @@ fn manifest_images(manifest: &str) -> BTreeMap<String, (Vec<char>, bool)> {
             None => (row.image, None),
         };
         let entry = images.entry(name.to_string()).or_default();
-        if let Some(letter) = letter
-            && !entry.0.contains(&letter)
-        {
+        if let Some(letter) = letter.filter(|letter| !entry.0.contains(letter)) {
             entry.0.push(letter);
         }
         entry.1 |= row.kind == "rejected";
@@ -412,8 +409,8 @@ fn every_committed_fixture_matches_the_manifest() {
     let mut on_disk = BTreeSet::new();
     for entry in std::fs::read_dir(testdata("ufs")).unwrap() {
         let file = entry.unwrap().file_name().into_string().unwrap();
-        if let Some(name) = file.strip_suffix(".gz") {
-            on_disk.insert(name.to_string());
+        if let Some(name) = file.strip_suffix(".img.gz") {
+            on_disk.insert(format!("{name}.img"));
         }
     }
     let listed: BTreeSet<String> = images.keys().cloned().collect();
@@ -776,231 +773,4 @@ fn other_formats_fixtures_are_left_alone() {
         }
     }
     assert!(checked > 0);
-}
-
-// =============================================================================
-// Real media, outside the repository
-// =============================================================================
-
-fn specimen_path(format: &str, file: &str) -> Option<PathBuf> {
-    let root = std::env::var_os("UNRETRO_SPECIMENS")?;
-    let path = PathBuf::from(root).join(format).join(file);
-    path.is_file().then_some(path)
-}
-
-fn specimen(format: &str, file: &str) -> Option<Vec<u8>> {
-    std::fs::read(specimen_path(format, file)?).ok()
-}
-
-// A labelled specimen of `$UNRETRO_SPECIMENS/next/` against the manifest
-// next to it. `beyond` are directories that the readers behind the manifest
-// refuse, so that it has no rows for their files; `partitions` the letters
-// in use.
-fn check_specimen(file: &str, partitions: &[char], beyond: &[&str]) -> Option<Listing> {
-    let manifest = String::from_utf8(specimen("next", &format!("{file}.manifest.tsv"))?).ok()?;
-    let data = specimen("next", file)?;
-    let (name, image) = match file.strip_suffix(".gz") {
-        Some(name) => (name, gunzip(&data)),
-        None => (file, data),
-    };
-    for probe in [name, "no-extension", "disk.iso", "disk.img"] {
-        assert_eq!(
-            detect_format(probe, Some(&image)),
-            Some(ContainerFormat::NextDisklabel),
-            "{file} as {probe}"
-        );
-    }
-
-    let listing = list_image(image, name, true);
-    let mut want_formats = vec![ContainerFormat::NextDisklabel];
-    want_formats.extend(partitions.iter().map(|_| ContainerFormat::Ufs));
-    assert_eq!(listing.formats, want_formats, "{file}");
-    assert!(!listing.report.has_root_failures(), "{file}");
-    assert_eq!(listing.volumes.len(), partitions.len(), "{file}");
-
-    for &letter in partitions {
-        let index = letter as u32 - 'a' as u32;
-        let root = format!("{name}/p{index}.img");
-        let want = expected(&manifest, &format!("{name}#{letter}"));
-        let mut files = listing.volumes[&root].clone();
-        files.retain(|path, _| !beyond.iter().any(|dir| path.starts_with(dir)));
-        assert_files(&files, &want, &root);
-    }
-    let diagnostics = listing.diagnostics_below(name);
-    assert!(diagnostics.is_empty(), "{file}: {diagnostics:?}");
-    Some(listing)
-}
-
-fn file_count(listing: &Listing) -> usize {
-    listing.volumes.values().map(BTreeMap::len).sum()
-}
-
-#[test]
-fn specimen_nextstep_and_openstep_floppies() {
-    // Regular file names per docs/ufs/ufs.md section 13.2.
-    for (file, files) in [
-        ("ns32-m68k-boot.img", 8),
-        ("ns32-x86-boot.img", 20),
-        ("ns32-x86-drivers.img", 49),
-        ("os42-m68k-install.img", 0),
-        ("os42-x86-install.img", 13),
-        ("os42-x86-drivers.img", 91),
-    ] {
-        // The 68k install floppy holds only `lost+found`, so its manifest
-        // has no file rows; `expected` still finds its directory row.
-        if let Some(listing) = check_specimen(file, &['a'], &[]) {
-            assert_eq!(file_count(&listing), files, "{file}");
-        }
-    }
-    if let Some(listing) = check_specimen("ns32-m68k-boot.img", &['a'], &[]) {
-        let files = &listing.volumes["ns32-m68k-boot.img/p0.img"];
-        assert_eq!(files[".dir.tiff"].size, 2524);
-        assert_eq!(files["UpgradePrep.app/sdmach.Z"].size, 530_737);
-    }
-    check_specimen("ns22-m68k-floppy-2880.img", &['a'], &[]);
-}
-
-#[test]
-fn specimen_nextstep_32_cd() {
-    let Some(listing) = check_specimen("ns32-cd.iso", &['a'], &[]) else {
-        return;
-    };
-    let files = &listing.volumes["ns32-cd.iso/p0.img"];
-    // 12,608 names of 12,540 regular files, in 38 staggered groups.
-    assert_eq!(files.len(), 12_608);
-    let total: usize = files.values().map(|content| content.size).sum();
-    assert_eq!(total, 279_032_075);
-    assert_eq!(files["private/etc/passwd"].size, 434);
-    assert_eq!(files["sdmach"], files["odmach"]);
-    assert_eq!(files["sdmach"].size, 779_288);
-    // Through a double indirect block.
-    assert_eq!(
-        files["NextCD/Packages/Literature.pkg/Literature.tar.Z"].size,
-        30_962_381
-    );
-    // A symbolic link, and device nodes.
-    assert!(!files.contains_key("mach"));
-    assert!(files.keys().all(|path| !path.starts_with("private/dev/")));
-}
-
-// The 87 files whose records lie whole inside `Fonts/afm` hold 660,011 bytes;
-// the file of the last record holds the rest.
-const AFM_BYTES: usize = 665_984;
-
-// One after the other: each image is 1 to 2 GiB once decoded.
-#[test]
-fn specimen_hard_disks() {
-    // NeXTSTEP 0.8: a `dlV2` label with two partitions. `Fonts/afm` on the
-    // second is 3108 bytes long, which is no multiple of 512: its last
-    // record starts at 3072, claims 1024 bytes and has its name end at 3108.
-    // The readers behind the manifest refuse the whole directory.
-    if let Some(listing) = check_specimen("ns08-m68k-hd.dd.gz", &['a', 'b'], &["Fonts/afm/"]) {
-        let afm: Vec<(&String, &Content)> = listing.volumes["ns08-m68k-hd.dd/p1.img"]
-            .iter()
-            .filter(|(path, _)| path.starts_with("Fonts/afm/"))
-            .collect();
-        assert_eq!(afm.len(), 88);
-        // `.places` and 87 font metrics files.
-        let metrics = afm.iter().filter(|(path, _)| path.ends_with(".afm"));
-        assert_eq!(metrics.count(), 87);
-        assert_eq!(afm.iter().map(|(_, c)| c.size).sum::<usize>(), AFM_BYTES);
-        let last = &listing.volumes["ns08-m68k-hd.dd/p1.img"]["Fonts/afm/Screen-Times-Roman.9.afm"];
-        assert_eq!(last.size, AFM_BYTES - 660_011);
-        assert!(
-            listing.volumes["ns08-m68k-hd.dd/p0.img"]
-                .keys()
-                .all(|path| !path.starts_with("Fonts/afm/"))
-        );
-    }
-    check_specimen("ns30-m68k-hd.dd.gz", &['a'], &[]);
-    // Intel disks without a partition table: boot code with 55 AA and an
-    // empty table in sector 0, label copies at 7680, 15360 and 23040 only.
-    check_specimen("os42-x86-hd.img.gz", &['a'], &[]);
-    // Little-endian, 4.4BSD generation, staggered groups.
-    check_specimen("rhapsody-dr2-x86-hd.img.gz", &['a'], &[]);
-}
-
-// The manifests of `$UNRETRO_SPECIMENS/ufs/` come from the specification
-// author's reader: path, kind, permission bits, size, SHA-256.
-fn check_rhapsody_floppy(stem: &str, want_files: usize) {
-    let (Some(image), Some(manifest)) = (
-        specimen("ufs", &format!("{stem}.img")),
-        specimen("ufs", &format!("{stem}.manifest.tsv")),
-    ) else {
-        return;
-    };
-    let manifest = String::from_utf8(manifest).unwrap();
-    let mut want = Expected::default();
-    for line in manifest
-        .lines()
-        .filter(|l| !l.is_empty() && !l.starts_with('#'))
-    {
-        let cells: Vec<&str> = line.split('\t').collect();
-        let [path, kind, mode, size, _sha256] = cells[..] else {
-            panic!("manifest row: {line}");
-        };
-        let path = yielded_path(path.trim_start_matches('/').trim_end_matches('/'));
-        if kind == "file" {
-            want.files.insert(
-                path,
-                Content {
-                    size: size.parse().unwrap(),
-                    hash: None,
-                    mode: u32::from_str_radix(mode, 8).unwrap(),
-                },
-            );
-        } else {
-            want.unlisted.push(path);
-        }
-    }
-    assert_eq!(want.files.len(), want_files, "{stem}");
-
-    let name = format!("{stem}.img");
-    assert_eq!(
-        detect_format(&name, Some(&image)),
-        Some(ContainerFormat::NextDisklabel)
-    );
-    let listing = list_image(image, &name, true);
-    assert_eq!(
-        listing.formats,
-        [ContainerFormat::NextDisklabel, ContainerFormat::Ufs]
-    );
-    assert_clean(&listing, &name);
-    assert_files(&listing.volumes[&format!("{name}/p0.img")], &want, &name);
-}
-
-#[test]
-fn specimen_rhapsody_floppies() {
-    check_rhapsody_floppy("rhapsody-dr2-x86-boot", 9);
-    check_rhapsody_floppy("rhapsody-dr2-x86-drivers", 74);
-}
-
-// The first 8 MiB of the OPENSTEP 4.2 CD: label at byte 8192 behind a
-// foreign header, volume recognised, files beyond the cut fail one by one.
-#[test]
-fn specimen_truncated_openstep_cd() {
-    let Some(image) = specimen("ufs", "os42-cd-first8m.img") else {
-        return;
-    };
-    let name = "os42-cd-first8m.img";
-    assert_eq!(
-        detect_format(name, Some(&image)),
-        Some(ContainerFormat::NextDisklabel)
-    );
-    let len = image.len();
-    let listing = list_image(image, name, true);
-    assert_eq!(
-        listing.formats,
-        [ContainerFormat::NextDisklabel, ContainerFormat::Ufs]
-    );
-    assert!(!listing.report.has_root_failures());
-    let files = &listing.volumes[&format!("{name}/p0.img")];
-    let total: usize = files.values().map(|content| content.size).sum();
-    assert!(total <= len, "{total}");
-    let diagnostics = listing.diagnostics_below(name);
-    assert_eq!(diagnostics.len(), 1, "{diagnostics:?}");
-    assert!(
-        diagnostics[0].contains("outside the volume"),
-        "{diagnostics:?}"
-    );
 }

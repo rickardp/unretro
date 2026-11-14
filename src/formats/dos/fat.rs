@@ -2,7 +2,7 @@ use crate::compat::{FastMap, String, Vec, format};
 use crate::error::{Error, Result};
 use crate::format::ContainerFormat;
 use crate::sanitize_archive_path;
-use crate::{Container, ContainerInfo, Entry};
+use crate::{Container, ContainerInfo, Entry, Metadata, Timestamp};
 
 // =============================================================================
 // Constants
@@ -460,6 +460,11 @@ impl<'a> FatVolume<'a> {
                     entries.push(FatFileEntry {
                         path: full_path,
                         data,
+                        // Last write time at 22 and date at 24, zone-less.
+                        modified: Timestamp::from_dos(
+                            u16::from_le_bytes([entry[24], entry[25]]),
+                            u16::from_le_bytes([entry[22], entry[23]]),
+                        ),
                     });
                 }
             }
@@ -474,6 +479,7 @@ impl<'a> FatVolume<'a> {
 struct FatFileEntry {
     path: String,
     data: Vec<u8>,
+    modified: Option<Timestamp>,
 }
 
 fn parse_short_name(entry: &[u8]) -> String {
@@ -599,7 +605,13 @@ impl Container for FatContainer {
     fn visit(&self, visitor: &mut dyn FnMut(&Entry<'_>) -> Result<bool>) -> Result<()> {
         for entry in &self.entries {
             let path = format!("{}/{}", self.prefix, sanitize_archive_path(&entry.path));
+            let metadata = Metadata::new().with_modified(entry.modified);
             let e = Entry::new(&path, &self.prefix, &entry.data);
+            let e = if entry.modified.is_some() {
+                e.with_metadata(&metadata)
+            } else {
+                e
+            };
 
             if !visitor(&e)? {
                 break;

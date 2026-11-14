@@ -9,6 +9,8 @@
 //! `src/formats/dos/nrg.rs`.
 #![cfg(feature = "dos")]
 
+mod common;
+
 use std::collections::BTreeMap;
 use std::io::Read;
 use std::path::{Path, PathBuf};
@@ -734,7 +736,7 @@ fn damaged_images_never_panic() {
 }
 
 // ---------------------------------------------------------------------------
-// $UNRETRO_SPECIMENS/nrg
+// corpus/nrg of the samples repository
 // ---------------------------------------------------------------------------
 
 // SHA-256 (FIPS 180-4), for the digests `docs/nrg/nrg.md` gives.
@@ -884,15 +886,9 @@ fn real_images_list_the_specified_tracks() {
             &[("track01.img", T1), ("track02.pcm", AU)],
         ),
     ];
-    let Some(root) = std::env::var_os("UNRETRO_SPECIMENS") else {
-        eprintln!("skipped: UNRETRO_SPECIMENS is not set");
+    let Some(family) = common::corpus("nrg") else {
         return;
     };
-    let family = Path::new(&root).join("nrg");
-    if !family.is_dir() {
-        eprintln!("skipped: no {}", family.display());
-        return;
-    }
     // With the family present, a missing image is a failure, not a skip.
     for (name, digest, tracks) in images {
         let path = family.join(name);

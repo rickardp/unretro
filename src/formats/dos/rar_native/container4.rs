@@ -728,14 +728,14 @@ const fn name_offset(flags: u16) -> usize {
 }
 
 // `header` is the whole header; its minimum size and the name were checked.
-fn parse_file_header<'a>(
-    header: &'a [u8],
+fn parse_file_header(
+    header: &[u8],
     flags: u16,
     volume: usize,
     data: Range<usize>,
     truncated: bool,
     archive_solid: bool,
-) -> Option<Part<'a>> {
+) -> Option<Part<'_>> {
     let mut unpacked_size = u64::from(u32_at(header, 11)?);
     if flags & FILE_LARGE != 0 {
         unpacked_size |= u64::from(u32_at(header, 36)?) << 32;
@@ -1418,10 +1418,11 @@ pub(crate) fn old_scheme_volume_name(first: &str, number: u32) -> Option<String>
 pub(crate) fn next_old_scheme_name(name: &str) -> Option<String> {
     let dot = extension_dot(name)?;
     let stem = name.get(..dot)?;
-    if let [letter, tens, ones] = *name.get(dot + 1..)?.as_bytes()
-        && (b'r'..=b'z').contains(&letter.to_ascii_lowercase())
-        && tens.is_ascii_digit()
-        && ones.is_ascii_digit()
+    if let [
+        letter @ (b'r'..=b'z' | b'R'..=b'Z'),
+        tens @ b'0'..=b'9',
+        ones @ b'0'..=b'9',
+    ] = *name.get(dot + 1..)?.as_bytes()
     {
         let number = u32::from(tens - b'0') * 10 + u32::from(ones - b'0');
         if number < 99 {
@@ -1506,7 +1507,7 @@ mod tests {
         assert_eq!(digits.len() % 2, 0);
         digits
             .chunks(2)
-            .map(|pair| pair[0] << 4 | pair[1])
+            .map(|pair| (pair[0] << 4) | pair[1])
             .collect()
     }
 

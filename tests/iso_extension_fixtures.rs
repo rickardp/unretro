@@ -83,10 +83,10 @@ impl Expected {
             let Some((prefix, _)) = pattern.split_once("/*/") else {
                 continue;
             };
-            if let Some(rest) = path
+            if let Some((_, tail)) = path
                 .strip_prefix(prefix)
                 .and_then(|rest| rest.strip_prefix('/'))
-                && let Some((_, tail)) = rest.split_once('/')
+                .and_then(|rest| rest.split_once('/'))
             {
                 return format!("{prefix}/*/{tail}");
             }

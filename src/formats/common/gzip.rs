@@ -4,7 +4,7 @@ use crate::compat::{String, Vec, format};
 use crate::error::{Error, Result};
 use crate::format::ContainerFormat;
 use crate::sanitize_path_component;
-use crate::{Container, ContainerInfo, Entry, Metadata};
+use crate::{Container, ContainerInfo, Entry, Metadata, Timestamp};
 
 use super::crc32::crc32;
 use super::inflate::inflate;
@@ -161,6 +161,8 @@ pub struct GzipContainer {
     inner_name: String,
     /// Decompressed data.
     data: Vec<u8>,
+    /// MTIME of the first member (RFC 1952, 2.3.1); zero means not set.
+    modified: Option<Timestamp>,
 }
 
 impl GzipContainer {
@@ -172,10 +174,17 @@ impl GzipContainer {
         _depth: u32,
     ) -> Result<Self> {
         let decompressed = decode_members(data, crate::MAX_DECOMPRESSED_SIZE)?;
+        let modified = match data.get(4..8) {
+            Some(&[a, b, c, d]) if [a, b, c, d] != [0; 4] => {
+                Some(Timestamp::utc(i64::from(u32::from_le_bytes([a, b, c, d]))))
+            }
+            _ => None,
+        };
         Ok(Self {
             prefix,
             inner_name,
             data: decompressed,
+            modified,
         })
     }
 
@@ -196,7 +205,9 @@ impl Container for GzipContainer {
     fn visit(&self, visitor: &mut dyn FnMut(&Entry<'_>) -> Result<bool>) -> Result<()> {
         let full_path = self.entry_path();
         // Gzip always uses deflate compression
-        let metadata = Metadata::new().with_compression_method("deflate");
+        let metadata = Metadata::new()
+            .with_compression_method("deflate")
+            .with_modified(self.modified);
         let entry = Entry::new(&full_path, &self.prefix, &self.data).with_metadata(&metadata);
         visitor(&entry)?;
         Ok(())

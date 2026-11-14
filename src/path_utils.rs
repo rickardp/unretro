@@ -76,12 +76,15 @@ fn needs_replacement(c: char) -> bool {
 /// - `\0` - NUL character
 /// - Control characters (0x00-0x1F)
 ///
+/// A component that is exactly `.` or `..` becomes `_` or `__`.
+///
 /// # Examples
 ///
 /// ```
 /// use unretro::sanitize_path_component;
 ///
 /// assert_eq!(sanitize_path_component("normal.txt"), "normal.txt");
+/// assert_eq!(sanitize_path_component(".."), "__");
 /// assert_eq!(sanitize_path_component("file:name"), "file_name");
 /// assert_eq!(sanitize_path_component("path/in/name"), "path_in_name");
 /// ```
@@ -91,6 +94,12 @@ pub fn sanitize_path_component(component: &str) -> String {
 
 /// Cow-returning variant: borrows when no replacement is needed.
 pub(crate) fn sanitize_path_component_cow(component: &str) -> Cow<'_, str> {
+    // A name that is a directory reference would escape or alias its parent.
+    match component {
+        "." => return Cow::Borrowed("_"),
+        ".." => return Cow::Borrowed("__"),
+        _ => {}
+    }
     if component.chars().any(needs_replacement) {
         Cow::Owned(
             component
@@ -134,10 +143,11 @@ pub fn sanitize_archive_path(path: &str) -> Cow<'_, str> {
     Cow::Owned(
         path.split('/')
             .map(|component| {
-                if component == ".." {
-                    Cow::Borrowed("_")
-                } else {
-                    sanitize_path_component_cow(component)
+                match component {
+                    ".." => Cow::Borrowed("_"),
+                    // `./name` is ordinary in archives and stays as it is.
+                    "." => Cow::Borrowed("."),
+                    _ => sanitize_path_component_cow(component),
                 }
             })
             .collect::<Vec<_>>()

@@ -12,9 +12,8 @@ use unretro::{ContainerFormat, EntryType, Loader, VisitAction, VisitReport, dete
 
 const RSRC_SUFFIX: &str = "/..namedfork/rsrc";
 
-// HfsContainer drops a file whose forks are both empty; the manifest's
-// `empty` rows are expected only if this is set.
-const EMPTY_FILES_LISTED: bool = false;
+// A file whose forks are both empty is listed: the manifest's `empty` rows.
+const EMPTY_FILES_LISTED: bool = true;
 
 // Root files of a journaled volume that the macOS kernel hides. Accepted
 // whether listed or not.
@@ -102,7 +101,7 @@ fn visit(data: Vec<u8>, file: &str, root: &str, types: EntryType) -> (Vec<Seen>,
                 .path
                 .strip_prefix(root)
                 .and_then(|rest| rest.strip_prefix('/'))
-                && !LEFTOVERS.contains(&path)
+                .filter(|path| !LEFTOVERS.contains(path))
             {
                 seen.push(Seen {
                     path: path.to_string(),
@@ -267,8 +266,10 @@ fn assert_gzipped_image(file: &str, set: &str, partition: Option<&str>) -> Vec<S
     assert_volume(file, &inside(&format!("{file}/{name}")), set)
 }
 
+// A UDIF image is detected as HFS by its trailer; a partitioned disk inside
+// opens as its partition map, with the volume under `partition`.
 #[track_caller]
-fn assert_udif_volume(file: &str, set: &str) -> Vec<Seen> {
+fn assert_udif_volume(file: &str, set: &str, partition: Option<&str>) -> Vec<Seen> {
     let data = fixture(file);
     assert_eq!(detect_format(file, Some(&data)), Some(ContainerFormat::Hfs));
     assert_eq!(
@@ -276,8 +277,12 @@ fn assert_udif_volume(file: &str, set: &str) -> Vec<Seen> {
         Some(ContainerFormat::Hfs)
     );
     let (_, report) = visit(data, file, file, EntryType::Leaves);
-    assert_eq!(report.root_format, Some(ContainerFormat::Hfs));
-    assert_volume(file, file, set)
+    let (format, root) = match partition {
+        Some(partition) => (ContainerFormat::Apm, format!("{file}/{partition}")),
+        None => (ContainerFormat::Hfs, file.to_string()),
+    };
+    assert_eq!(report.root_format, Some(format));
+    assert_volume(file, &root, set)
 }
 
 #[track_caller]
@@ -437,7 +442,7 @@ fn hfsx_volume_in_an_apple_partition_map() {
 #[test]
 fn hfsx_volume_in_a_zlib_compressed_udif_image() {
     // The same image as hfsx.img.gz, converted to UDZO.
-    let leaves = assert_udif_volume("hfsx.dmg", "hfsx");
+    let leaves = assert_udif_volume("hfsx.dmg", "hfsx", Some("disk image"));
     assert_case_sensitive_names(&leaves);
 }
 
@@ -446,7 +451,7 @@ fn partitioned_udif_image_with_several_chunks_per_partition() {
     // One block table per partition, each counting sectors from its own
     // start, and the Apple_HFS partition in three zlib chunks: `After` lies
     // in the second megabyte, past the first chunk.
-    let leaves = assert_udif_volume("spread.dmg", "spread");
+    let leaves = assert_udif_volume("spread.dmg", "spread", Some("disk image"));
     assert_eq!(content(&leaves, "filler.bin").size, 1_310_720);
     assert_eq!(
         content(&leaves, "After/hard link.txt"),
@@ -457,7 +462,7 @@ fn partitioned_udif_image_with_several_chunks_per_partition() {
 #[test]
 fn bare_hfsx_volume_in_a_udif_image() {
     // No partition map: 'HX' at byte 1024 of the decoded image.
-    let leaves = assert_udif_volume("hfsx-bare.dmg", "hfsx");
+    let leaves = assert_udif_volume("hfsx-bare.dmg", "hfsx", None);
     assert_case_sensitive_names(&leaves);
 }
 

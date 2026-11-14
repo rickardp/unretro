@@ -842,7 +842,7 @@ mod tests {
         assert_eq!(digits.len() % 2, 0);
         digits
             .chunks(2)
-            .map(|pair| pair[0] << 4 | pair[1])
+            .map(|pair| (pair[0] << 4) | pair[1])
             .collect()
     }
 

@@ -2,16 +2,19 @@
 //! expected entry paths, fork lengths and FNV-1a 64 hashes.
 //!
 //! `testdata/stuffit/manifest.tsv` is always checked. A second manifest of
-//! real archives is checked when `UNRETRO_STUFFIT_ORACLE` names its directory;
-//! without it that test prints a skip notice and passes.
+//! real archives is checked when the samples repository that `UNRETRO_SAMPLES`
+//! names has a `corpus/stuffit` directory; without it that test prints a skip
+//! notice and passes.
 //!
 //! In both, the `ref_*` columns (from the independent `unar` tool) are the
 //! expected results; the crate-derived columns are used only where `ref_*` is
 //! empty.
 #![cfg(feature = "full")]
 
+mod common;
+
 use std::collections::HashMap;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use unretro::{ContainerFormat, EntryType, Loader, VisitAction};
 
@@ -315,17 +318,10 @@ fn sit_files(dir: &Path) -> usize {
 
 #[test]
 fn oracle_archives_match_manifest() {
-    use std::io::Write;
-    let Some(dir) = std::env::var_os("UNRETRO_STUFFIT_ORACLE").filter(|dir| !dir.is_empty()) else {
-        // Written to the stream itself: the harness captures `eprintln!` of a
-        // passing test, and a skipped check must not look like a run one.
-        let _ = writeln!(
-            std::io::stderr(),
-            "UNRETRO_STUFFIT_ORACLE not set, skipping the StuffIt checks against real archives"
-        );
+    let Some(dir) = common::corpus("stuffit") else {
         return;
     };
-    let checked = check_manifest(&PathBuf::from(dir));
+    let checked = check_manifest(&dir);
     assert!(checked.archives > 0 && checked.files > 0);
     assert!(checked.rsrc_forks > 0);
     // Resource forks of real files are resource maps: none may go missing.

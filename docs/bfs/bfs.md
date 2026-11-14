@@ -477,8 +477,9 @@ The kind of an i-node is decided in this order:
   written by BeOS; the reference implementation substitutes
   MODIFIED_TIME when it is smaller than MODIFIED_TIME.
 - There is no access time.
-- This repository's entry metadata has no time fields; a reader does not
-  need the times at all.
+- This repository's reader reports MODIFIED_TIME, as whole seconds in
+  UTC, as the entry's modification time. It does not use the other
+  times.
 
 ### 5.5 Validity checks
 
@@ -1081,6 +1082,13 @@ belonging to this tree.
   UTF-8, reserved characters, names such as `..` produced by
   sanitising) is the business of this repository's common path
   handling, which must be applied to every component.
+- What this repository's reader does with the result (not part of the
+  format): entries are delivered sorted by their final path, not in tree
+  order. When sanitising changes a name and the sanitised path is also
+  claimed by another entry, the changed name keeps each replaced byte as
+  `%XX` instead (`a:b` beside `a_b` becomes `a%3Ab`), provided that form
+  survives sanitising unchanged. Of entries that still share a path, one
+  is delivered and the rest are reported as left out.
 
 ### 9.3 What is listed
 

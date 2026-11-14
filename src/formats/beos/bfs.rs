@@ -9,7 +9,7 @@ use crate::error::{Error, Result};
 use crate::format::ContainerFormat;
 use crate::limits::{OutputBudget, prealloc_hint};
 use crate::sanitize_archive_path;
-use crate::{Container, ContainerInfo, Entry, Metadata};
+use crate::{Container, ContainerInfo, Entry, Metadata, Timestamp};
 
 // =============================================================================
 // Constants
@@ -51,6 +51,8 @@ const OFF_INODE_MAGIC: usize = 0;
 const OFF_INODE_NUM: usize = 4;
 const OFF_INODE_MODE: usize = 20;
 const OFF_INODE_FLAGS: usize = 24;
+// Seconds since 1970 UTC in the upper 48 bits (bfs.md 5.4).
+const OFF_INODE_MODIFIED: usize = 36;
 const OFF_INODE_SIZE: usize = 64;
 const OFF_DIRECT: usize = 72;
 const OFF_INDIRECT: usize = 176;
@@ -133,7 +135,11 @@ impl Order {
             u64::from(self.u32(bytes, at)),
             u64::from(self.u32(bytes, at + 4)),
         );
-        if high_first { a << 32 | b } else { b << 32 | a }
+        if high_first {
+            (a << 32) | b
+        } else {
+            (b << 32) | a
+        }
     }
 
     fn i64(self, bytes: &[u8], at: usize) -> i64 {
@@ -424,10 +430,9 @@ impl<'a> TreeFile<'a> {
         if order.u32(&header, 12) != TREE_STRING_KEYS {
             return Err("has a directory tree without string keys");
         }
-        if let Ok(max_size) = u64::try_from(order.i64(&header, 32))
-            && max_size > 0
-        {
-            tree.limit = size.min(max_size);
+        match u64::try_from(order.i64(&header, 32)) {
+            Ok(max_size) if max_size > 0 => tree.limit = size.min(max_size),
+            _ => {}
         }
         tree.root = order.i64(&header, 16);
         if !tree.valid_offset(tree.root) {
@@ -591,6 +596,7 @@ struct BfsFileEntry {
     path: String,
     data: Vec<u8>,
     mode: u32,
+    modified: i64,
 }
 
 #[derive(Default)]
@@ -918,7 +924,12 @@ impl<'v, 'a> Walk<'v, 'a> {
             Ok(())
         });
         match read {
-            Ok(()) => self.entries.push(BfsFileEntry { path, data, mode }),
+            Ok(()) => self.entries.push(BfsFileEntry {
+                path,
+                data,
+                mode,
+                modified: volume.order.i64(inode, OFF_INODE_MODIFIED) >> 16,
+            }),
             Err(_) if over_budget => {
                 self.exhausted = true;
                 self.damage
@@ -1097,7 +1108,9 @@ impl Container for BfsContainer {
     fn visit(&self, visitor: &mut dyn FnMut(&Entry<'_>) -> Result<bool>) -> Result<()> {
         for entry in &self.entries {
             let path = format!("{}/{}", self.prefix, sanitize_archive_path(&entry.path));
-            let metadata = Metadata::new().with_mode(unix_mode(entry.mode));
+            let metadata = Metadata::new()
+                .with_mode(unix_mode(entry.mode))
+                .with_modified(Some(Timestamp::utc(entry.modified)));
             let e = Entry::new(&path, &self.prefix, &entry.data).with_metadata(&metadata);
 
             if !visitor(&e)? {

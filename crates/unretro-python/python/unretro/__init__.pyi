@@ -83,6 +83,16 @@ class Metadata:
         """Mac creator code (e.g., 'MOSS', 'ttxt')."""
         ...
 
+    @property
+    def modified(self) -> Optional[int]:
+        """Modification time in seconds since 1970-01-01 00:00:00."""
+        ...
+
+    @property
+    def modified_is_local(self) -> bool:
+        """True when `modified` is zone-less wall-clock time, not UTC."""
+        ...
+
     def is_empty(self) -> bool:
         """Check if any metadata is present."""
         ...
