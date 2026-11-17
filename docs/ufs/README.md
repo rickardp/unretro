@@ -70,6 +70,6 @@ been consulted for.
 | Rhapsody DR2 (5.1) floppies for Intel: boot (`587e7f55f338c8750fc5c74391285f5136a7f8b8bdee273f74a610af8501769c`; RH-FD-X86a) and drivers (`44e345fc12dd3b4fdbcc74e135189e62638d51484ffe93572f0b402655850afa`; RH-FD-X86b), from `https://archive.org/download/rhapsody5.1/` | Little-endian new-generation volumes written by an Apple system; type string `4.4BSD`. |
 | First 8,388,608 bytes of the OPENSTEP 4.2 user CD-ROM (`26ffecc483acb87cf3187c235b61c242b7294d8a5930cdedfcd9af0e51b4992e`; OS42-CD), from `https://archive.org/download/Openstep42/` | A label that is not at byte 0 and uses 2048-byte device sectors; a truncated volume. |
 
-The images are held in the project's specimen cache outside the
-repository; the cache records where each came from. None of them is in
-the repository.
+None of the images is in this repository. Cut-down copies of several are
+in the `unretro-samples` repository (`data/next/`), whose `SOURCES.md`
+records where each came from; the full downloads were not kept.

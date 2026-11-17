@@ -743,16 +743,15 @@ fn real_images_open_as_documented() {
             0,
         ),
     ];
-    // With `full/` present, a missing image is a failure, not a skip.
-    let has_full = root.join("full").is_dir();
-    let present = |name: &str| {
-        let path = root.join("full").join(name);
-        assert!(path.is_file(), "{} is missing", path.display());
-        path
-    };
-    for (name, format, optical_files, mac_files, iso_side_files) in
-        full.into_iter().filter(|_| has_full)
+    // The samples hold a subset of these images: one that is absent is not
+    // checked, but at least one has to be there.
+    let present = |name: &str| root.join("full").join(name);
+    let mut surveyed = 0;
+    for (name, format, optical_files, mac_files, iso_side_files) in full
+        .into_iter()
+        .filter(|(name, ..)| present(name).is_file())
     {
+        surveyed += 1;
         let seen = survey(&present(name));
         assert_eq!(seen.root_format, Some(format), "{name}");
         assert_eq!(seen.iso_side, iso_side_files, "{name}: ISO 9660 side");
@@ -781,8 +780,9 @@ fn real_images_open_as_documented() {
         ),
     ]
     .into_iter()
-    .filter(|_| has_full)
+    .filter(|(name, ..)| present(name).is_file())
     {
+        surveyed += 1;
         let seen = survey(&present(name));
         assert_eq!(seen.images, [Some(format)], "{name}");
         assert_eq!(seen.mac_files, mac_files, "{name}: Macintosh side");
@@ -791,6 +791,12 @@ fn real_images_open_as_documented() {
             assert_eq!(seen.leaves, leaves, "{name}");
         }
     }
+
+    assert!(
+        surveyed > 0,
+        "no image under {}",
+        root.join("full").display()
+    );
 
     let Ok(synthetic) = std::fs::read_dir(root.join("synthetic")) else {
         return;

@@ -32,7 +32,8 @@ in section 10 are reproductions, not implementation.
   this document and the documents it names only**.
 - Real disc images are never committed. They, the sampled byte ranges,
   the purpose-built images and the scripts that made them are kept
-  outside the repository under `~/.cache/unretro-specimens/toast/`
+  outside the repository, in a working directory called `$T` below
+  that was removed once the work was done
   (`NOTES.md` there lists URLs, sizes and digests; `PROBES.tsv` has one
   line per sampled file).
 - No image was mounted or attached at any point. Purpose-built images
@@ -559,7 +560,8 @@ On purpose-built images (section 8.3):
 
 ### 8.1 Downloaded in full
 
-Paths are under `~/.cache/unretro-specimens/toast/full/`. All are from
+Paths are under `$T/full/` (section 1; no longer kept, except
+`WriterTools1-1.toast` in `corpus/toast` of the samples repository). All are from
 `https://archive.org/download/<item>/<file>`; item names and SHA-256
 digests are in `NOTES.md` there.
 
@@ -593,14 +595,15 @@ at sector 16 for the 2048-, 2352-, 2336- and 2056-byte framings; the
 volume recognition sequence and the UDF anchor at sector 256; a UDIF
 trailer; the length of the zero run at the end. The ranges, the
 measurements and the per-file table are under
-`~/.cache/unretro-specimens/toast/probes/` and in `PROBES.tsv`.
+`$T/probes/` and in `PROBES.tsv` (not kept).
 
 The sample is biased toward Macintosh software discs, where the search
 terms point. It says little about how common DVD-Video images are.
 
 ### 8.3 Purpose-built
 
-Under `~/.cache/unretro-specimens/toast/synthetic/`, with the recipes in
+Under `$T/synthetic/` (not kept; `testdata/toast/` holds their
+committed counterparts), with the recipes in
 `NOTES.md`: `hdiutil makehybrid` images for ISO only, UDF only, bridge,
 hybrid, hybrid with UDF, hybrid with files hidden from either side, and
 HFS Plus only; a classic HFS volume made with hfsutils; genisoimage
@@ -631,7 +634,7 @@ handling; nothing was taken from it.
 
 Each gap gives the reproduction that showed it with the release build
 (`target/release/unretro`, called `unretro` below), and under **Status**
-what was done. `$T` is `~/.cache/unretro-specimens/toast`. The fixtures of
+what was done. `$T` is the working directory of section 1. The fixtures of
 `testdata/toast/` and `tests/toast_fixtures.rs` hold every fixed gap in
 place; the same test checks `corpus/toast` of the samples repository
 (`full/` and `synthetic/`, laid out as under `$T`) when `UNRETRO_SAMPLES`

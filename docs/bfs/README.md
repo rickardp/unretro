@@ -58,6 +58,6 @@ Other documents in this directory add their own row here.
 | BeOS 5.0.3 Professional CD (`https://archive.org/details/beos-5.0.3-professional-gobe`), first sectors of tracks 2 and 3 only, together with its cue sheet and the cue sheets of four other BeOS x86 CDs in the same archive | Where BFS volumes sit on BeOS CDs; superblock position per platform. |
 | BeOS 1.1d7.1 for BeBox CD (`https://archive.org/details/be-os-1-1d-7-1`), first 16 KiB only | What a pre-BFS disc looks like (`bfs.md` section 12). |
 
-| BeOS Advanced Access Preview Release CD for PowerPC and a Haiku nightly image (hrev60410, x86_64), as held in the project's specimen cache outside the repository (their origins are recorded there) | Cross-check after writing: a 1997 big-endian volume and a volume written by Haiku itself (`bfs.md` section 1.1). |
+| BeOS Advanced Access Preview Release CD for PowerPC and a Haiku nightly image (hrev60410, x86_64), downloaded for the purpose and not kept (a cut-down copy of the first is in the `unretro-samples` repository, `data/beos/`) | Cross-check after writing: a 1997 big-endian volume and a volume written by Haiku itself (`bfs.md` section 1.1). |
 
 None of these images is in the repository.

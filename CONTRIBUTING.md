@@ -245,8 +245,9 @@ wrong against the test data, fix the specification first.
   - `corpus/toast/`: `full/<item>/<file>` (real images; top-level format, file counts
     and the ISO 9660 side of hybrids as `docs/toast/README.md` records them) and
     `synthetic/` (purpose-built images; a framed image must list what its cooked image
-    lists). Not in the samples yet.
-  - `corpus/rar/`: see the RAR notes above. Not in the samples yet.
+    lists). The samples hold one real image; an image that is absent is not checked.
+  - `corpus/rar/`: see the RAR notes above; `sets.tsv` lists the sets for the ignored
+    end-to-end drivers.
 - The single-feature runs (`--features std,next`, `std,beos`, `std,lisa`) compile each
   reader without the other families. Tests that reach a fixture through another layer
   are gated on that layer's feature (`common` for the gzip-packed BFS fixtures and the

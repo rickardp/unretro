@@ -1229,8 +1229,9 @@ Nothing in this section is to be imitated.
 
 ## 11. Real files measured
 
-None of these files is in the repository. They are kept, with their
-origins and digests, in the specimen cache outside it.
+None of these files is in the repository. A selection is in the
+`unretro-samples` repository (`data/lisa/`, `data/mac-classic/`), whose
+`SOURCES.md` records their origins; the rest were not kept.
 
 | Kind | Files | What was checked |
 |---|--:|---|

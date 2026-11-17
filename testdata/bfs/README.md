@@ -174,7 +174,7 @@ All 18 variants are refused by Haiku. Linux mounts 8 of them and GRUB lists 10, 
 
 ## Not covered
 
-- A big-endian volume. Nothing was byte-swapped to fake one. The real one is `BeOS_Advanced_Access.iso` in the specimen directory.
+- A big-endian volume. Nothing was byte-swapped to fake one. The real one is `BeOS_Advanced_Access.iso`, below.
 - A volume with a non-empty log. Killing `bfs_shell` in the middle of a session was tried; the image it left still had log start = end and a clean flag, with only the synced files present, so it adds nothing.
 - Hard links (BFS has none), special files, a directory B+tree with duplicate keys (directories cannot have them; only indices do), a B+tree deeper than 4 levels, a double-indirect file at block sizes other than 1024, a first-level double-indirect array with more than one run.
 - Volumes written by BeOS itself: i-node flag combinations, attribute layouts and root directories in group 8 differ from Haiku's. See the specimens.
