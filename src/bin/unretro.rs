@@ -6,6 +6,9 @@ use std::io::Write;
 use std::path::{Component, Path, PathBuf};
 use std::process::{Command, ExitCode, Stdio};
 
+#[path = "../fs_access.rs"]
+mod fs_access;
+
 use unretro::cli::{TreeOptions, print_tree_with_options};
 use unretro::{EntryType, VisitReport, parse_virtual_path, sanitize_path_component};
 
@@ -377,6 +380,12 @@ fn extract_files(
         .clone()
         .unwrap_or_else(|| ".".to_string());
     let output_root_path = PathBuf::from(&output_root);
+    let output_directory = if options.exec_command.is_none() {
+        fs::create_dir_all(&output_root_path)?;
+        Some(fs_access::ConfinedDir::open(&output_root_path)?)
+    } else {
+        None
+    };
 
     // Track written paths for uniqueness (not filesystem, just what we've written)
     let mut written_paths: HashSet<String> = HashSet::new();
@@ -391,6 +400,7 @@ fn extract_files(
             // fork to, so the fork becomes the target and its resources are
             // extracted.
             if target_is_root
+                && entry.is_root_resource_fork()
                 && (entry.container_format == Some(unretro::ContainerFormat::ResourceFork)
                     || root_has_empty_data_fork)
                 && entry.path.strip_suffix("/..namedfork/rsrc") == Some(full_virtual_path.as_str())
@@ -402,10 +412,8 @@ fn extract_files(
 
             let is_container = entry.container_format.is_some();
             let is_target = entry.path == full_virtual_path;
-            let below_target = entry
-                .path
-                .strip_prefix(&full_virtual_path)
-                .is_some_and(|rest| rest.starts_with('/'));
+            let relative_to_target = below_target_path(entry.path, &full_virtual_path);
+            let below_target = relative_to_target.is_some();
             // --exec gets the individual resources instead.
             let is_fork_file = options.exec_command.is_none()
                 && (is_target || below_target)
@@ -433,11 +441,7 @@ fn extract_files(
                     .unwrap_or(entry.path)
             } else {
                 // Case 1 or 2: strip the full virtual path prefix
-                entry
-                    .path
-                    .strip_prefix(&full_virtual_path)
-                    .unwrap_or(entry.path)
-                    .trim_start_matches('/')
+                relative_to_target.unwrap_or(entry.path)
             };
 
             // Skip if this is exactly the prefix (the container itself, not its contents)
@@ -544,7 +548,11 @@ fn extract_files(
                     }
 
                     // Try to write resource fork
-                    match attributes::write_resource_fork(&out_base_path, entry.data) {
+                    let base_file = output_directory
+                        .as_ref()
+                        .unwrap()
+                        .create(Path::new(&sanitized_base), false)?;
+                    match attributes::write_resource_fork_file(&base_file, entry.data) {
                         Ok(()) => {
                             if options.verbose {
                                 println!("{}/..namedfork/rsrc", out_base_path.display());
@@ -601,24 +609,17 @@ fn extract_files(
                 return Ok(VisitAction::Continue);
             }
 
-            // Create parent directories
-            if let Some(parent) = out_path.parent() {
-                if !parent.as_os_str().is_empty() {
-                    fs::create_dir_all(parent)?;
-                }
-            }
-
-            // Write file data
-            fs::write(&out_path, entry.data)?;
-
-            // Apply attribute preservation options
-            let out_path_ref = out_path.as_path();
+            let mut output_file = output_directory
+                .as_ref()
+                .unwrap()
+                .create(Path::new(&unique_path), true)?;
+            output_file.write_all(entry.data)?;
 
             // Preserve Unix permissions
             if options.preserve_permissions {
                 if let Some(metadata) = &entry.metadata {
                     if let Some(mode) = &metadata.mode {
-                        if let Err(e) = attributes::set_unix_permissions(out_path_ref, mode) {
+                        if let Err(e) = attributes::set_unix_permissions_file(&output_file, mode) {
                             eprintln!("Warning: {}: {}", out_path.display(), e);
                         }
                     }
@@ -632,9 +633,11 @@ fn extract_files(
                     if let (Some(type_code), Some(creator_code)) =
                         (metadata.type_code, metadata.creator_code)
                     {
-                        if let Err(e) =
-                            attributes::set_finder_info(out_path_ref, &type_code, &creator_code)
-                        {
+                        if let Err(e) = attributes::set_finder_info_file(
+                            &output_file,
+                            &type_code,
+                            &creator_code,
+                        ) {
                             eprintln!("Warning: {}: {}", out_path.display(), e);
                         }
                     }
@@ -700,6 +703,19 @@ fn strip_path_components(path: &str, n: usize) -> String {
     }
 
     parts[n..].join("/")
+}
+
+fn below_target_path<'a>(path: &'a str, target: &str) -> Option<&'a str> {
+    let rest = path.strip_prefix(target)?;
+    if rest.is_empty() {
+        return None;
+    }
+    if target.ends_with(['/', '\\']) || rest.starts_with(['/', '\\']) {
+        let relative = rest.trim_start_matches(['/', '\\']);
+        (!relative.is_empty()).then_some(relative)
+    } else {
+        None
+    }
 }
 
 fn normalize_output_relative_path(path: &str) -> Result<String, String> {
@@ -1189,7 +1205,9 @@ fn print_usage(program: &str) {
 
 #[cfg(test)]
 mod tests {
-    use super::{json_string, normalize_output_relative_path, shell_escape_single_quoted};
+    use super::{
+        below_target_path, json_string, normalize_output_relative_path, shell_escape_single_quoted,
+    };
 
     #[test]
     fn json_strings_keep_text_and_escape_only_what_json_requires() {
@@ -1333,6 +1351,18 @@ mod tests {
     // ========================================================================
     // Security: Extraction boundary verification (5d)
     // ========================================================================
+
+    #[test]
+    fn target_prefix_handles_native_separators_and_roots() {
+        assert_eq!(below_target_path("/dir/file", "/"), Some("dir/file"));
+        assert_eq!(
+            below_target_path("C:\\input\\file", "C:\\input"),
+            Some("file")
+        );
+        assert_eq!(below_target_path("C:\\file", "C:\\"), Some("file"));
+        assert_eq!(below_target_path("input/file", "input"), Some("file"));
+        assert_eq!(below_target_path("input-more/file", "input"), None);
+    }
 
     #[test]
     fn normalize_path_strips_current_dir_components() {

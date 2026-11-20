@@ -201,6 +201,7 @@ struct RarEntry {
 }
 
 pub struct RarContainer {
+    consumed_volumes: Vec<usize>,
     prefix: String,
     entries: Vec<RarEntry>,
     path_index: FastMap<String, usize>,
@@ -209,6 +210,10 @@ pub struct RarContainer {
 }
 
 impl RarContainer {
+    pub(crate) fn consumed_volumes(&self) -> &[usize] {
+        &self.consumed_volumes
+    }
+
     pub fn from_bytes(data: &[u8], prefix: String, depth: u32) -> Result<Self> {
         Self::from_bytes_with_volumes(data, prefix, depth, &|_| None)
     }
@@ -280,8 +285,8 @@ impl RarContainer {
                 _ => Err(Error::invalid_format("not a matching RAR archive")),
             };
             match probed {
-                Ok(probed) => last = probed,
-                Err(_) => {
+                Ok(probed) if probed.valid_continuation => last = probed,
+                _ => {
                     if !optional {
                         run.after.push(format!(
                             "volume {} of the set is not a matching RAR archive",
@@ -306,12 +311,21 @@ impl RarContainer {
         let mut volumes: Vec<&[u8]> = Vec::with_capacity(1 + later.len());
         volumes.push(data);
         volumes.extend(later.iter().map(Vec::as_slice));
+        let input_len = volumes
+            .iter()
+            .fold(0usize, |total, volume| total.saturating_add(volume.len()));
         let mut out = Output {
-            input_len: volumes.iter().map(|volume| volume.len() as u64).sum(),
+            input_len: input_len as u64,
+            remaining: crate::limits::OutputBudget::for_input(input_len, MAX_COMPRESSION_RATIO)
+                .remaining(),
+            // Fixed startup allowance plus work proportional to supplied bytes, bounded for large archives.
+            vm_fuel: (input_len as u64)
+                .saturating_mul(256)
+                .clamp(1 << 20, 64 << 20),
             ..Output::default()
         };
         let mut next = 0;
-        for (index, run) in runs.into_iter().enumerate() {
+        for run in runs {
             let Some(run_volumes) = volumes.get(next..next + run.count) else {
                 break;
             };
@@ -322,9 +336,9 @@ impl RarContainer {
                 .filter(|_| run.count == 1)
                 .unwrap_or(Parsed::None);
             match layout {
-                Layout::Old => read_old_run(&mut out, run_volumes, index > 0),
+                Layout::Old => read_old_run(&mut out, run_volumes, run.base),
                 Layout::Rar4 => read_rar4_run(&mut out, run_volumes, run.base, parsed),
-                Layout::Rar5 => read_rar5_run(&mut out, run_volumes, parsed),
+                Layout::Rar5 => read_rar5_run(&mut out, run_volumes, run.base, parsed),
             }
             for message in run.after {
                 out.skipped.note(message);
@@ -339,6 +353,7 @@ impl RarContainer {
 
         Ok(Self {
             prefix,
+            consumed_volumes: out.consumed_volumes,
             entries,
             path_index,
             skipped: out.skipped.into_message(),
@@ -415,6 +430,13 @@ fn parse_volume_name(name: &str) -> Option<VolumeName<'_>> {
     }
 }
 
+pub(crate) fn volume_position(name: &str) -> Option<usize> {
+    match parse_volume_name(name)? {
+        VolumeName::Old(_, _, index) => Some(index),
+        VolumeName::Part(_, digits, _) => digits.parse().ok(),
+    }
+}
+
 fn old_volume_name(stem: &str, like: &str, index: usize) -> Option<String> {
     let extension = match index.checked_sub(1) {
         None => "rar".to_string(),
@@ -432,14 +454,14 @@ fn old_volume_name(stem: &str, like: &str, index: usize) -> Option<String> {
     Some(format!("{stem}.{extension}"))
 }
 
-fn shifted_volume_name(name: &str, forward: bool) -> Option<String> {
+fn shifted_volume_name(name: &str, forward: bool, steps: usize) -> Option<String> {
     match parse_volume_name(name)? {
         VolumeName::Part(head, digits, tail) => {
             let number: usize = digits.parse().ok()?;
             let number = if forward {
-                number.checked_add(1)?
+                number.checked_add(steps)?
             } else {
-                number.checked_sub(1).filter(|&n| n > 0)?
+                number.checked_sub(steps).filter(|&n| n > 0)?
             };
             Some(format!(
                 "{head}{number:0width$}{tail}",
@@ -448,9 +470,9 @@ fn shifted_volume_name(name: &str, forward: bool) -> Option<String> {
         }
         VolumeName::Old(stem, extension, index) => {
             let index = if forward {
-                index + 1
+                index.checked_add(steps)?
             } else {
-                index.checked_sub(1)?
+                index.checked_sub(steps)?
             };
             old_volume_name(stem, extension, index)
         }
@@ -460,18 +482,17 @@ fn shifted_volume_name(name: &str, forward: bool) -> Option<String> {
 /// Name of the volume `steps` places after the file `name` in its set.
 #[must_use]
 pub fn volume_after(name: &str, steps: usize) -> Option<String> {
-    let mut name = name.to_string();
-    for _ in 0..steps {
-        name = shifted_volume_name(&name, true)?;
+    if steps == 0 {
+        return Some(name.to_string());
     }
-    Some(name)
+    shifted_volume_name(name, true, steps)
 }
 
 /// Name of the volume before the file `name` in its set, if it is not the
 /// first one.
 #[must_use]
 pub fn volume_before(name: &str) -> Option<String> {
-    shifted_volume_name(name, false)
+    shifted_volume_name(name, false, 1)
 }
 
 /// Names of the volumes through which a reader that starts earlier in the
@@ -579,6 +600,7 @@ enum Parsed {
 
 // One volume on its own: whether the set goes on after it.
 struct Probe {
+    valid_continuation: bool,
     next: Next,
     // A file that starts in this volume continues in the next.
     open: bool,
@@ -589,6 +611,7 @@ struct Probe {
 
 fn probe(layout: Layout, volume: &[u8]) -> Result<Probe> {
     let mut probe = Probe {
+        valid_continuation: true,
         next: Next::None,
         open: false,
         stop: false,
@@ -612,6 +635,8 @@ fn probe(layout: Layout, volume: &[u8]) -> Result<Probe> {
                         && matches!(finding.note, Note::CorruptHeader | Note::Truncated)
                 });
                 let info = archive.volumes.first();
+                probe.valid_continuation =
+                    info.is_some_and(|info| info.archive_flags & container4::ARCHIVE_VOLUME != 0);
                 if let Some(info) = info.filter(|info| {
                     !probe.stop && info.archive_flags & container4::ARCHIVE_VOLUME != 0
                 }) {
@@ -664,9 +689,24 @@ struct Output {
     // Bytes of all volumes, and bytes delivered as copies of other entries.
     input_len: u64,
     copied: u64,
+    remaining: u64,
+    ratio: Ratio,
+    vm_fuel: u64,
+    consumed_volumes: Vec<usize>,
 }
 
 impl Output {
+    fn check_remaining(&self, size: u64) -> core::result::Result<(), String> {
+        if size > self.remaining {
+            return Err("exceeds the remaining output budget for this archive".to_string());
+        }
+        Ok(())
+    }
+
+    fn record_volumes(&mut self, base: usize, count: usize) {
+        self.consumed_volumes.extend(base.max(1)..base + count);
+    }
+
     fn deliver(
         &mut self,
         name: &str,
@@ -675,6 +715,13 @@ impl Output {
     ) -> Option<usize> {
         match result {
             Ok(data) => {
+                let Some(remaining) = self.remaining.checked_sub(data.len() as u64) else {
+                    self.skipped.note(format!(
+                        "'{name}' exceeds the remaining output budget for this archive"
+                    ));
+                    return None;
+                };
+                self.remaining = remaining;
                 self.entries.push(RarEntry {
                     path: name.to_string(),
                     data,
@@ -959,7 +1006,9 @@ struct OldReader<'o> {
     orphaned: bool,
 }
 
-fn read_old_run(out: &mut Output, volumes: &[&[u8]], after_gap: bool) {
+fn read_old_run(out: &mut Output, volumes: &[&[u8]], base: usize) {
+    let after_gap = base != 0;
+    out.record_volumes(base, volumes.len());
     let mut reader = OldReader {
         out,
         pending: None,
@@ -1078,6 +1127,10 @@ impl OldReader<'_> {
         packed: Cow<'_, [u8]>,
     ) -> core::result::Result<Vec<u8>, String> {
         let size = member.unpacked_size;
+        if let Err(error) = self.out.check_remaining(size) {
+            self.chain_broken |= !member.stored;
+            return Err(error);
+        }
         if member.stored {
             // Stored files never touch a chain.
             if packed.len() as u64 != size {
@@ -1235,7 +1288,6 @@ struct Rar4Run<'a, 'v> {
     // By member: nothing can continue from the decoder state it left.
     unusable: Vec<bool>,
     last_decoded: Option<usize>,
-    ratio: Ratio,
 }
 
 fn read_rar4_run(out: &mut Output, volumes: &[&[u8]], base: usize, parsed: Parsed) {
@@ -1260,6 +1312,8 @@ fn read_rar4_run(out: &mut Output, volumes: &[&[u8]], base: usize, parsed: Parse
             }
         },
     };
+    out.record_volumes(base, archive.volumes.len());
+    out.ratio.start_chain();
     let mut run = Rar4Run {
         volumes,
         rar15: Rar15Decoder::new(),
@@ -1267,7 +1321,6 @@ fn read_rar4_run(out: &mut Output, volumes: &[&[u8]], base: usize, parsed: Parse
         rar29: None,
         unusable: vec![false; archive.members.len()],
         last_decoded: None,
-        ratio: Ratio::default(),
     };
     for (index, member) in archive.members.iter().enumerate() {
         run.member(out, index, member);
@@ -1334,10 +1387,13 @@ impl Rar4Run<'_, '_> {
                 return;
             }
             Content::Empty => Ok(Vec::new()),
-            Content::Stored => self.stored(member),
+            Content::Stored => out.check_remaining(size).and_then(|()| self.stored(member)),
             Content::Packed(kind) => {
                 self.unusable[index] = true;
-                match self.packed(index, member, kind) {
+                match out
+                    .check_remaining(size)
+                    .and_then(|()| self.packed(out, index, member, kind))
+                {
                     // An empty file whatever the decoder makes of its packed
                     // bytes (docs/rar/rar4-container.md section 15.2).
                     Err(_) if size == 0 => Ok(Vec::new()),
@@ -1410,6 +1466,7 @@ impl Rar4Run<'_, '_> {
 
     fn packed(
         &mut self,
+        out: &mut Output,
         index: usize,
         member: &container4::Member,
         kind: container4::DecoderKind,
@@ -1433,7 +1490,7 @@ impl Rar4Run<'_, '_> {
         check_size_limit(size)?;
         // The older decoders bound their output by their input themselves.
         if kind == DecoderKind::Rar29 {
-            self.ratio.check(!continues, member.packed_size, size)?;
+            out.ratio.check(!continues, member.packed_size, size)?;
         }
         let packed = rar4_bytes(member, self.volumes)?;
         let mut usable = true;
@@ -1457,7 +1514,13 @@ impl Rar4Run<'_, '_> {
             DecoderKind::Rar29 => {
                 let decoder = self.rar29.get_or_insert_with(rar29::Decoder::new);
                 let decoded = decoder
-                    .decode_member(&packed, size, continues, crate::MAX_DECOMPRESSED_SIZE)
+                    .decode_member_with_fuel(
+                        &packed,
+                        size,
+                        continues,
+                        out.remaining,
+                        &mut out.vm_fuel,
+                    )
                     .map_err(|err| reason(&err));
                 // A member without its end marker is delivered, but nothing
                 // can continue from it.
@@ -1497,22 +1560,22 @@ struct Rar5Run<'a, 'v> {
     // By member: its decoding failed, which ends its solid group.
     failed: Vec<bool>,
     last_decoded: Option<usize>,
-    ratio: Ratio,
 }
 
-fn read_rar5_run(out: &mut Output, volumes: &[&[u8]], parsed: Parsed) {
+fn read_rar5_run(out: &mut Output, volumes: &[&[u8]], base: usize, parsed: Parsed) {
     use container5::{Failure, Handling, Kind, StopReason};
 
     let archive = match parsed {
         Parsed::Rar5(archive) => archive,
         _ => container5::read_archive(volumes),
     };
+    out.record_volumes(base, archive.volumes_read);
+    out.ratio.start_chain();
     let mut run = Rar5Run {
         volumes,
         decoder: None,
         failed: vec![false; archive.members.len()],
         last_decoded: None,
-        ratio: Ratio::default(),
     };
     // By member: its entry, for the links to it.
     let mut delivered: Vec<Option<usize>> = vec![None; archive.members.len()];
@@ -1529,7 +1592,8 @@ fn read_rar5_run(out: &mut Output, volumes: &[&[u8]], parsed: Parsed) {
                     if target.len() > MAX_LINK_TARGET {
                         Err("is a symbolic link with an overlong target".to_string())
                     } else {
-                        Ok(target.clone())
+                        out.check_remaining(target.len() as u64)
+                            .map(|()| target.clone())
                     }
                 }
                 // Directories.
@@ -1569,20 +1633,19 @@ fn read_rar5_run(out: &mut Output, volumes: &[&[u8]], parsed: Parsed) {
                 Failure::Incomplete | Failure::Corrupt => "is corrupt",
             }
             .to_string()),
-            Handling::Stored | Handling::Empty => run.stored(member),
+            Handling::Stored | Handling::Empty => out
+                .check_remaining(member.packed_size)
+                .and_then(|()| run.stored(member)),
             Handling::Decode { previous, .. } => {
                 if let Some(failed) = run.failed.get_mut(index) {
                     *failed = true;
                 }
-                run.decode(index, member, previous)
+                run.decode(out, index, member, previous)
             }
             Handling::CopyOf(source) => {
                 let source = delivered.get(source).copied().flatten();
-                match source.and_then(|entry| out.entries.get(entry)) {
-                    Some(entry) => {
-                        let data = entry.data.clone();
-                        out.copy_budget(data.len() as u64).map(|()| data)
-                    }
+                match source {
+                    Some(entry) => out.copy_entry(entry),
                     None => Err("is a link to an entry that could not be read".to_string()),
                 }
             }
@@ -1622,6 +1685,17 @@ fn read_rar5_run(out: &mut Output, volumes: &[&[u8]], parsed: Parsed) {
 }
 
 impl Output {
+    fn copy_entry(&mut self, index: usize) -> core::result::Result<Vec<u8>, String> {
+        let size = self.entries[index].data.len();
+        self.check_remaining(size as u64)?;
+        self.copy_budget(size as u64)?;
+        let mut data = Vec::new();
+        data.try_reserve_exact(size)
+            .map_err(|_| "cannot allocate a copy of another entry".to_string())?;
+        data.extend_from_slice(&self.entries[index].data);
+        Ok(data)
+    }
+
     // Links to earlier files are delivered as copies; together they stay
     // within what the input could have unpacked to.
     fn copy_budget(&mut self, size: u64) -> core::result::Result<(), String> {
@@ -1674,6 +1748,7 @@ impl Rar5Run<'_, '_> {
 
     fn decode(
         &mut self,
+        out: &mut Output,
         index: usize,
         member: &container5::Member,
         previous: Option<usize>,
@@ -1687,10 +1762,14 @@ impl Rar5Run<'_, '_> {
         let fresh = previous.is_none();
         let limit = match member.unpacked_size {
             Some(size) => {
-                self.ratio.check(fresh, member.packed_size, size)?;
+                out.check_remaining(size)?;
+                out.ratio.check(fresh, member.packed_size, size)?;
                 crate::MAX_DECOMPRESSED_SIZE
             }
-            None => self.ratio.allowance(fresh, member.packed_size),
+            None => out
+                .ratio
+                .allowance(fresh, member.packed_size)
+                .min(out.remaining),
         };
         let packed = rar5_bytes(member, self.volumes)?;
         let params = rar5::MemberParams {
@@ -1720,7 +1799,7 @@ impl Rar5Run<'_, '_> {
                 ));
             }
             Some(_) => {}
-            None => self.ratio.unpacked = self.ratio.unpacked.saturating_add(len),
+            None => out.ratio.unpacked = out.ratio.unpacked.saturating_add(len),
         }
         verify_rar5(member, &data)?;
         Ok(data)
@@ -2082,6 +2161,7 @@ mod tests {
                 ),
             ];
             let set = open_set(&volumes);
+            assert_eq!(set.consumed_volumes(), &[1, 2]);
             assert_eq!(
                 listing(&set),
                 vec![
@@ -2092,6 +2172,67 @@ mod tests {
             );
             assert_eq!(set.skipped_entries(), None);
         }
+    }
+
+    #[test]
+    fn standalone_rar4_is_not_consumed_as_a_continuation() {
+        let first = rar4_volume(&[], true);
+        let standalone = rar4_archive(0, &[Rar4File::stored("independent", b"x")], None);
+        for offset in [1, 2] {
+            let set = RarContainer::from_bytes_with_volumes(&first, "t.rar".into(), 8, &|number| {
+                (number == offset).then(|| standalone.clone())
+            })
+            .unwrap();
+            assert!(set.consumed_volumes().is_empty());
+            assert!(set.entries.is_empty());
+        }
+    }
+
+    #[test]
+    fn ratio_exemption_is_shared_across_missing_volumes() {
+        let file = Rar4File {
+            size: 75_000,
+            ..Rar4File::packed("file", 29, &[0], &[])
+        };
+        let volume = rar4_archive(VOLUME, &[file], None);
+        let mut out = Output {
+            remaining: 200_000,
+            ratio: Ratio {
+                exempt: 100_000,
+                ..Ratio::default()
+            },
+            ..Output::default()
+        };
+        read_rar4_run(&mut out, &[&volume], 0, Parsed::None);
+        read_rar4_run(&mut out, &[&volume], 2, Parsed::None);
+        assert_eq!(out.ratio.exempt, 25_000);
+        assert!(
+            out.skipped
+                .into_message()
+                .unwrap()
+                .contains("compression ratio")
+        );
+    }
+
+    #[test]
+    fn retained_output_budget_spans_runs_and_copies() {
+        let data = rar5_volume(&[("file", b"data", b"data", false, false)], false);
+        let mut out = Output {
+            remaining: 6,
+            input_len: 100,
+            ..Output::default()
+        };
+        read_rar5_run(&mut out, &[&data], 0, Parsed::None);
+        assert_eq!(out.remaining, 2);
+        assert!(out.copy_entry(0).is_err());
+        read_rar5_run(&mut out, &[&data], 2, Parsed::None);
+        assert_eq!(out.entries.len(), 1);
+        assert!(
+            out.skipped
+                .into_message()
+                .unwrap()
+                .contains("remaining output budget")
+        );
     }
 
     #[test]

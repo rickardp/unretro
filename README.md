@@ -187,8 +187,9 @@ standalone AppleDouble file, or a bare resource-fork file. See
 - Traversal is visitor-based (`Loader::visit`, `Loader::visit_with_report`).
 - Nested containers are discovered and recursed into automatically up to `max_depth`, within a cumulative size budget per input ([docs/USAGE.md](docs/USAGE.md#max-recursion-depth)).
 - `visit_with_report` is best-effort: root-level failures are surfaced distinctly from recoverable nested diagnostics.
+- Python `Loader` and `walk` emit a `UserWarning` on the calling thread at exhaustion when traversal skipped damaged or unsupported files. Warning filters can turn incomplete results into errors.
+- The CLI writes files beneath the selected extraction directory.
 - Documentation in `docs/` is the source of truth for architecture and operational behavior.
-- This crate was initially created as a way to evaluate agentic coding stacks / methodologies.
 
 ## License
 

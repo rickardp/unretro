@@ -145,8 +145,14 @@ pub struct BorrowedEntryInfo {
 #[allow(unsafe_code)]
 unsafe impl Send for BorrowedEntryInfo {}
 
-/// Result type for entries sent through the channel.
-pub type EntryResult = Result<BorrowedEntryInfo, String>;
+/// Messages sent by the traversal worker.
+pub enum IteratorEvent {
+    Entry(BorrowedEntryInfo),
+    Warning(String),
+}
+
+/// Result sent by the traversal worker.
+pub type EntryResult = Result<IteratorEvent, String>;
 
 /// Tracks previous entry for release on next iteration.
 struct PrevEntry {
@@ -220,34 +226,38 @@ impl PyArchiveIterator {
         self.release_previous();
 
         // Release GIL while waiting for the next entry
-        let result = py.allow_threads(|| self.receiver.recv());
+        loop {
+            let result = py.allow_threads(|| self.receiver.recv());
+            match result {
+                Ok(Ok(IteratorEvent::Entry(info))) => {
+                    // Create shared data holder
+                    let shared_data = Arc::new(Mutex::new(SharedEntryData {
+                        data_ptr: info.data_ptr,
+                        data_len: info.data_len,
+                        owned_data: None,
+                        released: false,
+                    }));
 
-        match result {
-            Ok(Ok(info)) => {
-                // Create shared data holder
-                let shared_data = Arc::new(Mutex::new(SharedEntryData {
-                    data_ptr: info.data_ptr,
-                    data_len: info.data_len,
-                    owned_data: None,
-                    released: false,
-                }));
+                    // Store for release on next iteration
+                    self.prev_entry = Some(PrevEntry {
+                        data: Arc::clone(&shared_data),
+                        release_channel: info.release_channel,
+                    });
 
-                // Store for release on next iteration
-                self.prev_entry = Some(PrevEntry {
-                    data: Arc::clone(&shared_data),
-                    release_channel: info.release_channel,
-                });
-
-                // Create entry with shared data
-                Ok(Some(PyEntry::from_shared(
-                    info.path,
-                    info.container_path,
-                    shared_data,
-                    info.metadata.map(PyMetadata::from),
-                )))
+                    // Create entry with shared data
+                    return Ok(Some(PyEntry::from_shared(
+                        info.path,
+                        info.container_path,
+                        shared_data,
+                        info.metadata.map(PyMetadata::from),
+                    )));
+                }
+                Ok(Ok(IteratorEvent::Warning(message))) => {
+                    crate::functions::emit_python_warning(py, &message)?;
+                }
+                Ok(Err(e)) => return Err(PyRuntimeError::new_err(e)),
+                Err(_) => return Ok(None), // Channel closed, iteration done
             }
-            Ok(Err(e)) => Err(PyRuntimeError::new_err(e)),
-            Err(_) => Ok(None), // Channel closed, iteration done
         }
     }
 

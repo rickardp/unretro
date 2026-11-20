@@ -2385,6 +2385,84 @@ mod cli {
     }
 
     #[test]
+    fn named_fork_member_does_not_redirect_root_extraction() {
+        let fork = build_fork(&[(b"TEST", 1, b"resource")]);
+        let dir = TempDir::new("cli-named-member");
+        dir.write(
+            "input.zip",
+            &build_zip(&[("..namedfork/rsrc", &fork), ("important.txt", b"keep me")]),
+        );
+        let output = dir.0.join("out");
+        assert_ok(&unretro(&[
+            "-x",
+            "-f",
+            dir.0.join("input.zip").to_str().unwrap(),
+            "-C",
+            output.to_str().unwrap(),
+        ]));
+        assert_eq!(
+            std::fs::read(output.join("important.txt")).unwrap(),
+            b"keep me"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn extraction_cannot_follow_destination_symlinks_outside_root() {
+        for directory_link in [false, true] {
+            let dir = TempDir::new(if directory_link {
+                "cli-dir-escape"
+            } else {
+                "cli-file-escape"
+            });
+            let output = dir.0.join("out");
+            let outside = dir.0.join("outside");
+            std::fs::create_dir_all(&output).unwrap();
+            std::fs::create_dir_all(&outside).unwrap();
+            std::fs::write(outside.join("sentinel"), b"untouched").unwrap();
+            let name = if directory_link {
+                std::os::unix::fs::symlink(&outside, output.join("link")).unwrap();
+                "link/sentinel"
+            } else {
+                std::os::unix::fs::symlink(outside.join("sentinel"), output.join("sentinel"))
+                    .unwrap();
+                "sentinel"
+            };
+            dir.write("input.zip", &build_zip(&[(name, b"replacement")]));
+            let result = unretro(&[
+                "-x",
+                "-f",
+                dir.0.join("input.zip").to_str().unwrap(),
+                "-C",
+                output.to_str().unwrap(),
+            ]);
+            assert!(!result.status.success());
+            assert_eq!(
+                std::fs::read(outside.join("sentinel")).unwrap(),
+                b"untouched"
+            );
+        }
+    }
+
+    #[test]
+    fn directory_root_extracts_children() {
+        let dir = TempDir::new("cli-directory-root");
+        dir.write("input/sub/file.txt", b"content");
+        let output = dir.0.join("out");
+        assert_ok(&unretro(&[
+            "-x",
+            "-f",
+            dir.0.join("input").to_str().unwrap(),
+            "-C",
+            output.to_str().unwrap(),
+        ]));
+        assert_eq!(
+            std::fs::read(output.join("sub/file.txt")).unwrap(),
+            b"content"
+        );
+    }
+
+    #[test]
     fn test_cli_extracts_archive_with_bare_resource_fork() {
         let fork = build_fork(&[(b"CODE", 1, &[0x4E, 0x75])]);
         let dir = TempDir::new("cli-bare-fork");

@@ -23,33 +23,54 @@ const BUDGET_RATIO: u64 = 1024;
 
 #[must_use]
 pub fn is_stuffit_archive(data: &[u8]) -> bool {
-    sit::detect(data).is_some() && !is_opaque_installer(data)
+    match sit::detect(data) {
+        Some(sit::SitFormat::Classic) if data.get(..4) == Some(b"ST46") => {
+            !is_opaque_installer(data)
+        }
+        Some(_) => true,
+        None => false,
+    }
 }
 
-// Installer applications are classic archives whose forks all use method 14
-// in a framing the specification does not describe (containers.md 2.3 knows
-// only the raw RFC 1951 stream). Descending would deliver no contents, so
-// such a file is left to its caller as an ordinary file: true when every
-// fork with contents is an unencrypted method 14 fork and the first of them
-// does not decode.
+// The observed ST46 single-block frame starts with a little-endian block
+// count, packed size and unpacked size. Leave other layouts to the reader.
 fn is_opaque_installer(data: &[u8]) -> bool {
     let Ok(archive) = sit::parse(data) else {
         return false;
     };
+    if archive.incomplete {
+        return false;
+    }
     let mut forks = archive
         .entries
         .iter()
         .flat_map(|entry| [&entry.rsrc, &entry.data])
-        .filter(|fork| fork.unpacked_len != 0);
-    let Some(first) = forks.next() else {
-        return false;
-    };
-    let installer = |fork: &ForkInfo| fork.method == 14 && !fork.encrypted;
-    if !installer(first) || !forks.all(installer) {
-        return false;
-    }
-    let mut budget = OutputBudget::for_input(data.len(), BUDGET_RATIO);
-    sit::read_fork(data, first, &mut budget).is_err()
+        .filter(|fork| fork.unpacked_len != 0)
+        .peekable();
+    forks.peek().is_some()
+        && forks.all(|fork| {
+            if fork.method != 14 || fork.encrypted {
+                return false;
+            }
+            let Some(packed) = usize::try_from(fork.offset)
+                .ok()
+                .and_then(|start| data.get(start..))
+                .and_then(|rest| rest.get(..fork.packed_len as usize))
+            else {
+                return false;
+            };
+            let Some((header, payload)) = packed.split_first_chunk::<10>() else {
+                return false;
+            };
+            let [n0, n1, p0, p1, p2, p3, u0, u1, u2, u3] = *header;
+            // 01 begins a final stored DEFLATE block. If its length check passes
+            // the bytes may be raw DEFLATE even when the outer sizes match.
+            u16::from_le_bytes([n0, n1]) == 1
+                && u16::from_le_bytes([n1, p0]) != !u16::from_le_bytes([p1, p2])
+                && !payload.is_empty()
+                && u32::from_le_bytes([p0, p1, p2, p3]) as usize == payload.len()
+                && u32::from_le_bytes([u0, u1, u2, u3]) == fork.unpacked_len
+        })
 }
 
 struct StuffItEntry {
@@ -704,9 +725,11 @@ mod tests {
 
     #[test]
     fn installer_with_only_undecodable_method_14_is_not_descended() {
+        let mut frame = INSTALLER_FORK.to_vec();
+        frame.resize(10 + 0x2cf, 0);
         let installer = TestFork {
             method: 14,
-            packed: &INSTALLER_FORK,
+            packed: &frame,
             unpacked_len: 2670,
             checksum: 0x6358,
         };
@@ -737,6 +760,30 @@ mod tests {
             message.contains("unsupported method 14 variant"),
             "{message}"
         );
+
+        // The installer frame on the first fork does not hide an ordinary
+        // raw-DEFLATE fork after it, even when both use method 14.
+        let raw = TestFork {
+            method: 14,
+            packed: &[1, 1, 0, 254, 255, b'x'],
+            unpacked_len: 1,
+            checksum: crc16(b"x"),
+        };
+        let mut mixed = classic_archive(&[
+            classic_record(b"Icon", installer, NO_FORK),
+            classic_record(b"Text", NO_FORK, raw),
+        ]);
+        put(&mut mixed, 0, b"ST46");
+        assert!(is_stuffit_archive(&mixed));
+        assert_eq!(open(&mixed).entries.last().unwrap().data_fork, b"x");
+
+        let truncated = TestFork {
+            packed: &INSTALLER_FORK,
+            ..installer
+        };
+        let mut short = classic_archive(&[classic_record(b"Icon", truncated, NO_FORK)]);
+        put(&mut short, 0, b"ST46");
+        assert!(is_stuffit_archive(&short));
 
         // Archives without contents are not installers.
         let empty = classic_archive(&[classic_record(b"none", NO_FORK, NO_FORK)]);

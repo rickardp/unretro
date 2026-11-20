@@ -111,6 +111,65 @@ pub fn set_unix_permissions(_path: &Path, _mode_str: &str) -> AttrResult<()> {
     Ok(())
 }
 
+/// Apply safe Unix permissions to an already opened extraction target.
+#[doc(hidden)]
+pub fn set_unix_permissions_file(file: &std::fs::File, mode_str: &str) -> AttrResult<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = parse_mode_string(mode_str).ok_or_else(|| {
+            AttrError::PermissionDenied(format!("invalid mode string: {mode_str}"))
+        })?;
+        file.set_permissions(std::fs::Permissions::from_mode(mode & 0o777))?;
+    }
+    #[cfg(not(unix))]
+    let _ = (file, mode_str);
+    Ok(())
+}
+
+/// Write a native resource fork through an already opened extraction target.
+#[doc(hidden)]
+pub fn write_resource_fork_file(file: &std::fs::File, data: &[u8]) -> AttrResult<()> {
+    #[cfg(target_os = "macos")]
+    {
+        use xattr::FileExt;
+        file.set_xattr("com.apple.ResourceFork", data)?;
+        Ok(())
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = (file, data);
+        Err(AttrError::ResourceForkNotSupported(
+            "resource forks are only supported on macOS".into(),
+        ))
+    }
+}
+
+/// Set Finder codes through an already opened extraction target.
+#[doc(hidden)]
+pub fn set_finder_info_file(
+    file: &std::fs::File,
+    type_code: &[u8; 4],
+    creator_code: &[u8; 4],
+) -> AttrResult<()> {
+    #[cfg(target_os = "macos")]
+    {
+        use xattr::FileExt;
+        let mut info = [0u8; 32];
+        info[..4].copy_from_slice(type_code);
+        info[4..8].copy_from_slice(creator_code);
+        file.set_xattr("com.apple.FinderInfo", &info)?;
+        Ok(())
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = (file, type_code, creator_code);
+        Err(AttrError::ExtendedAttributeError(
+            "Finder info is only supported on macOS".into(),
+        ))
+    }
+}
+
 // ============================================================================
 // macOS-specific attribute functions
 // ============================================================================

@@ -348,9 +348,41 @@ impl Bounds {
     }
 }
 
+// Contexts are selected by position and the previous byte. A short stream may
+// use only one of the 4096 contexts its properties allow.
+#[derive(Default)]
+struct Literals {
+    slots: Vec<u16>,
+    tables: Vec<[u16; LITERAL_PROBS]>,
+}
+
+impl Literals {
+    fn clear(&mut self) {
+        self.slots.clear();
+        self.tables.clear();
+    }
+
+    #[inline]
+    fn context(&mut self, index: usize) -> Result<&mut [u16; LITERAL_PROBS]> {
+        if index >= self.slots.len() {
+            self.slots
+                .try_reserve(index + 1 - self.slots.len())
+                .map_err(|_| out_of_memory())?;
+            self.slots.resize(index + 1, u16::MAX);
+        }
+        let slot = &mut self.slots[index];
+        if *slot == u16::MAX {
+            self.tables.try_reserve(1).map_err(|_| out_of_memory())?;
+            *slot = self.tables.len() as u16;
+            self.tables.push([PROB_INIT; LITERAL_PROBS]);
+        }
+        Ok(&mut self.tables[usize::from(*slot)])
+    }
+}
+
 struct Decoder {
     model: Model,
-    literal: Vec<u16>,
+    literal: Literals,
     lc: u32,
     lp_mask: usize,
     pb_mask: usize,
@@ -360,7 +392,7 @@ impl Decoder {
     fn new() -> Self {
         Self {
             model: Model::new(),
-            literal: Vec::new(),
+            literal: Literals::default(),
             lc: 0,
             lp_mask: 0,
             pb_mask: 0,
@@ -372,12 +404,7 @@ impl Decoder {
         if props.lc > 8 || props.lp > 4 || props.pb > 4 {
             return Err(malformed("lzma: properties are out of range"));
         }
-        let tables = LITERAL_PROBS << (props.lc + props.lp);
         self.literal.clear();
-        self.literal
-            .try_reserve_exact(tables)
-            .map_err(|_| out_of_memory())?;
-        self.literal.resize(tables, PROB_INIT);
         self.lc = u32::from(props.lc);
         self.lp_mask = (1 << props.lp) - 1;
         self.pb_mask = (1 << props.pb) - 1;
@@ -387,7 +414,7 @@ impl Decoder {
 
     fn reset_state(&mut self) {
         self.model = Model::new();
-        self.literal.fill(PROB_INIT);
+        self.literal.clear();
     }
 
     // Decodes symbols until the output reaches `bounds.stop` or an end marker
@@ -402,7 +429,7 @@ impl Decoder {
         let mut local = coder.clone();
         let rc = &mut local;
         let (lc, lp_mask, pb_mask) = (self.lc, self.lp_mask, self.pb_mask);
-        let literal = self.literal.as_mut_slice();
+        let literal = &mut self.literal;
         let Bounds {
             dict_start,
             dict_size,
@@ -450,11 +477,9 @@ impl Decoder {
                     usize::from(out[end - 1])
                 };
                 let table = ((pos & lp_mask) << lc) | (previous >> (8 - lc));
-                let Some(probs) = literal
-                    .get_mut(table * LITERAL_PROBS..)
-                    .and_then(|rest| rest.first_chunk_mut::<LITERAL_PROBS>())
-                else {
-                    break Err(malformed("lzma: literal context is out of range"));
+                let probs = match literal.context(table) {
+                    Ok(probs) => probs,
+                    Err(err) => break Err(err),
                 };
 
                 let mut symbol = 1;
@@ -644,9 +669,9 @@ pub(crate) fn lzma_decode(
         None => limit,
     };
 
+    let mut rc = RangeDecoder::new(input)?;
     let mut decoder = Decoder::new();
     decoder.configure(props)?;
-    let mut rc = RangeDecoder::new(input)?;
 
     let mut out = Vec::new();
     out.try_reserve(prealloc_hint(known_size.unwrap_or(size_hint)).min(limit))
@@ -947,6 +972,25 @@ mod tests {
             chunk.remove(5);
         }
         chunk
+    }
+
+    #[test]
+    fn literal_models_are_created_only_for_used_contexts() {
+        let mut decoder = Decoder::new();
+        decoder
+            .configure(LzmaProps {
+                lc: 8,
+                lp: 4,
+                pb: 0,
+            })
+            .unwrap();
+        assert_eq!(decoder.literal.tables.capacity(), 0);
+        decoder.literal.context(4095).unwrap()[5] = 42;
+        assert_eq!(decoder.literal.context(4095).unwrap()[5], 42);
+        assert_eq!(decoder.literal.context(0).unwrap()[5], PROB_INIT);
+        assert_eq!(decoder.literal.tables.len(), 2);
+        decoder.reset_state();
+        assert_eq!(decoder.literal.context(4095).unwrap()[5], PROB_INIT);
     }
 
     #[test]

@@ -14,6 +14,8 @@ use core::fmt;
 mod compat;
 mod error;
 mod format;
+#[cfg(feature = "std")]
+mod fs_access;
 mod limits;
 mod loader;
 mod metadata;
@@ -162,6 +164,9 @@ pub struct Entry<'a> {
     /// This enables composite file loading where one file needs to reference
     /// another file in the same container (e.g., SONG resources referencing MIDI).
     get_file_fn: Option<GetFileFn<'a>>,
+    root_resource_fork: bool,
+    #[cfg(all(feature = "std", feature = "dos"))]
+    cue_directory: Option<&'a fs_access::ConfinedDir>,
 
     /// The detected container format, if this entry is a recognized container.
     ///
@@ -194,6 +199,9 @@ impl<'a> Entry<'a> {
             data,
             metadata: None,
             get_file_fn: None,
+            root_resource_fork: false,
+            #[cfg(all(feature = "std", feature = "dos"))]
+            cue_directory: None,
             container_format: None,
         }
     }
@@ -203,6 +211,12 @@ impl<'a> Entry<'a> {
     pub fn with_metadata(mut self, metadata: &'a Metadata) -> Self {
         self.metadata = Some(metadata);
         self
+    }
+
+    /// Whether this entry is the resource fork of the traversal's root file.
+    #[must_use]
+    pub const fn is_root_resource_fork(&self) -> bool {
+        self.root_resource_fork
     }
 
     /// Set the function for looking up sibling files in the container.
@@ -353,6 +367,22 @@ pub(crate) trait Container: Send + Sync {
         None
     }
 
+    #[cfg(feature = "dos")]
+    fn consumed_siblings(&self) -> &[compat::String] {
+        &[]
+    }
+
+    #[cfg(feature = "dos")]
+    fn sibling_key(&self, path: &str) -> compat::String {
+        path.to_lowercase()
+    }
+
+    #[cfg(feature = "dos")]
+    fn replay_matches(&self, path: &str, data: &[u8]) -> bool {
+        self.get_file(path)
+            .is_some_and(|stored| core::ptr::eq(stored, data))
+    }
+
     /// Get information about this container.
     fn info(&self) -> ContainerInfo;
 
@@ -384,6 +414,20 @@ pub(crate) trait Container: Send + Sync {
     #[cfg(any(feature = "macintosh", feature = "dos"))]
     fn read_file(&self, path: &str) -> Option<compat::Cow<'_, [u8]>> {
         self.get_file(path).map(compat::Cow::Borrowed)
+    }
+
+    #[cfg(feature = "dos")]
+    fn read_cue_file(&self, sheet: &str, name: &str, limit: u64) -> Option<compat::Cow<'_, [u8]>> {
+        let directory = sheet
+            .rsplit_once('/')
+            .map_or("", |(directory, _)| directory);
+        let path = if directory.is_empty() {
+            compat::String::from(name)
+        } else {
+            compat::format!("{directory}/{name}")
+        };
+        let bytes = self.get_file(&path)?;
+        (bytes.len() as u64 <= limit).then_some(compat::Cow::Borrowed(bytes))
     }
 
     /// Whether the container itself stores a valid resource fork for the file

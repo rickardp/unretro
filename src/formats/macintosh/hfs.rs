@@ -301,7 +301,7 @@ const CD_PROBE_SECTORS: usize = 129 * 4096 / CD_USER_DATA_SIZE;
 // `is_hfs_image` for the user data of a raw CD image, reading only the sectors
 // that decide the answer instead of cooking the whole image.
 fn raw_cd_has_volume<'a>(sector_count: usize, user_data: impl Fn(usize) -> &'a [u8]) -> bool {
-    let mut head = Vec::new();
+    let mut head = Vec::with_capacity(sector_count.min(CD_PROBE_SECTORS) * CD_USER_DATA_SIZE);
     for sector in 0..sector_count.min(CD_PROBE_SECTORS) {
         head.extend_from_slice(user_data(sector));
     }
@@ -329,6 +329,10 @@ fn raw_cd_has_volume<'a>(sector_count: usize, user_data: impl Fn(usize) -> &'a [
         (byte(at.saturating_add(2)), byte(at.saturating_add(3))),
         (Some(c), Some(d)) if hfsplus::is_header_magic([hi, lo, c, d])
     )
+}
+
+pub(crate) fn cd_has_volume(cd: RawCd<'_>) -> bool {
+    raw_cd_has_volume(cd.sector_count(), |sector| cd.user_data(sector))
 }
 
 // Cooked image, with `backed` (see `ForkBudget`) mapped onto it. Sectors
@@ -1741,6 +1745,71 @@ impl<'a> LocatedVolume<'a> {
     }
 }
 
+// Cache incomplete and cyclic parent chains too: every directory is walked once.
+#[derive(Clone)]
+enum ClassicPath {
+    Pending,
+    Ready(String),
+    TooLong,
+}
+
+struct ClassicPaths {
+    folders: FastMap<u32, ClassicPath>,
+    budget: OutputBudget,
+}
+
+impl ClassicPaths {
+    fn join(&mut self, parent: &str, name: &str) -> ClassicPath {
+        let len = parent.len() + usize::from(!parent.is_empty()) + name.len();
+        if self.budget.charge(len, "HFS path").is_err() {
+            return ClassicPath::TooLong;
+        }
+        ClassicPath::Ready(if parent.is_empty() {
+            name.into()
+        } else {
+            format!("{parent}:{name}")
+        })
+    }
+
+    fn file(
+        &mut self,
+        file: &HfsFileEntry,
+        directories: &FastMap<u32, HfsDirEntry>,
+    ) -> Option<String> {
+        let mut current = file.parent_id;
+        let mut chain = Vec::new();
+        let mut path = loop {
+            if current <= 2 {
+                break ClassicPath::Ready(String::new());
+            }
+            match self.folders.get(&current) {
+                Some(ClassicPath::Pending) => break ClassicPath::Ready(String::new()),
+                Some(path) => break path.clone(),
+                None => {}
+            }
+            let Some(dir) = directories.get(&current) else {
+                break ClassicPath::Ready(String::new());
+            };
+            self.folders.insert(current, ClassicPath::Pending);
+            chain.push((current, dir));
+            current = dir.parent_id;
+        };
+        for (id, dir) in chain.into_iter().rev() {
+            if let ClassicPath::Ready(parent) = &path {
+                path = self.join(parent, &dir.name);
+            }
+            self.folders.insert(id, path.clone());
+        }
+        let ClassicPath::Ready(parent) = path else {
+            return None;
+        };
+        match self.join(&parent, &file.name) {
+            ClassicPath::Ready(path) => Some(path),
+            _ => None,
+        }
+    }
+}
+
 struct HfsVolume<'a> {
     // The volume is `data[start..]`.
     data: Cow<'a, [u8]>,
@@ -2111,28 +2180,6 @@ impl<'a> HfsVolume<'a> {
         }
     }
 
-    fn build_full_path(&self, file: &HfsFileEntry) -> String {
-        let mut components = vec![file.name.clone()];
-        let mut current_parent = file.parent_id;
-
-        // HFS root directory CNID is 2, root parent is 1. A path cannot be
-        // deeper than the directory count; more steps mean a parent cycle.
-        let mut remaining_steps = self.directories.len();
-        while current_parent > 2 && remaining_steps > 0 {
-            remaining_steps -= 1;
-            if let Some(dir) = self.directories.get(&current_parent) {
-                components.push(dir.name.clone());
-                current_parent = dir.parent_id;
-            } else {
-                break;
-            }
-        }
-
-        // Reverse to get path from root to file
-        components.reverse();
-        components.join(":")
-    }
-
     fn read_data_fork(&mut self, file: &HfsFileEntry) -> Result<Vec<u8>> {
         self.read_file_fork(
             file.file_id,
@@ -2321,6 +2368,7 @@ fn plain_volume_range(data: &[u8]) -> Range<usize> {
 
 struct MfsVolume {
     files: Vec<MfsFileEntry>,
+    skipped: usize,
 }
 
 impl MfsVolume {
@@ -2354,6 +2402,7 @@ impl MfsVolume {
         let mut files = Vec::new();
         let mut offset = 0;
 
+        let mut skipped = 0;
         // MFS directory record format (per Apple's MFSCore.c):
         // Offset  Size  Field
         //   0      1    attributes (0x80 = allocated, 0x01 = locked)
@@ -2450,49 +2499,34 @@ impl MfsVolume {
             let alloc_start = mdb.allocation_blocks_start_block as u64 * 512;
             let alloc_size = mdb.allocation_block_size as u64;
 
-            let data_fork = if data_first_block != 0 && data_length > 0 {
+            let mut read = |first, size| {
                 Self::read_fork(
                     mfs_data,
                     mdb_and_vabm,
-                    data_first_block,
-                    data_length,
-                    alloc_start,
-                    alloc_size,
-                    mdb.allocation_block_count,
+                    first,
+                    size,
+                    (alloc_start, alloc_size, mdb.allocation_block_count),
+                    &mut budget,
                 )
-            } else {
-                Vec::new()
             };
-
-            let resource_fork = if rsrc_first_block != 0 && rsrc_length > 0 {
-                Self::read_fork(
-                    mfs_data,
-                    mdb_and_vabm,
-                    rsrc_first_block,
-                    rsrc_length,
-                    alloc_start,
-                    alloc_size,
-                    mdb.allocation_block_count,
-                )
-            } else {
-                Vec::new()
-            };
-            budget.charge(data_fork.len(), "MFS")?;
-            budget.charge(resource_fork.len(), "MFS")?;
-
-            files.push(MfsFileEntry {
-                name,
-                file_type,
-                creator,
-                modified: u32::from_be_bytes([
-                    dir_data[offset + 46],
-                    dir_data[offset + 47],
-                    dir_data[offset + 48],
-                    dir_data[offset + 49],
-                ]),
-                data_fork,
-                resource_fork,
-            });
+            match read(data_first_block, data_length).and_then(|data| {
+                read(rsrc_first_block, rsrc_length).map(|resource| (data, resource))
+            }) {
+                Ok((data_fork, resource_fork)) => files.push(MfsFileEntry {
+                    name,
+                    file_type,
+                    creator,
+                    modified: u32::from_be_bytes([
+                        dir_data[offset + 46],
+                        dir_data[offset + 47],
+                        dir_data[offset + 48],
+                        dir_data[offset + 49],
+                    ]),
+                    data_fork,
+                    resource_fork,
+                }),
+                Err(_) => skipped += 1,
+            }
 
             // Calculate record size and advance to next record
             // Records are padded to even boundaries
@@ -2505,7 +2539,7 @@ impl MfsVolume {
             offset += padded_size;
         }
 
-        Ok(Self { files })
+        Ok(Self { files, skipped })
     }
 
     fn read_fork(
@@ -2513,10 +2547,10 @@ impl MfsVolume {
         mdb_and_vabm: &[u8],
         first_block: u16,
         length: u32,
-        alloc_start: u64,
-        alloc_size: u64,
-        alloc_count: u16,
-    ) -> Vec<u8> {
+        allocation: (u64, u64, u16),
+        budget: &mut OutputBudget,
+    ) -> Result<Vec<u8>> {
+        let (alloc_start, alloc_size, alloc_count) = allocation;
         // Constants from Apple's MFSCore.c
         const MFS_FIRST_ALLOCATION_BLOCK: u16 = 2;
         const MFS_LAST_ALLOCATION_BLOCK: u16 = 1;
@@ -2524,7 +2558,7 @@ impl MfsVolume {
         // A fork cannot be longer than the volume holding it; clamping also
         // bounds the output when the allocation chain loops.
         let length = (length as usize).min(volume_data.len());
-        let mut result = Vec::with_capacity(crate::limits::prealloc_hint(length as u64));
+        let mut blocks = Vec::new();
         let mut remaining = length;
         let mut current_block = first_block;
         // A chain visits each allocation block at most once.
@@ -2551,7 +2585,8 @@ impl MfsVolume {
             else {
                 break;
             };
-            result.extend_from_slice(block);
+            budget.charge(block.len(), "MFS")?;
+            blocks.push(block);
             remaining -= read_size;
 
             // Get next block from VABM (12-bit packed entries)
@@ -2589,9 +2624,15 @@ impl MfsVolume {
             current_block = next_block;
         }
 
-        // Truncate to exact length
-        result.truncate(length);
+        // Only reserve the validated, budgeted bytes backed by the chain.
+        let mut result = Vec::new();
         result
+            .try_reserve_exact(length - remaining)
+            .map_err(|_| Error::decompression("MFS: cannot allocate fork data"))?;
+        for block in blocks {
+            result.extend_from_slice(block);
+        }
+        Ok(result)
     }
 }
 
@@ -2726,7 +2767,12 @@ impl HfsContainer {
                     prefix,
                     entries,
                     link_targets: Vec::new(),
-                    skipped: None,
+                    skipped: (mfs_volume.skipped > 0).then(|| {
+                        format!(
+                            "MFS: {} file(s) exceed the fork allocation budget",
+                            mfs_volume.skipped
+                        )
+                    }),
                     _depth: depth,
                 }));
             }
@@ -2784,11 +2830,22 @@ impl HfsContainer {
         // Extract all file entries
         let files = core::mem::take(&mut volume.files);
         let mut entries = Vec::new();
+        let mut paths = ClassicPaths {
+            folders: FastMap::new(),
+            budget: OutputBudget::for_input(ranges_len(&volume.budget.backed), 2),
+        };
+        let mut skipped_paths = 0;
         for file in &files {
+            let Some(full_path) = paths.file(file, &volume.directories) else {
+                skipped_paths += 1;
+                continue;
+            };
+            if paths.budget.charge(prefix.len() + 1, "HFS path").is_err() {
+                skipped_paths += 1;
+                continue;
+            }
             let data = volume.read_data_fork(file)?;
             let resource_fork = volume.read_resource_fork(file)?;
-            // Build full path by walking up directory tree
-            let full_path = volume.build_full_path(file);
             entries.push(HfsEntry {
                 path: format!("{}/{}", prefix, sanitize_hfs_path(&full_path)),
                 data,
@@ -2804,7 +2861,11 @@ impl HfsContainer {
             prefix,
             entries,
             link_targets: Vec::new(),
-            skipped: None,
+            skipped: (skipped_paths > 0).then(|| {
+                format!(
+                    "HFS: {skipped_paths} file(s) exceed the path length or cumulative path budget"
+                )
+            }),
             _depth: depth,
         }))
     }
@@ -2994,7 +3055,9 @@ mod tests {
         // of `mfs_aliased_forks_are_charged_to_volume_budget` stay refused.
         let block = 900 * 1024;
         let aliased = mfs_image(block, 1024 * 1024, 10, block);
-        assert!(parse_fails(&diskcopy_image(&aliased, 20, 0)));
+        let disk = MfsVolume::parse(&diskcopy_image(&aliased, 20, 0)).unwrap();
+        assert!(disk.skipped > 0);
+        assert!(disk.files.len() < 10);
     }
 
     #[test]
@@ -3441,7 +3504,15 @@ mod tests {
     #[test]
     fn mfs_read_fork_follows_allocation_chain() {
         let (volume, vabm) = mfs_chain();
-        let fork = MfsVolume::read_fork(&volume, &vabm, 2, 1500, 0, 512, 4);
+        let fork = MfsVolume::read_fork(
+            &volume,
+            &vabm,
+            2,
+            1500,
+            (0, 512, 4),
+            &mut OutputBudget::for_input(volume.len(), 2),
+        )
+        .unwrap();
         assert_eq!(fork.len(), 1500);
         assert_eq!(fork, &volume[..1500]);
     }
@@ -3449,7 +3520,15 @@ mod tests {
     #[test]
     fn mfs_read_fork_huge_declared_length_does_not_drive_allocation() {
         let (volume, vabm) = mfs_chain();
-        let fork = MfsVolume::read_fork(&volume, &vabm, 2, u32::MAX, 0, 512, 4);
+        let fork = MfsVolume::read_fork(
+            &volume,
+            &vabm,
+            2,
+            u32::MAX,
+            (0, 512, 4),
+            &mut OutputBudget::for_input(volume.len(), 2),
+        )
+        .unwrap();
         assert_eq!(fork, volume);
         assert!(fork.capacity() <= volume.len().max(crate::limits::PREALLOC_LIMIT));
     }
@@ -3459,7 +3538,15 @@ mod tests {
         let (volume, mut vabm) = mfs_chain();
         // Point block 3 back at block 2.
         vabm[64..67].copy_from_slice(&[0x00, 0x30, 0x02]);
-        let fork = MfsVolume::read_fork(&volume, &vabm, 2, u32::MAX, 0, 512, 4);
+        let fork = MfsVolume::read_fork(
+            &volume,
+            &vabm,
+            2,
+            u32::MAX,
+            (0, 512, 4),
+            &mut OutputBudget::for_input(volume.len(), 2),
+        )
+        .unwrap();
         assert!(fork.len() <= volume.len());
     }
 
@@ -3515,6 +3602,56 @@ mod tests {
     }
 
     #[test]
+    fn classic_hfs_long_paths_fit_the_aggregate_budget() {
+        let mut paths = ClassicPaths {
+            folders: FastMap::new(),
+            budget: OutputBudget::for_input(4096, 2),
+        };
+        let mut parent = String::new();
+        for _ in 0..34 {
+            let ClassicPath::Ready(joined) = paths.join(&parent, "abcdefghijklmnopqrstuvwxyz12345")
+            else {
+                panic!("valid path rejected");
+            };
+            parent = joined;
+        }
+        assert!(parent.len() > 1024);
+        assert!(matches!(paths.join(&parent, "leaf"), ClassicPath::Ready(_)));
+    }
+
+    #[test]
+    fn classic_hfs_folder_paths_are_cached_and_charged() {
+        let mut file = catalog_file_record("leaf", 21, 0, 0);
+        file[2..6].copy_from_slice(&18u32.to_be_bytes());
+        let (image, _) = crafted_volume(
+            &[],
+            &[
+                catalog_dir_record("parent", 2, 17),
+                catalog_dir_record("sub", 17, 18),
+                file,
+            ],
+            0,
+        );
+        let volume = HfsVolume::parse(LocatedVolume::find(&image, None).unwrap()).unwrap();
+        let mut paths = ClassicPaths {
+            folders: FastMap::new(),
+            budget: OutputBudget::for_input(image.len(), 2),
+        };
+        let file = &volume.files[0];
+        let name = "parent:sub:leaf";
+        assert_eq!(paths.file(file, &volume.directories).as_deref(), Some(name));
+        assert_eq!(paths.folders.len(), 2);
+        let left = paths.budget.remaining();
+        assert_eq!(paths.file(file, &volume.directories).as_deref(), Some(name));
+        assert_eq!(left - paths.budget.remaining(), name.len() as u64);
+        paths
+            .budget
+            .charge(paths.budget.remaining() as usize - 1, "test")
+            .unwrap();
+        assert!(paths.file(file, &volume.directories).is_none());
+    }
+
+    #[test]
     fn directory_parent_cycle_terminates() {
         // Directory 16 is its own parent; the file lives in it.
         let (_, data_block) = crafted_volume(&[], &[], 1);
@@ -3557,6 +3694,18 @@ mod tests {
     }
 
     #[test]
+    fn unreadable_mfs_forks_retain_no_declared_capacity() {
+        let image = mfs_image(1 << 20, 8 * 512, 12, u32::MAX);
+        let disk = HfsContainer::from_bytes(&image, "v".into(), 8).unwrap();
+        assert_eq!(disk.entries.len(), 12);
+        assert!(
+            disk.entries
+                .iter()
+                .all(|entry| entry.data.capacity() == 0 && entry.resource_fork.capacity() == 0)
+        );
+    }
+
+    #[test]
     fn mfs_zero_allocation_block_size_is_rejected() {
         let valid = HfsContainer::from_bytes(&mfs_image(512, 8 * 512, 1, 100), "v".into(), 8);
         assert_eq!(valid.unwrap().entries[0].data.len(), 100);
@@ -3567,7 +3716,15 @@ mod tests {
     fn mfs_read_fork_zero_block_size_chain_terminates() {
         let (volume, mut vabm) = mfs_chain();
         vabm[64..66].copy_from_slice(&[0x00, 0x20]);
-        let fork = MfsVolume::read_fork(&volume, &vabm, 2, 100, 0, 0, 4);
+        let fork = MfsVolume::read_fork(
+            &volume,
+            &vabm,
+            2,
+            100,
+            (0, 0, 4),
+            &mut OutputBudget::for_input(volume.len(), 2),
+        )
+        .unwrap();
         assert!(fork.is_empty());
     }
 
@@ -3584,7 +3741,11 @@ mod tests {
     fn mfs_aliased_forks_are_charged_to_volume_budget() {
         // 10 files x 2 forks all reading the same 900 KiB allocation block.
         let block = 900 * 1024;
-        assert!(parse_fails(&mfs_image(block, 1024 * 1024, 10, block)));
+        let disk =
+            HfsContainer::from_bytes(&mfs_image(block, 1024 * 1024, 10, block), "v".into(), 8)
+                .unwrap();
+        assert!(disk.skipped_entries().is_some());
+        assert!(disk.entries.len() < 10);
         // A single file stays within budget.
         assert!(!parse_fails(&mfs_image(block, 1024 * 1024, 1, block)));
     }

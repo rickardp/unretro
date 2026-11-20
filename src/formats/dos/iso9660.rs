@@ -413,6 +413,9 @@ fn is_joliet_descriptor(descriptor: &[u8]) -> bool {
 }
 
 struct Volume<'a> {
+    // Shared by name selection and every directory walk of this volume.
+    continuation_bytes: core::cell::Cell<u64>,
+    lost_continuation: core::cell::Cell<bool>,
     image: Image<'a>,
     layout: Layout,
     block_size: u64,
@@ -500,6 +503,10 @@ impl<'a> Volume<'a> {
 
         Some(Self {
             image,
+            continuation_bytes: core::cell::Cell::new(
+                OutputBudget::for_input(image.len() as usize, 2).remaining(),
+            ),
+            lost_continuation: core::cell::Cell::new(false),
             layout,
             block_size: primary.block_size,
             root: primary.root,
@@ -644,10 +651,12 @@ impl<'a> Volume<'a> {
                 break;
             };
             pos += len;
-            if !record.is_self_or_parent()
-                && !self.rock_ridge(record.system_use, skip).name.is_empty()
-            {
-                return true;
+            if !record.is_self_or_parent() {
+                match self.rock_ridge(record.system_use, skip) {
+                    Some(info) if !info.name.is_empty() => return true,
+                    None => break,
+                    _ => {}
+                }
             }
         }
         false
@@ -716,11 +725,11 @@ impl<'a> Volume<'a> {
         }
     }
 
-    fn rock_ridge(&self, system_use: &[u8], skip: usize) -> RockRidge {
+    fn rock_ridge(&self, system_use: &[u8], skip: usize) -> Option<RockRidge> {
         let mut info = RockRidge::default();
         let mut area = Cow::Borrowed(system_use.get(skip..).unwrap_or_default());
 
-        for _ in 0..=MAX_SUSP_CONTINUATIONS {
+        for followed in 0..=MAX_SUSP_CONTINUATIONS {
             let mut continuation = None;
             for (signature, body) in susp_entries(&area) {
                 match signature {
@@ -744,16 +753,24 @@ impl<'a> Volume<'a> {
             let Some((block, offset, len)) = continuation else {
                 break;
             };
+            if followed == MAX_SUSP_CONTINUATIONS {
+                break;
+            }
             let start = self
                 .block_offset(u64::from(block))
                 .saturating_add(u64::from(offset));
             let len = (len as usize).min(MAX_SUSP_CONTINUATION_BYTES);
+            let Some(left) = self.continuation_bytes.get().checked_sub(len as u64) else {
+                self.lost_continuation.set(true);
+                return None;
+            };
+            self.continuation_bytes.set(left);
             match self.image.read(start, len) {
                 Some(next) => area = next,
                 None => break,
             }
         }
-        info
+        Some(info)
     }
 
     fn name(&self, record: &Record<'_>, rock_ridge: &RockRidge) -> String {
@@ -928,6 +945,14 @@ pub(crate) fn has_readable_root(data: &[u8]) -> bool {
     Volume::open_first(data).is_some_and(|volume| volume.has_readable_root())
 }
 
+pub(crate) fn probe_cd(cd: RawCd<'_>) -> Option<bool> {
+    let image = Image {
+        data: &[],
+        raw: Some(cd),
+    };
+    Some(Volume::open_at(image, 0)?.has_readable_root())
+}
+
 pub(crate) fn volume_label(data: &[u8]) -> Option<String> {
     Volume::open(data)?.label
 }
@@ -1082,6 +1107,8 @@ impl<'v, 'a> Walk<'v, 'a> {
         let block_size = volume.block_size as usize;
         // Extents of a multi-extent file collected so far.
         let mut extents: Vec<Extent> = Vec::new();
+        // The identifier and whether all previous sections could be read.
+        let mut continuing: Option<(&[u8], bool)> = None;
         let mut pos = 0;
 
         while pos < dir.len() && !self.exhausted {
@@ -1101,12 +1128,33 @@ impl<'v, 'a> Walk<'v, 'a> {
             };
             pos += len;
 
+            let previous = continuing.take();
+            let same_file = previous.is_some_and(|(name, _)| {
+                name == record.name && !record.is_dir() && record.flags & FLAG_ASSOCIATED == 0
+            });
+            if previous.is_some() && !same_file {
+                self.skipped.note(format!(
+                    "directory '{parent}' has an incomplete multi-extent file"
+                ));
+            }
+            if !same_file {
+                extents.clear();
+            }
             if record.is_self_or_parent() || record.flags & FLAG_ASSOCIATED != 0 {
+                continue;
+            }
+            let more = !record.is_dir() && record.flags & FLAG_MULTI_EXTENT != 0;
+            // A skipped section invalidates the file through its last section.
+            continuing = more.then_some((record.name, false));
+            if same_file && previous.is_some_and(|(_, readable)| !readable) {
                 continue;
             }
 
             let rock_ridge = match volume.names {
-                Names::RockRidge { skip } => volume.rock_ridge(record.system_use, skip),
+                Names::RockRidge { skip } => match volume.rock_ridge(record.system_use, skip) {
+                    Some(info) => info,
+                    None => continue,
+                },
                 _ => RockRidge::default(),
             };
             if rock_ridge.relocated {
@@ -1146,7 +1194,6 @@ impl<'v, 'a> Walk<'v, 'a> {
             }
             // Symlinks, device nodes and the like have no data to list.
             if rock_ridge.mode.is_some_and(|mode| mode & S_IFMT != S_IFREG) {
-                extents.clear();
                 continue;
             }
 
@@ -1155,11 +1202,16 @@ impl<'v, 'a> Walk<'v, 'a> {
                 size: record.size,
                 interleaved: record.interleaved,
             });
-            if record.flags & FLAG_MULTI_EXTENT != 0 {
+            if more {
+                continuing = Some((record.name, true));
                 continue;
             }
             self.add_file(path, &extents, record.modified);
-            extents.clear();
+        }
+        if continuing.is_some() {
+            self.skipped.note(format!(
+                "directory '{parent}' ends inside a multi-extent file"
+            ));
         }
     }
 
@@ -1305,6 +1357,9 @@ impl Iso9660Container {
             (entries, skipped, _) = Walk::collect(&volume);
         }
 
+        if volume.lost_continuation.get() {
+            skipped.note("Rock Ridge continuation areas exceed the metadata budget".into());
+        }
         // Sort for consistent ordering
         entries.sort_by(|a, b| a.path.cmp(&b.path));
 
@@ -1891,6 +1946,45 @@ mod tests {
         let mut disc = Disc::plain(&[record(b"A.TXT;1", 24, 1, FILE, &nm(0, "ignored"))]);
         disc.put(24, b"a");
         assert_eq!(paths(&disc.0), ["a.txt"]);
+    }
+
+    #[test]
+    fn multi_extent_chains_cannot_claim_a_different_file() {
+        let mut disc = Disc::plain(&[
+            record(b"LOST;1", 24, 4, FLAG_MULTI_EXTENT, &[]),
+            record(b"GOOD;1", 30, 2, FILE, &[]),
+            record(b"TAIL;1", 24, 4, FLAG_MULTI_EXTENT, &[]),
+        ]);
+        disc.put(24, b"lost").put(30, b"ok");
+        let (entries, result) = listing(&disc.0);
+        assert_eq!(entries, vec![("good".into(), b"ok".to_vec())]);
+        assert!(result.unwrap_err().to_string().contains("multi-extent"));
+    }
+
+    #[test]
+    fn shared_rock_ridge_continuations_spend_one_budget() {
+        let next = nm(0, "continued");
+        let ce = susp(
+            b"CE",
+            &[both32(23), both32(0), both32(next.len() as u32)].concat(),
+        );
+        let mut disc = Disc::new(
+            &sp(0),
+            &[
+                record(b"SECTIONS;1", 24, 1, FLAG_MULTI_EXTENT, &ce),
+                record(b"SECTIONS;1", 24, 1, FILE, &[]),
+                record(b"SIBLING;1", 24, 1, FILE, &[]),
+            ],
+        );
+        disc.put(23, &next).put(24, b"x");
+        let mut volume = Volume::open(&disc.0).unwrap();
+        volume.continuation_bytes.set(next.len() as u64);
+        volume.select_names();
+        assert_eq!(volume.continuation_bytes.get(), 0);
+        let (entries, _, _) = Walk::collect(&volume);
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].path, "sibling");
+        assert!(volume.lost_continuation.get());
     }
 
     #[test]

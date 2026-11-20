@@ -360,7 +360,7 @@ mod tests {
         );
         assert_eq!(Timestamp::from_dos(0, time), None);
         // Month 0.
-        assert_eq!(Timestamp::from_dos(16 << 9 | 4, time), None);
+        assert_eq!(Timestamp::from_dos((16 << 9) | 4, time), None);
 
         assert_eq!(Timestamp::from_mac(0, true), None);
         assert_eq!(

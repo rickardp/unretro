@@ -744,3 +744,36 @@ fn links_are_not_followed_out_of_the_sheets_directory() {
     assert_eq!(walk.tracks("inside.cue"), ["track01.pcm"]);
     assert_eq!(walk.find("track01.pcm").unwrap().size, audio.len());
 }
+
+#[cfg(unix)]
+#[test]
+fn directory_and_direct_sheet_use_the_same_symlink_boundary() {
+    let scratch = Unpacked::empty("directory-boundary");
+    // Backing file is below the directory traversal depth and links outside
+    // the sheet directory, so only an incorrect CUE lookup would read it.
+    std::fs::create_dir_all(scratch.0.join("inside/a/b")).unwrap();
+    std::fs::write(scratch.0.join("outside.bin"), vec![0; 2352]).unwrap();
+    std::os::unix::fs::symlink(
+        "../../../outside.bin",
+        scratch.0.join("inside/a/b/link.bin"),
+    )
+    .unwrap();
+    let sheet = b"FILE \"a/b/link.bin\" BINARY\n TRACK 01 AUDIO\n INDEX 01 00:00:00\n";
+    std::fs::write(scratch.0.join("inside/disc.cue"), sheet).unwrap();
+    for name in ["inside", "inside/disc.cue"] {
+        let mut yielded = 0;
+        let report = Loader::from_path(scratch.0.join(name))
+            .with_max_depth(2)
+            .visit_with_report(EntryType::Leaves, |_| {
+                yielded += 1;
+                Ok(VisitAction::Continue)
+            })
+            .unwrap();
+        assert_eq!(yielded, 0, "{name}");
+        assert!(
+            report.has_recoverable_diagnostics(),
+            "{name}: {:?}",
+            report.diagnostics
+        );
+    }
+}

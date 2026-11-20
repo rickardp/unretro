@@ -185,9 +185,14 @@ impl PyWalkResult {
     }
 }
 
+enum WalkEvent {
+    Item(PyWalkResult),
+    Warning(String),
+}
+
 #[pyclass(name = "WalkIterator")]
 pub struct PyWalkIterator {
-    receiver: Receiver<Result<PyWalkResult, String>>,
+    receiver: Receiver<Result<WalkEvent, String>>,
     #[allow(dead_code)]
     handle: Option<thread::JoinHandle<()>>,
 }
@@ -200,10 +205,13 @@ impl PyWalkIterator {
 
     fn __next__(&mut self, py: Python<'_>) -> PyResult<Option<PyWalkResult>> {
         // Release GIL while waiting for next result from background thread
-        match py.allow_threads(|| self.receiver.recv()) {
-            Ok(Ok(item)) => Ok(Some(item)),
-            Ok(Err(err)) => Err(PyRuntimeError::new_err(err)),
-            Err(_) => Ok(None),
+        loop {
+            match py.allow_threads(|| self.receiver.recv()) {
+                Ok(Ok(WalkEvent::Item(item))) => return Ok(Some(item)),
+                Ok(Ok(WalkEvent::Warning(message))) => emit_python_warning(py, &message)?,
+                Ok(Err(err)) => return Err(PyRuntimeError::new_err(err)),
+                Err(_) => return Ok(None),
+            }
         }
     }
 
@@ -243,7 +251,7 @@ fn run_walk(
     path: &str,
     max_depth: u32,
     topdown: bool,
-    sender: &crossbeam_channel::Sender<Result<PyWalkResult, String>>,
+    sender: &crossbeam_channel::Sender<Result<WalkEvent, String>>,
 ) {
     let mut containers: HashMap<String, (Vec<String>, Vec<String>)> = HashMap::new();
     let mut container_stack: Vec<String> = Vec::new();
@@ -272,7 +280,7 @@ fn run_walk(
                     };
                     if topdown {
                         topdown_buffer.push(walk_result);
-                    } else if sender.send(Ok(walk_result)).is_err() {
+                    } else if sender.send(Ok(WalkEvent::Item(walk_result))).is_err() {
                         return Ok(VisitAction::Handled);
                     }
                 }
@@ -321,7 +329,7 @@ fn run_walk(
             };
             if topdown {
                 topdown_buffer.push(walk_result);
-            } else if sender.send(Ok(walk_result)).is_err() {
+            } else if sender.send(Ok(WalkEvent::Item(walk_result))).is_err() {
                 return;
             }
         }
@@ -330,14 +338,14 @@ fn run_walk(
     // For topdown, reverse the buffer (bottom-up → top-down) and send
     if topdown {
         for walk_result in topdown_buffer.into_iter().rev() {
-            if sender.send(Ok(walk_result)).is_err() {
+            if sender.send(Ok(WalkEvent::Item(walk_result))).is_err() {
                 return;
             }
         }
     }
 
     if let Some(message) = report_warning_message("walk", path, &report) {
-        emit_python_warning_from_thread(&message);
+        let _ = sender.send(Ok(WalkEvent::Warning(message)));
     }
 }
 
@@ -400,7 +408,11 @@ fn first_root_failure(report: &VisitReport) -> Option<&unretro::TraversalDiagnos
         .find(|diagnostic| diagnostic.is_root_failure())
 }
 
-fn report_warning_message(operation: &str, path: &str, report: &VisitReport) -> Option<String> {
+pub(crate) fn report_warning_message(
+    operation: &str,
+    path: &str,
+    report: &VisitReport,
+) -> Option<String> {
     let recoverable: Vec<_> = report
         .diagnostics
         .iter()
@@ -421,14 +433,8 @@ fn report_warning_message(operation: &str, path: &str, report: &VisitReport) -> 
     ))
 }
 
-fn emit_python_warning(py: Python<'_>, message: &str) -> PyResult<()> {
+pub(crate) fn emit_python_warning(py: Python<'_>, message: &str) -> PyResult<()> {
     let warnings = py.import("warnings")?;
     warnings.call_method1("warn", (message,))?;
     Ok(())
-}
-
-fn emit_python_warning_from_thread(message: &str) {
-    Python::with_gil(|py| {
-        let _ = emit_python_warning(py, message);
-    });
 }

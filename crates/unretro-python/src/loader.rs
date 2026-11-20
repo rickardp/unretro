@@ -9,8 +9,8 @@ use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 use unretro::{EntryType, Loader, VisitAction};
 
-use crate::functions::reportable_root_failure;
-use crate::iterator::{BorrowedEntryInfo, PyArchiveIterator};
+use crate::functions::{report_warning_message, reportable_root_failure};
+use crate::iterator::{BorrowedEntryInfo, EntryResult, IteratorEvent, PyArchiveIterator};
 
 /// Source of data to load.
 #[derive(Clone)]
@@ -257,7 +257,7 @@ impl PyLoader {
 fn run_visitor(
     loader: Loader,
     filter: &EntryFilter,
-    sender: &crossbeam_channel::Sender<Result<BorrowedEntryInfo, String>>,
+    sender: &crossbeam_channel::Sender<EntryResult>,
 ) -> Result<(), String> {
     let report = loader
         .visit_with_report(EntryType::Leaves, |entry| {
@@ -281,7 +281,7 @@ fn run_visitor(
             };
 
             // Send through channel
-            if sender.send(Ok(info)).is_err() {
+            if sender.send(Ok(IteratorEvent::Entry(info))).is_err() {
                 // Receiver dropped, stop iteration
                 return Ok(VisitAction::Handled);
             }
@@ -298,6 +298,11 @@ fn run_visitor(
 
     match reportable_root_failure(&report) {
         Some(failure) => Err(format!("{} ({})", failure.message, failure.path)),
-        None => Ok(()),
+        None => {
+            if let Some(message) = report_warning_message("Loader", &report.root_path, &report) {
+                let _ = sender.send(Ok(IteratorEvent::Warning(message)));
+            }
+            Ok(())
+        }
     }
 }

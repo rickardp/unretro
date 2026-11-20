@@ -267,9 +267,16 @@ enum PaxSize {
     Unreadable,
 }
 
+#[cfg(all(test, feature = "std"))]
+std::thread_local! {
+    static PAX_TIME_PARSES: core::cell::Cell<usize> = const { core::cell::Cell::new(0) };
+}
+
 // A pax time: decimal seconds since the epoch, optionally negative and with
 // a fraction, which is dropped towards the earlier second.
 fn pax_time(value: &[u8]) -> Option<Timestamp> {
+    #[cfg(all(test, feature = "std"))]
+    PAX_TIME_PARSES.with(|calls| calls.set(calls.get() + 1));
     let mut parts = value.splitn(2, |&byte| byte == b'.');
     let whole = parts.next()?;
     let fraction = parts.next().unwrap_or_default();
@@ -294,7 +301,7 @@ fn pax_time(value: &[u8]) -> Option<Timestamp> {
 struct PaxFields<'a> {
     path: Option<&'a [u8]>,
     size: Option<PaxSize>,
-    mtime: Option<&'a [u8]>,
+    mtime: Option<Option<Timestamp>>,
     sparse_major: Option<&'a [u8]>,
     sparse_minor: Option<&'a [u8]>,
     sparse_name: Option<&'a [u8]>,
@@ -305,7 +312,7 @@ struct PaxFields<'a> {
     sparse_offset: Option<&'a [u8]>,
     sparse_pairs: SparseMap,
     sparse_pairs_damaged: bool,
-    sparse_numblocks: bool,
+    sparse_numblocks: Option<&'a [u8]>,
 }
 
 impl<'a> PaxFields<'a> {
@@ -313,7 +320,7 @@ impl<'a> PaxFields<'a> {
         for (keyword, value) in (PaxRecords { rest: body }) {
             match keyword {
                 b"path" => self.path = Some(value),
-                b"mtime" => self.mtime = Some(value),
+                b"mtime" => self.mtime = Some(pax_time(value)),
                 b"size" => {
                     self.size = Some(if value.is_empty() {
                         PaxSize::Deleted
@@ -330,8 +337,10 @@ impl<'a> PaxFields<'a> {
                     self.sparse_real_size = Some(value);
                 }
                 b"GNU.sparse.map" => self.sparse_map = Some(value),
-                b"GNU.sparse.numblocks" => self.sparse_numblocks = true,
-                b"GNU.sparse.offset" => self.sparse_offset = Some(value),
+                b"GNU.sparse.numblocks" => self.sparse_numblocks = Some(value),
+                b"GNU.sparse.offset" => {
+                    self.sparse_pairs_damaged |= self.sparse_offset.replace(value).is_some();
+                }
                 b"GNU.sparse.numbytes" => {
                     let offset = self.sparse_offset.take().and_then(parse_decimal);
                     match (offset, parse_decimal(value)) {
@@ -377,12 +386,17 @@ fn pax_sparse<'a>(fields: &mut PaxFields<'a>, stored: &'a [u8]) -> Option<Result
         sparse_map_in_data(stored)
     } else if let Some(list) = fields.sparse_map {
         sparse_map_from_list(list).map(|map| (map, stored))
-    } else if fields.sparse_numblocks {
+    } else if fields.sparse_numblocks.is_some() {
         let map = core::mem::take(&mut fields.sparse_pairs);
-        (!fields.sparse_pairs_damaged).then_some((map, stored))
+        (!fields.sparse_pairs_damaged && fields.sparse_offset.is_none()).then_some((map, stored))
     } else {
         return None;
     };
+    let layout = layout.filter(|(map, _)| {
+        fields
+            .sparse_numblocks
+            .is_none_or(|count| parse_decimal(count) == Some(map.len() as u64))
+    });
     let real_size = fields.sparse_real_size.and_then(parse_decimal);
     Some(match (layout, real_size) {
         (Some((map, data)), Some(real_size)) => Ok(Sparse {
@@ -436,7 +450,7 @@ fn collect_sparse_slots(block: &[u8], at: usize, slots: usize, map: &mut Option<
         let len = parse_number(field(block, (start + 12, 12)));
         match (offset, len, map.as_mut()) {
             // Unused slots are blank and read as zero.
-            (Some(_), Some(0), _) | (_, _, None) => {}
+            (Some(0), Some(0), _) | (_, _, None) => {}
             (Some(offset), Some(len), Some(map)) => map.push((offset, len)),
             _ => *map = None,
         }
@@ -448,20 +462,27 @@ fn collect_sparse_slots(block: &[u8], at: usize, slots: usize, map: &mut Option<
 fn expand_sparse(sparse: &Sparse<'_>, budget: &mut u64) -> Result<Vec<u8>> {
     const WHAT: &str = "sparse file";
     let total = checked_output_size(sparse.real_size, WHAT)?;
+    let mut previous_end = 0;
+    let mut packed = 0u64;
+    for &(offset, len) in &sparse.map {
+        previous_end = offset
+            .checked_add(len)
+            .filter(|&end| offset >= previous_end && end <= sparse.real_size)
+            .ok_or_else(bad_sparse_map)?;
+        packed = packed.checked_add(len).ok_or_else(bad_sparse_map)?;
+    }
+    if packed != sparse.data.len() as u64 {
+        return Err(bad_sparse_map());
+    }
     *budget = budget.checked_sub(sparse.real_size).ok_or_else(|| {
         Error::decompression("sparse output exceeds the size budget for this archive")
     })?;
     let mut out = zeroed_buffer(total, WHAT)?;
     let mut source = sparse.data;
     for &(offset, len) in &sparse.map {
-        let offset = usize::try_from(offset).map_err(|_| bad_sparse_map())?;
-        let len = usize::try_from(len).map_err(|_| bad_sparse_map())?;
-        let hole = offset
-            .checked_add(len)
-            .and_then(|end| out.get_mut(offset..end))
-            .ok_or_else(bad_sparse_map)?;
-        let (chunk, rest) = source.split_at_checked(len).ok_or_else(bad_sparse_map)?;
-        hole.copy_from_slice(chunk);
+        // Both ranges fit by the validation above.
+        let (chunk, rest) = source.split_at(len as usize);
+        out[offset as usize..(offset + len) as usize].copy_from_slice(chunk);
         source = rest;
     }
     Ok(out)
@@ -700,12 +721,10 @@ impl<'a> Reader<'a> {
         };
 
         let mode = parse_number(field(block, MODE)).and_then(|mode| u32::try_from(mode).ok());
-        let modified = effective(local.mtime, self.global.mtime)
-            .and_then(pax_time)
-            .or_else(|| {
-                let seconds = parse_number(field(block, MTIME))?;
-                i64::try_from(seconds).ok().map(Timestamp::utc)
-            });
+        let modified = local.mtime.or(self.global.mtime).flatten().or_else(|| {
+            let seconds = parse_number(field(block, MTIME))?;
+            i64::try_from(seconds).ok().map(Timestamp::utc)
+        });
         let metadata = (mode.is_some() || modified.is_some()).then(|| {
             let metadata = Metadata::new().with_modified(modified);
             match mode {
@@ -1883,6 +1902,46 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "std")]
+    fn global_pax_time_is_parsed_once_for_many_members() {
+        let time = format!("12.{}1", "0".repeat(64 * 1024));
+        let mut members = vec![pax(b'g', &[("mtime", time.as_bytes())])];
+        members.extend((0..1024).map(|i| member(&format!("file-{i}"), b'0', b"")));
+        let blob = archive(&members);
+        PAX_TIME_PARSES.with(|calls| calls.set(0));
+        let entries = open(&blob).entries;
+        assert_eq!(entries.len(), 1024);
+        assert!(entries.iter().all(|entry| {
+            entry
+                .metadata
+                .as_ref()
+                .and_then(|metadata| metadata.modified)
+                == Some(Timestamp::utc(12))
+        }));
+        PAX_TIME_PARSES.with(|calls| assert_eq!(calls.get(), 1));
+    }
+
+    #[test]
+    fn local_missing_or_invalid_time_masks_global_time_for_one_file() {
+        let global = format!("-6.{}1", "0".repeat(8192));
+        let blob = archive(&[
+            pax(b'g', &[("mtime", global.as_bytes())]),
+            member("a", b'0', b""),
+            pax(b'x', &[("mtime", b"")]),
+            member("b", b'0', b""),
+            pax(b'x', &[("mtime", b"bad")]),
+            member("c", b'0', b""),
+            member("d", b'0', b""),
+        ]);
+        let entries = open(&blob).entries;
+        let modified = |i: usize| entries[i].metadata.as_ref().unwrap().modified;
+        assert_eq!(modified(0), Some(Timestamp::utc(-7)));
+        assert_eq!(modified(1), modified(2));
+        assert_ne!(modified(1), modified(0));
+        assert_eq!(modified(3), modified(0));
+    }
+
+    #[test]
     fn legacy_probe() {
         let good = archive(&[member("a.txt", b'0', b"a")]);
         assert!(could_be_legacy_tar(&good));
@@ -2107,6 +2166,29 @@ mod tests {
     #[test]
     fn damaged_sparse_member_is_skipped_and_reported() {
         let cases: Vec<Vec<Vec<u8>>> = vec![
+            // Both pax 0.x encodings must agree with the declared extent count.
+            vec![
+                pax(
+                    b'x',
+                    &[
+                        ("GNU.sparse.size", b"2"),
+                        ("GNU.sparse.map", b"0,2"),
+                        ("GNU.sparse.numblocks", b"2"),
+                    ],
+                ),
+                member("wrong-count.bin", b'0', b"ab"),
+            ],
+            vec![
+                pax(
+                    b'x',
+                    &[
+                        ("GNU.sparse.size", b"2"),
+                        ("GNU.sparse.numblocks", b"0"),
+                        ("GNU.sparse.offset", b"2"),
+                    ],
+                ),
+                member("dangling-offset.bin", b'0', b""),
+            ],
             // Real size smaller than the map reaches.
             pax_sparse_v1(b"1999", &sparse_map_lines()),
             pax_sparse_v1(b"", &sparse_map_lines()),
@@ -2150,6 +2232,31 @@ mod tests {
             );
             let message = container.skipped_entries().unwrap();
             assert!(message.contains("sparse"), "case {index}: {message}");
+        }
+    }
+
+    #[test]
+    fn invalid_sparse_extents_leave_the_allowance_for_the_next_member() {
+        for (map, stored) in [
+            (vec![(3, 2), (4, 1)], b"abc".as_slice()),
+            (vec![(4, 1), (1, 1)], b"ab"),
+            (vec![(0, 1)], b"ab"),
+            (vec![(6, 1)], b"a"),
+        ] {
+            let mut budget = 6;
+            let invalid = Sparse {
+                map,
+                real_size: 6,
+                data: stored,
+            };
+            assert!(expand_sparse(&invalid, &mut budget).is_err());
+            let valid = Sparse {
+                map: vec![(2, 1), (6, 0)],
+                real_size: 6,
+                data: b"x",
+            };
+            assert_eq!(expand_sparse(&valid, &mut budget).unwrap(), b"\0\0x\0\0\0");
+            assert_eq!(budget, 0);
         }
     }
 

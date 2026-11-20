@@ -62,6 +62,20 @@ cargo check --lib --target wasm32-unknown-unknown --no-default-features --featur
 CI runs all of these. The last one guards the `no_std` + `wasm32` build of the native
 decoders (it needs `rustup target add wasm32-unknown-unknown`).
 
+Allocation regressions live in `tests/alloc_limits.rs`: they cover rejected RAR
+copies, duplicate AppleSingle descriptors, stored ZIP length mismatches and bounded
+StuffIt/XA detection as well as header-driven allocations.
+ADF unit tests also check retained buffer capacity for damaged entries. Run these
+alongside `arj_fixtures` and `rar_native` when changing sibling-volume handling;
+corrupt and standalone predecessors must not hide readable continuation volumes.
+
+Security regressions belong alongside the affected parser or loader tests. Assert
+resource limits, rejected malformed inputs and preservation of readable siblings.
+Use allocation or work counters for performance bounds rather than timing thresholds.
+Exercise filesystem confinement on the host platform as well as in the existing
+Linux, macOS and Windows CI matrix. Report native resource-fork coverage on macOS
+and the external corpus run separately from checked-in fixture results.
+
 ### Python binding checks
 
 ```bash

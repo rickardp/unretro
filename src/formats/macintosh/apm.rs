@@ -129,7 +129,7 @@ fn parse_partitions(head: &[u8], total_len: usize) -> Vec<Partition> {
 }
 
 fn cooked_head(cd: &RawCd<'_>) -> Vec<u8> {
-    let mut head = Vec::new();
+    let mut head = Vec::with_capacity(cd.sector_count().min(CD_PROBE_SECTORS) * CD_USER_DATA_SIZE);
     for sector in 0..cd.sector_count().min(CD_PROBE_SECTORS) {
         head.extend_from_slice(cd.user_data(sector));
     }
@@ -152,6 +152,13 @@ pub fn is_apm_image(data: &[u8]) -> bool {
 // `is_apm_image` for the leading bytes of a cooked image of `total_len` bytes.
 pub(crate) fn has_partition_map(head: &[u8], total_len: usize) -> bool {
     !parse_partitions(head, total_len).is_empty()
+}
+
+pub(crate) fn cd_has_partition_map(cd: RawCd<'_>) -> bool {
+    has_partition_map(
+        &cooked_head(&cd),
+        cd.sector_count().saturating_mul(CD_USER_DATA_SIZE),
+    )
 }
 
 /// Container listing the partitions of an Apple Partition Map.
@@ -197,7 +204,7 @@ impl ApmContainer {
             return Err(Error::invalid_format("No Apple Partition Map found"));
         }
 
-        let names: Vec<String> = parts
+        let mut names: Vec<String> = parts
             .iter()
             .map(|p| {
                 // A map name is used when no other listed partition has it.
@@ -217,6 +224,20 @@ impl ApmContainer {
                 unique.map_or_else(|| format!("p{}.img", p.index), Clone::clone)
             })
             .collect();
+
+        // A generated name takes precedence. Renaming its claimant may in turn
+        // introduce another generated name, so settle until all are unique.
+        loop {
+            let conflict = names.iter().enumerate().position(|(i, name)| {
+                !name.eq_ignore_ascii_case(&format!("p{}.img", parts[i].index))
+                    && names
+                        .iter()
+                        .enumerate()
+                        .any(|(j, other)| i != j && name.eq_ignore_ascii_case(other))
+            });
+            let Some(i) = conflict else { break };
+            names[i] = format!("p{}.img", parts[i].index);
+        }
 
         let partitions = parts
             .iter()
@@ -330,6 +351,20 @@ mod tests {
         );
         let container = ApmContainer::from_bytes(&data, "disc".into(), 8, false).unwrap();
         assert_eq!(names(&container), ["p1.img", "p2.img", "p3.img", "Data"]);
+    }
+
+    #[test]
+    fn generated_names_do_not_shadow_named_partitions() {
+        let data = image(
+            &[
+                ("P1.IMG", "Apple_HFS", 64, 1),
+                ("", "Apple_HFS", 65, 1),
+                ("p0.img", "Apple_HFS", 66, 1),
+            ],
+            67,
+        );
+        let container = ApmContainer::from_bytes(&data, "disk".into(), 8, false).unwrap();
+        assert_eq!(names(&container), ["p0.img", "p1.img", "p2.img"]);
     }
 
     #[test]

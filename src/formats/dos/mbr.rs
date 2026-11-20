@@ -29,6 +29,7 @@ pub fn is_mbr_image(data: &[u8]) -> bool {
     // protective type. Keep this at least as strict as `parse_partitions()` so
     // arbitrary payloads with a coincidental 0x55AA trailer are not reported as
     // MBR containers and then rejected during open.
+    let mut usable = false;
     for i in 0..4 {
         let offset = 446 + i * 16;
         let boot_flag = data[offset];
@@ -67,13 +68,13 @@ pub fn is_mbr_image(data: &[u8]) -> bool {
                         .checked_add(byte_len)
                         .is_some_and(|end| end <= data.len())
                 {
-                    return true;
+                    usable = true;
                 }
             }
         }
     }
 
-    false
+    usable
 }
 
 struct MbrPartition {
@@ -139,13 +140,11 @@ impl MbrContainer {
         if depth == 0 {
             return Err(Error::MaxDepthExceeded);
         }
-
-        let parts = parse_partitions(data);
-        if parts.is_empty() {
+        if !is_mbr_image(data) {
             return Err(Error::invalid_format("No valid MBR partitions found"));
         }
 
-        let partitions = parts
+        let partitions = parse_partitions(data)
             .into_iter()
             .map(|p| {
                 let part_data = data[p.offset..p.offset + p.length].to_vec();
@@ -252,6 +251,18 @@ mod tests {
         }
 
         image
+    }
+
+    #[test]
+    fn later_invalid_slots_veto_an_earlier_usable_partition() {
+        let mut disk = create_mbr_image(&[(0x06, 1, &[0; 512])]);
+        disk[462 + 4] = GPT_PROTECTIVE_TYPE;
+        assert!(!is_mbr_image(&disk));
+        assert!(MbrContainer::from_bytes(&disk, "disk.img".into(), 8, true).is_err());
+        disk[462 + 4] = 0;
+        disk[462] = 0x7f;
+        assert!(!is_mbr_image(&disk));
+        assert!(MbrContainer::from_bytes(&disk, "disk.img".into(), 8, true).is_err());
     }
 
     #[test]

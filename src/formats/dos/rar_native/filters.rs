@@ -791,7 +791,12 @@ impl Machine {
     }
 
     // Sections 17 and 18.2; returns the number of instructions executed.
-    fn execute(&mut self, instructions: &[Instruction], budget: u64) -> Result<u64> {
+    fn execute(
+        &mut self,
+        instructions: &[Instruction],
+        budget: u64,
+        fuel: &mut u64,
+    ) -> Result<u64> {
         let mut pc = 0u32;
         let mut steps = 0u64;
         loop {
@@ -804,6 +809,9 @@ impl Machine {
                     "RAR: filter program exceeds its instruction budget",
                 ));
             }
+            *fuel = fuel.checked_sub(1).ok_or_else(|| {
+                corrupt("RAR: filter programs exceed the archive instruction budget")
+            })?;
             let Instruction {
                 op,
                 byte_form,
@@ -1000,12 +1008,13 @@ impl Machine {
     fn run(
         &mut self,
         program: &Compiled,
-        head: &[u8],
-        tail: &[u8],
+        block: (&[u8], &[u8]),
         regs: &[u32; 7],
         file_pos: u64,
         uses: u32,
+        fuel: &mut u64,
     ) -> Result<(usize, u64)> {
+        let (head, tail) = block;
         let len = head.len().saturating_add(tail.len());
         if len > MAX_BLOCK_LEN || program.constants.len() as u64 > MAX_CONSTANTS_LEN {
             return Err(corrupt("RAR: filter block too long"));
@@ -1034,7 +1043,7 @@ impl Machine {
 
         // 18.4, decision F20.
         let budget = 65_536 + 256 * len as u64;
-        let steps = self.execute(&program.instructions, budget)?;
+        let steps = self.execute(&program.instructions, budget, fuel)?;
 
         // 18.3.
         let addr = (self.read32(RESULT_ADDR_ADDR) & MEMORY_MASK) as usize;
@@ -1074,7 +1083,7 @@ struct Pending {
 /// `rar29-lz.md` 11 and 12.1:
 /// - before each item and before ending a member, while [`Self::next_block`]
 ///   reports a block whose end has been produced, hand its raw bytes to
-///   [`Self::run_next`] and deliver the result in their place;
+///   [`Self::run_next_with_fuel`] and deliver the result in their place;
 /// - raw bytes below the start of the next block (all of them when there is
 ///   none) are final;
 /// - a record goes to [`Self::add_record`] with the group position at which
@@ -1299,16 +1308,27 @@ impl Filters {
         Ok(())
     }
 
-    /// Runs the oldest pending filter on its complete block and removes it
-    /// from the queue. The block's raw bytes are `head` followed by `tail`
-    /// (two parts so that a block that wraps in the caller's window needs no
-    /// copy); `member_start` is the group position at which the member being
-    /// decoded starts. The result has exactly the block's length.
+    #[cfg(test)]
     pub(crate) fn run_next(
         &mut self,
         head: &[u8],
         tail: &[u8],
         member_start: u64,
+    ) -> Result<&[u8]> {
+        self.run_next_with_fuel(head, tail, member_start, &mut { u64::MAX })
+    }
+
+    /// Runs the oldest pending filter on its complete block and removes it
+    /// from the queue. The block's raw bytes are `head` followed by `tail`
+    /// (two parts so that a block that wraps in the caller's window needs no
+    /// copy); `member_start` is the group position at which the member being
+    /// decoded starts. The result has exactly the block's length.
+    pub(crate) fn run_next_with_fuel(
+        &mut self,
+        head: &[u8],
+        tail: &[u8],
+        member_start: u64,
+        fuel: &mut u64,
     ) -> Result<&[u8]> {
         let Some(&pending) = self.queue.get(self.head) else {
             return Err(corrupt("RAR: no filter is pending"));
@@ -1330,8 +1350,14 @@ impl Filters {
             Code::Standard(standard) => *standard,
             Code::Custom(compiled) => {
                 let machine = self.machine.get_or_insert_with(Machine::new);
-                let (addr, _) =
-                    machine.run(compiled, head, tail, &pending.regs, file_pos, pending.uses)?;
+                let (addr, _) = machine.run(
+                    compiled,
+                    (head, tail),
+                    &pending.regs,
+                    file_pos,
+                    pending.uses,
+                    fuel,
+                )?;
                 return machine
                     .memory
                     .get(addr..addr + len)
@@ -1434,7 +1460,9 @@ mod tests {
         let compiled = compile(program)?;
         // Split to exercise the two-part block.
         let (head, tail) = block.split_at(block.len() / 3);
-        let (addr, steps) = machine.run(&compiled, head, tail, &regs, file_pos, 0)?;
+        let (addr, steps) = machine.run(&compiled, (head, tail), &regs, file_pos, 0, &mut {
+            u64::MAX
+        })?;
         Ok((machine.memory[addr..addr + block.len()].to_vec(), steps))
     }
 
@@ -2044,10 +2072,37 @@ mod tests {
         let budget = 65_536u64 + 256;
         let mut regs = default_regs(1);
         regs[0] = ((budget - 1) / 2) as u32;
-        let (_, steps) = machine.run(&program, &block, &[], &regs, 0, 0).unwrap();
+        let (_, steps) = machine
+            .run(&program, (&block, &[]), &regs, 0, 0, &mut { u64::MAX })
+            .unwrap();
         assert_eq!(steps, budget - 1);
         regs[0] += 1;
-        assert!(machine.run(&program, &block, &[], &regs, 0, 0).is_err());
+        assert!(
+            machine
+                .run(&program, (&block, &[]), &regs, 0, 0, &mut { u64::MAX })
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn archive_fuel_is_shared_by_successful_and_failed_runs() {
+        let program = compile(&assemble("0 0111 0 1 000 0101 00 001111")).unwrap();
+        let mut machine = Machine::new();
+        let mut regs = default_regs(1);
+        regs[0] = 2;
+        let mut fuel = 8;
+        assert!(
+            machine
+                .run(&program, (&[0], &[]), &regs, 0, 0, &mut fuel)
+                .is_ok()
+        );
+        assert_eq!(fuel, 3);
+        assert!(
+            machine
+                .run(&program, (&[0], &[]), &regs, 0, 0, &mut fuel)
+                .is_err()
+        );
+        assert_eq!(fuel, 0);
     }
 
     #[test]
@@ -2072,7 +2127,9 @@ mod tests {
             if let Ok(compiled) = compile(&program) {
                 valid += 1;
                 assert!(compiled.instructions.len() <= 8 * (len - 1) / 6 + 1);
-                let _ = machine.run(&compiled, &block[..8], &block[8..], &regs, 0, 0);
+                let _ = machine.run(&compiled, (&block[..8], &block[8..]), &regs, 0, 0, &mut {
+                    u64::MAX
+                });
             }
         }
         assert!(valid > 100);

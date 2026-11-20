@@ -705,7 +705,7 @@ pub(super) fn read_volume(volume: &[u8], backed: Vec<Range<usize>>) -> Result<Vo
 
     let mut files = Vec::new();
     let mut inodes: Vec<Forks> = Vec::new();
-    // Link reference -> index into `inodes`; `None` for an empty target.
+    // Link reference -> index into `inodes`; `None` for a damaged target.
     let mut loaded: FastMap<u32, Option<usize>> = FastMap::new();
     let mut broken_links = 0usize;
     let mut too_deep = 0usize;
@@ -748,9 +748,13 @@ pub(super) fn read_volume(volume: &[u8], backed: Vec<Range<usize>>) -> Result<Vo
             let index = match loaded.get(&file.special) {
                 Some(&index) => index,
                 None => {
+                    let empty = target.data_fork.logical_size == 0
+                        && target.resource_fork.logical_size == 0;
                     let index = reader
                         .read_forks(target)?
-                        .filter(|forks| !forks.data.is_empty() || !forks.resource.is_empty())
+                        .filter(|forks| {
+                            empty || !forks.data.is_empty() || !forks.resource.is_empty()
+                        })
                         .map(|forks| {
                             inodes.push(forks);
                             inodes.len() - 1
@@ -1314,6 +1318,29 @@ mod tests {
         let volume = read(&image).unwrap();
         assert_eq!(volume.inodes.len(), 1);
         assert_eq!(volume.files[0].file_type, *b"TEXT");
+    }
+
+    #[test]
+    fn empty_hard_link_target_is_listed() {
+        let private: Vec<u16> = PRIVATE_DIRECTORIES[0].encode_utf16().collect();
+        let mut link = file_record(2, "empty", 17, no_fork(), no_fork());
+        set_type_creator(&mut link, b"hlnk", b"hfs+");
+        set_mode(&mut link, S_IFREG, 7);
+        let mut records = vec![
+            folder_record_utf16(2, &private, 20),
+            file_record(20, "iNode7", 21, no_fork(), no_fork()),
+            link,
+        ];
+        let (image, _) = volume(&[], core::slice::from_ref(&records), 0);
+        assert_eq!(
+            listing(&image),
+            vec![("empty".into(), Vec::new(), Vec::new())]
+        );
+        assert_eq!(read(&image).unwrap().skipped, None);
+        records[1] = file_record(20, "iNode7", 21, fork_data(1, &[]), no_fork());
+        let (image, _) = volume(&[], &[records], 0);
+        assert!(listing(&image).is_empty());
+        assert!(read(&image).unwrap().skipped.is_some());
     }
 
     #[test]

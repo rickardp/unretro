@@ -620,12 +620,15 @@ struct SetReader {
     pending: Option<ArjEntry>,
     // Split file already reported; its later pieces are dropped quietly.
     dropped: Option<String>,
-    exhausted: bool,
+    input_len: usize,
+    charged: u64,
+    consumed_volumes: Vec<usize>,
 }
 
 impl SetReader {
     fn read_volume(&mut self, data: &[u8], mut pos: usize) {
-        let mut budget = OutputBudget::for_input(data.len(), OUTPUT_BUDGET_RATIO);
+        self.input_len = self.input_len.saturating_add(data.len());
+        let allowance = OutputBudget::for_input(self.input_len, OUTPUT_BUDGET_RATIO).remaining();
 
         loop {
             let header = match read_header(data, pos) {
@@ -703,21 +706,26 @@ impl SetReader {
                 self.dropped = Some(path);
                 continue;
             }
-            if self.exhausted {
-                continue;
-            }
-
             let size = header.original_size() as usize;
-            if budget
-                .charge(size.saturating_add(path.len()), "ARJ")
-                .is_err()
-            {
-                self.exhausted = true;
-                self.skipped.note(format!(
-                    "'{path}' and later entries exceed the size budget for this archive"
-                ));
+            if earlier.as_ref().is_some_and(|entry| {
+                entry
+                    .data
+                    .len()
+                    .checked_add(size)
+                    .is_none_or(|joined| joined as u64 > crate::MAX_DECOMPRESSED_SIZE)
+            }) {
+                self.skipped
+                    .note(format!("'{path}' exceeds the size limit for a split file"));
+                self.dropped = Some(path);
                 continue;
             }
+            let charge = (size as u64).saturating_add(path.len() as u64);
+            if charge > allowance.saturating_sub(self.charged) {
+                self.skipped
+                    .note(format!("'{path}' exceeds the size budget for this archive"));
+                continue;
+            }
+            self.charged += charge;
             // Each piece of a split file is packed and checksummed on its own.
             let piece = match unpack(header.method(), packed, size, header.file_crc()) {
                 Ok(piece) => piece,
@@ -729,6 +737,12 @@ impl SetReader {
             };
             let entry = match earlier {
                 Some(mut entry) => {
+                    if entry.data.try_reserve(piece.len()).is_err() {
+                        self.skipped
+                            .note(format!("'{path}' cannot allocate its joined contents"));
+                        self.dropped = Some(path);
+                        continue;
+                    }
                     entry.data.extend_from_slice(&piece);
                     entry
                 }
@@ -757,13 +771,13 @@ fn read_set(
     main: &Header<'_>,
     mut number: usize,
     next_volume: &dyn Fn(usize) -> Option<Vec<u8>>,
-) -> (Vec<ArjEntry>, Skipped) {
+) -> SetReader {
     let mut reader = SetReader::default();
     reader.read_volume(first, main.end);
     let mut more = main.flags() & FLAG_VOLUME != 0;
 
     while more || reader.pending.is_some() {
-        number += 1;
+        number = number.saturating_add(1);
         let volume = (number <= MAX_VOLUMES)
             .then(|| next_volume(number))
             .flatten();
@@ -786,6 +800,7 @@ fn read_set(
             break;
         };
         more = main.flags() & FLAG_VOLUME != 0;
+        reader.consumed_volumes.push(number);
         reader.read_volume(&volume, main.end);
     }
     if let Some(entry) = reader.pending.take() {
@@ -793,7 +808,7 @@ fn read_set(
             .skipped
             .note(format!("'{}' is incomplete", entry.path));
     }
-    (reader.entries, reader.skipped)
+    reader
 }
 
 // =============================================================================
@@ -849,6 +864,7 @@ pub fn volume_name(name: &str, number: usize) -> Option<String> {
 
 /// Read-only ARJ archive.
 pub struct ArjContainer {
+    consumed_volumes: Vec<usize>,
     prefix: String,
     entries: Vec<ArjEntry>,
     name_index: FastMap<String, usize>,
@@ -857,6 +873,10 @@ pub struct ArjContainer {
 }
 
 impl ArjContainer {
+    pub(crate) fn consumed_volumes(&self) -> &[usize] {
+        &self.consumed_volumes
+    }
+
     /// Decode every readable entry of the archive in `data`.
     ///
     /// # Errors
@@ -886,7 +906,12 @@ impl ArjContainer {
             return Err(Error::MaxDepthExceeded);
         }
         let main = main_header(data).ok_or_else(|| Error::invalid_format("Not an ARJ archive"))?;
-        let (entries, skipped) = read_set(data, &main, number, next_volume);
+        let SetReader {
+            entries,
+            skipped,
+            consumed_volumes,
+            ..
+        } = read_set(data, &main, number, next_volume);
 
         let name_index =
             crate::formats::build_path_index(entries.iter().enumerate().map(|(i, e)| (i, &e.path)));
@@ -895,6 +920,7 @@ impl ArjContainer {
             prefix,
             entries,
             name_index,
+            consumed_volumes,
             skipped: skipped.into_message(),
         })
     }
@@ -1615,15 +1641,35 @@ mod tests {
         let mut liar = File::packed("LIAR", 1, &zero_bit_stream(70_000), b"");
         liar.size = u32::MAX;
         let data = archive(&[liar.clone(), File::stored("AFTER", b"x")]);
-        assert!(paths(&data).is_empty());
+        assert_eq!(paths(&data), vec!["t.arj/AFTER"]);
         let message = skipped(&data);
-        assert!(message.contains("'LIAR' and later entries"), "{message}");
+        assert!(message.contains("'LIAR' exceeds"), "{message}");
 
         // A claim within budget decodes only what the stream holds.
         liar.size = 100_000;
         let data = archive(&[liar, File::stored("AFTER", b"x")]);
         assert_eq!(paths(&data), vec!["t.arj/AFTER"]);
         assert!(skipped(&data).contains("truncated compressed stream"));
+    }
+
+    #[test]
+    fn output_budget_floor_is_shared_by_volumes() {
+        let volume = archive(&[File::stored("F", b"x")]);
+        let main = main_header(&volume).unwrap();
+        let mut reader = SetReader {
+            charged: crate::limits::BUDGET_FLOOR - 3,
+            ..SetReader::default()
+        };
+        reader.read_volume(&volume, main.end);
+        reader.read_volume(&volume, main.end);
+        assert_eq!(reader.entries.len(), 1);
+        assert!(
+            reader
+                .skipped
+                .into_message()
+                .unwrap()
+                .contains("size budget")
+        );
     }
 
     #[test]
@@ -1637,10 +1683,11 @@ mod tests {
         assert!(data.len() < 4096);
 
         let container = open(&data);
-        assert_eq!(container.info().entry_count, Some(1));
+        assert_eq!(container.info().entry_count, Some(2));
+        assert_eq!(container.get_file("SMALL"), Some(&b"x"[..]));
         assert_eq!(container.get_file("bomb").map(<[u8]>::len), Some(9 << 20));
         let message = container.skipped_entries().unwrap();
-        assert!(message.contains("'BOMB2' and later entries"), "{message}");
+        assert!(message.contains("'BOMB2' exceeds"), "{message}");
     }
 
     #[test]
@@ -1729,6 +1776,7 @@ mod tests {
             archive(&[piece("BIG", b"three", 8, false), File::stored("Z", b"z")]),
         ];
         let set = open_set(&volumes);
+        assert_eq!(set.consumed_volumes(), &[1, 2]);
         assert_eq!(
             listing(&set),
             vec![
@@ -1738,6 +1786,36 @@ mod tests {
             ]
         );
         assert_eq!(set.skipped_entries(), None);
+    }
+
+    #[test]
+    fn oversized_member_does_not_hide_small_later_files_or_volumes() {
+        let mut big = File::stored("BIG", b"tiny");
+        big.size = u32::MAX;
+        let first = archive(&[
+            big,
+            File::stored("NEXT", b"x"),
+            piece("JOIN", b"a", 0, true),
+        ]);
+        let second = archive(&[piece("JOIN", b"b", 1, false), File::stored("LATER", b"y")]);
+        let set = open_set(&[first, second]);
+        assert_eq!(set.get_file("NEXT"), Some(&b"x"[..]));
+        assert_eq!(set.get_file("LATER"), Some(&b"y"[..]));
+        assert!(set.skipped_entries().unwrap().contains("size budget"));
+    }
+
+    #[test]
+    fn oversized_join_is_rejected_before_decoding_the_piece() {
+        let first = archive(&[piece("BIG", b"ab", 0, true)]);
+        let mut tail = piece("BIG", b"c", 2, false);
+        tail.size = u32::MAX;
+        let set = open_set(&[first, archive(&[tail, File::stored("NEXT", b"x")])]);
+        assert_eq!(set.get_file("NEXT"), Some(&b"x"[..]));
+        assert!(
+            set.skipped_entries()
+                .unwrap()
+                .contains("size limit for a split file")
+        );
     }
 
     #[test]

@@ -70,6 +70,7 @@ std = [
     "dep:memmap2",
     "dep:xattr",
     "dep:libc",
+    "dep:cap-std",
 ]
 no_std = []
 
@@ -100,6 +101,7 @@ thiserror = { version = "2.0", default-features = false }
 
 # Memory mapping
 memmap2 = { version = "0.9", optional = true }
+cap-std = { version = "3.4.6", optional = true }
 
 # Platform-specific
 [target.'cfg(unix)'.dependencies]

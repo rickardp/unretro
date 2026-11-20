@@ -115,6 +115,30 @@ impl Container for DirectoryContainer {
         fs::read(full).ok().map(Cow::Owned)
     }
 
+    #[cfg(feature = "dos")]
+    fn sibling_key(&self, path: &str) -> String {
+        let Some(full) = self.sibling_path(path) else {
+            return path.to_string();
+        };
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+            if let Ok(meta) = full.metadata() {
+                return format!("{}:{}", meta.dev(), meta.ino());
+            }
+        }
+        #[cfg(windows)]
+        if let Ok(canonical) = full.canonicalize() {
+            return canonical.to_string_lossy().into_owned();
+        }
+        path.to_string()
+    }
+
+    #[cfg(feature = "dos")]
+    fn replay_matches(&self, _path: &str, _data: &[u8]) -> bool {
+        true
+    }
+
     // The fork itself is read when the file is visited; the header and the
     // length are enough to tell whether it will be yielded.
     #[cfg(feature = "macintosh")]
@@ -158,7 +182,25 @@ impl Container for DirectoryContainer {
                 }
             } else {
                 // Regular file - read and yield
-                let data = match fs::read(&dir_entry.path) {
+                #[cfg(feature = "dos")]
+                let cue_directory = dir_entry
+                    .path
+                    .extension()
+                    .filter(|ext| ext.eq_ignore_ascii_case("cue"))
+                    .and_then(|_| dir_entry.path.parent())
+                    .map(crate::fs_access::ConfinedDir::open)
+                    .transpose()?;
+                #[cfg(feature = "dos")]
+                let data_result = match &cue_directory {
+                    Some(root) => root.read(
+                        Path::new(dir_entry.path.file_name().unwrap()),
+                        crate::MAX_DECOMPRESSED_SIZE,
+                    ),
+                    None => fs::read(&dir_entry.path),
+                };
+                #[cfg(not(feature = "dos"))]
+                let data_result = fs::read(&dir_entry.path);
+                let data = match data_result {
                     Ok(d) => d,
                     Err(e) => {
                         return Err(Error::invalid_format(format!(
@@ -169,7 +211,12 @@ impl Container for DirectoryContainer {
                 };
 
                 let path_str = dir_entry.path.to_string_lossy();
-                let entry = Entry::new(&path_str, &self.prefix, &data);
+                #[allow(unused_mut)]
+                let mut entry = Entry::new(&path_str, &self.prefix, &data);
+                #[cfg(feature = "dos")]
+                {
+                    entry.cue_directory = cue_directory.as_ref();
+                }
                 visitor(&entry)?;
 
                 // Native fork (macOS). Only the fork entry is yielded; the

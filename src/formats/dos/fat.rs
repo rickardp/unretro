@@ -1,6 +1,7 @@
 use crate::compat::{FastMap, String, Vec, format};
 use crate::error::{Error, Result};
 use crate::format::ContainerFormat;
+use crate::limits::OutputBudget;
 use crate::sanitize_archive_path;
 use crate::{Container, ContainerInfo, Entry, Metadata, Timestamp};
 
@@ -13,6 +14,8 @@ const MIN_BOOT_SECTOR_SIZE: usize = 512;
 const BOOT_SIGNATURE: [u8; 2] = [0x55, 0xAA];
 
 const MAX_DIR_DEPTH: u32 = 16;
+// Up to 255 UTF-16 units in 13-unit long-name slots.
+const MAX_LFN_SLOTS: usize = 20;
 
 /// Maximum total bytes allocated for directory reads across all recursion levels.
 /// Prevents excessive memory use from deeply nested directories (16 MiB per dir * depth).
@@ -163,8 +166,12 @@ impl VolumeGeometry {
         })
     }
 
-    const fn cluster_to_offset(&self, cluster: u32) -> usize {
-        self.data_region_offset + (cluster as usize - 2) * self.cluster_size
+    fn cluster_to_offset(&self, cluster: u32) -> Option<usize> {
+        self.data_region_offset.checked_add(
+            (cluster as usize)
+                .checked_sub(2)?
+                .checked_mul(self.cluster_size)?,
+        )
     }
 }
 
@@ -236,6 +243,14 @@ pub(crate) fn is_fat_boot_sector(data: &[u8]) -> bool {
 // FAT Volume
 // =============================================================================
 
+struct FatWalk {
+    entries: Vec<FatFileEntry>,
+    visited: FastMap<u32, ()>,
+    budget: OutputBudget,
+    dir_bytes_left: usize,
+    skipped: usize,
+}
+
 struct FatVolume<'a> {
     data: &'a [u8],
     geometry: VolumeGeometry,
@@ -292,43 +307,45 @@ impl<'a> FatVolume<'a> {
         }
     }
 
-    fn read_cluster_chain(&self, start_cluster: u32, max_bytes: usize) -> Vec<u8> {
-        let mut result = Vec::new();
+    fn cluster_chain(
+        &self,
+        start_cluster: u32,
+        max_bytes: usize,
+    ) -> impl Iterator<Item = &'a [u8]> + '_ {
         let mut cluster = start_cluster;
         let mut remaining = max_bytes;
-        // Cycle guard: cap at both the declared cluster count and the physical
-        // maximum (data.len / cluster_size + 1) to handle untrusted BPB fields.
-        let physical_max = self.data.len() / self.geometry.cluster_size.max(1) + 1;
-        let max_iterations = (self.geometry.total_data_clusters as usize + 2).min(physical_max);
-        let mut iterations = 0;
-
-        while cluster >= 2
-            && !self.geometry.fat_type.is_eof(cluster)
-            && remaining > 0
-            && iterations < max_iterations
-        {
-            let offset = self.geometry.cluster_to_offset(cluster);
-            let read_size = self.geometry.cluster_size.min(remaining);
-
-            if offset + read_size <= self.data.len() {
-                result.extend_from_slice(&self.data[offset..offset + read_size]);
-                remaining = remaining.saturating_sub(read_size);
-            } else {
-                // Cluster extends past image — read what we can
-                if offset < self.data.len() {
-                    let available = self.data.len() - offset;
-                    result.extend_from_slice(&self.data[offset..offset + available]);
-                }
-                break;
+        let physical_max = self.data.len() / self.geometry.cluster_size + 1;
+        let mut steps = (self.geometry.total_data_clusters as usize)
+            .saturating_add(2)
+            .min(physical_max);
+        core::iter::from_fn(move || {
+            if steps == 0 || remaining == 0 || cluster < 2 || self.geometry.fat_type.is_eof(cluster)
+            {
+                return None;
             }
+            let offset = self.geometry.cluster_to_offset(cluster)?;
+            let tail = self.data.get(offset..)?;
+            let len = remaining.min(self.geometry.cluster_size).min(tail.len());
+            if len == 0 {
+                return None;
+            }
+            remaining -= len;
+            steps -= 1;
+            if len < self.geometry.cluster_size {
+                steps = 0;
+            } else {
+                cluster = self.read_fat_entry(cluster);
+            }
+            Some(&tail[..len])
+        })
+    }
 
-            cluster = self.read_fat_entry(cluster);
-            iterations += 1;
+    fn read_cluster_chain(&self, cluster: u32, size: usize) -> Vec<u8> {
+        let mut data = Vec::new();
+        for part in self.cluster_chain(cluster, size) {
+            data.extend_from_slice(part);
         }
-
-        // Truncate to exact file size
-        result.truncate(max_bytes);
-        result
+        data
     }
 
     fn read_root_directory(&self) -> Vec<u8> {
@@ -336,7 +353,7 @@ impl<'a> FatVolume<'a> {
             FatType::Fat12 | FatType::Fat16 => {
                 let size = self.geometry.root_entry_count as usize * 32;
                 let offset = self.geometry.root_dir_offset;
-                let end = (offset + size).min(self.data.len());
+                let end = offset.saturating_add(size).min(self.data.len());
                 if offset < self.data.len() {
                     self.data[offset..end].to_vec()
                 } else {
@@ -350,26 +367,16 @@ impl<'a> FatVolume<'a> {
         }
     }
 
-    fn extract_files(&self, path_prefix: &str, entries: &mut Vec<FatFileEntry>) {
+    fn extract_files(&self, walk: &mut FatWalk) {
         let root_data = self.read_root_directory();
-        let mut total_dir_bytes = root_data.len();
-        self.parse_directory(
-            &root_data,
-            path_prefix,
-            entries,
-            MAX_DIR_DEPTH,
-            &mut total_dir_bytes,
-        );
+        if self.geometry.fat_type == FatType::Fat32 {
+            walk.visited.insert(self.geometry.root_cluster, ());
+        }
+        walk.dir_bytes_left = walk.dir_bytes_left.saturating_sub(root_data.len());
+        self.parse_directory(&root_data, "", walk, MAX_DIR_DEPTH);
     }
 
-    fn parse_directory(
-        &self,
-        dir_data: &[u8],
-        parent_path: &str,
-        entries: &mut Vec<FatFileEntry>,
-        depth: u32,
-        total_dir_bytes: &mut usize,
-    ) {
+    fn parse_directory(&self, dir_data: &[u8], parent_path: &str, walk: &mut FatWalk, depth: u32) {
         if depth == 0 {
             return;
         }
@@ -398,7 +405,10 @@ impl<'a> FatVolume<'a> {
 
             // LFN entry
             if attributes == 0x0F {
-                collect_lfn_fragment(entry, &mut lfn_fragments);
+                // Keep one extra slot to mark an invalid run.
+                if lfn_fragments.len() <= MAX_LFN_SLOTS {
+                    collect_lfn_fragment(entry, &mut lfn_fragments);
+                }
                 continue;
             }
 
@@ -412,13 +422,12 @@ impl<'a> FatVolume<'a> {
             let short_name = parse_short_name(entry);
 
             // Use LFN if available, otherwise short name
-            let name = if lfn_fragments.is_empty() {
-                short_name
+            let name = if (1..=MAX_LFN_SLOTS).contains(&lfn_fragments.len()) {
+                assemble_lfn(&mut lfn_fragments)
             } else {
-                let lfn = assemble_lfn(&mut lfn_fragments);
-                lfn_fragments.clear();
-                lfn
+                short_name
             };
+            lfn_fragments.clear();
 
             // Skip . and .. entries
             if name == "." || name == ".." {
@@ -433,6 +442,25 @@ impl<'a> FatVolume<'a> {
             let file_size =
                 u32::from_le_bytes([entry[28], entry[29], entry[30], entry[31]]) as usize;
 
+            if first_cluster < 2 || (!is_directory && file_size == 0) {
+                continue;
+            }
+            if is_directory
+                && (depth == 1
+                    || walk.dir_bytes_left == 0
+                    || walk.visited.contains_key(&first_cluster))
+            {
+                walk.skipped += 1;
+                continue;
+            }
+            let path_len = parent_path.len() + usize::from(!parent_path.is_empty()) + name.len();
+            let payload = if is_directory { 0 } else { file_size as u64 };
+            if path_len as u64 + payload > walk.budget.remaining()
+                || walk.budget.charge(path_len, "FAT").is_err()
+            {
+                walk.skipped += 1;
+                continue;
+            }
             let full_path = if parent_path.is_empty() {
                 name
             } else {
@@ -440,24 +468,29 @@ impl<'a> FatVolume<'a> {
             };
 
             if is_directory {
-                if first_cluster >= 2 {
-                    let sub_data = self.read_cluster_chain(first_cluster, 16 * 1024 * 1024);
-                    *total_dir_bytes = total_dir_bytes.saturating_add(sub_data.len());
-                    if *total_dir_bytes > MAX_TOTAL_DIR_BYTES {
-                        return;
+                walk.visited.insert(first_cluster, ());
+                let mut sub_data = Vec::new();
+                for chunk in self.cluster_chain(first_cluster, 16 * 1024 * 1024) {
+                    if chunk.len() > walk.dir_bytes_left {
+                        walk.skipped += 1;
+                        break;
                     }
-                    self.parse_directory(
-                        &sub_data,
-                        &full_path,
-                        entries,
-                        depth - 1,
-                        total_dir_bytes,
-                    );
+                    walk.dir_bytes_left -= chunk.len();
+                    sub_data.extend_from_slice(chunk);
                 }
-            } else if first_cluster >= 2 && file_size > 0 {
-                let data = self.read_cluster_chain(first_cluster, file_size);
+                self.parse_directory(&sub_data, &full_path, walk, depth - 1);
+            } else {
+                let mut data = Vec::new();
+                for chunk in self.cluster_chain(first_cluster, file_size) {
+                    if walk.budget.charge(chunk.len(), "FAT").is_err() {
+                        walk.skipped += 1;
+                        data.clear();
+                        break;
+                    }
+                    data.extend_from_slice(chunk);
+                }
                 if !data.is_empty() {
-                    entries.push(FatFileEntry {
+                    walk.entries.push(FatFileEntry {
                         path: full_path,
                         data,
                         // Last write time at 22 and date at 24, zone-less.
@@ -567,6 +600,7 @@ pub struct FatContainer {
     prefix: String,
     entries: Vec<FatFileEntry>,
     name_index: FastMap<String, usize>,
+    skipped: usize,
 }
 
 impl FatContainer {
@@ -575,11 +609,18 @@ impl FatContainer {
             return Err(Error::MaxDepthExceeded);
         }
 
-        let mut all_entries = Vec::new();
+        let mut walk = FatWalk {
+            entries: Vec::new(),
+            visited: FastMap::new(),
+            budget: OutputBudget::for_input(data.len(), 2),
+            dir_bytes_left: MAX_TOTAL_DIR_BYTES,
+            skipped: 0,
+        };
 
         let volume =
             FatVolume::parse(data).map_err(|_| Error::invalid_format("No FAT filesystem found"))?;
-        volume.extract_files("", &mut all_entries);
+        volume.extract_files(&mut walk);
+        let mut all_entries = walk.entries;
 
         // Sort for consistent ordering
         all_entries.sort_by(|a, b| a.path.cmp(&b.path));
@@ -593,6 +634,7 @@ impl FatContainer {
             prefix,
             entries: all_entries,
             name_index,
+            skipped: walk.skipped,
         })
     }
 }
@@ -618,6 +660,15 @@ impl Container for FatContainer {
             }
         }
         Ok(())
+    }
+
+    fn skipped_entries(&self) -> Option<String> {
+        (self.skipped > 0).then(|| {
+            format!(
+                "FAT: {} repeated directories or entries beyond traversal limits omitted",
+                self.skipped
+            )
+        })
     }
 
     fn info(&self) -> ContainerInfo {
@@ -780,6 +831,61 @@ mod tests {
         image[fat2_offset..fat2_offset + fat_size].copy_from_slice(&fat1_data);
 
         image
+    }
+
+    #[test]
+    fn file_aliases_share_one_output_budget() {
+        let mut image = create_fat12_image(&[("one", b"hello"), ("two", b"other"), ("end", b"!")]);
+        let root = 5 * 512;
+        image.copy_within(root + 26..root + 28, root + 32 + 26);
+        let mut budget = OutputBudget::for_input(image.len(), 2);
+        budget
+            .charge(budget.remaining() as usize - 12, "test")
+            .unwrap();
+        let mut walk = FatWalk {
+            entries: Vec::new(),
+            visited: FastMap::new(),
+            budget,
+            dir_bytes_left: MAX_TOTAL_DIR_BYTES,
+            skipped: 0,
+        };
+        FatVolume::parse(&image).unwrap().extract_files(&mut walk);
+        assert_eq!(walk.entries.len(), 2);
+        assert_eq!(walk.entries[0].data, b"hello");
+        assert_eq!(walk.entries[1].data, b"!");
+        assert_eq!(walk.skipped, 1);
+    }
+
+    #[test]
+    fn aliased_directories_are_read_once_and_reported() {
+        let mut image = create_fat12_image(&[("dir", &[0; 512]), ("alias", b"x"), ("keep", b"k")]);
+        let root = 5 * 512;
+        image[root + 11] = 0x10;
+        image[root + 32 + 11] = 0x10;
+        image.copy_within(root + 26..root + 28, root + 32 + 26);
+        image.copy_within(root + 64..root + 96, 12 * 512);
+        let disk = FatContainer::from_bytes(&image, "disk".into(), 8).unwrap();
+        assert_eq!(disk.get_file("dir/keep"), Some(&b"k"[..]));
+        assert_eq!(disk.get_file("keep"), Some(&b"k"[..]));
+        assert!(disk.get_file("alias/keep").is_none());
+        assert!(disk.skipped_entries().is_some());
+    }
+
+    #[test]
+    fn overlong_lfn_run_uses_the_short_name() {
+        let mut image = create_fat12_image(&[("safe.txt", b"ok")]);
+        let root = 5 * 512;
+        let slots = MAX_LFN_SLOTS + 1;
+        image.copy_within(root..root + 32, root + 32 * slots);
+        for slot in image[root..root + 32 * slots].chunks_exact_mut(32) {
+            slot.fill(0);
+            slot[0] = 1;
+            slot[1] = b'x';
+            slot[11] = 0x0F;
+        }
+        let disk = FatContainer::from_bytes(&image, "disk".into(), 8).unwrap();
+        assert_eq!(disk.entries.len(), 1);
+        assert_eq!(disk.entries[0].path, "safe.txt");
     }
 
     fn write_fat12_entry(image: &mut [u8], fat_offset: usize, cluster: u16, value: u16) {

@@ -325,7 +325,7 @@ fn entity_is(regid: &[u8], name: &[u8]) -> bool {
 // Volume Descriptor Sequence
 // =============================================================================
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq, Eq)]
 struct Area {
     // First sector and length in sectors, which are also logical blocks.
     start: u64,
@@ -665,9 +665,58 @@ impl Icb<'_> {
 
 // Part of a file: bytes read from the medium, then bytes that read as zero.
 struct Piece {
+    start: u64,
     at: Addr,
     stored: u64,
     zeros: u64,
+}
+
+struct Directory {
+    bytes: Vec<u8>,
+    pieces: Vec<Piece>,
+    icb: Addr,
+}
+
+impl Directory {
+    fn block_at(&self, offset: usize, block_size: u32) -> Option<Addr> {
+        let offset = offset as u64;
+        let Some(index) = self
+            .pieces
+            .partition_point(|piece| piece.start <= offset)
+            .checked_sub(1)
+        else {
+            return Some(self.icb);
+        };
+        let piece = &self.pieces[index];
+        let within = offset - piece.start;
+        if within >= piece.stored {
+            return None;
+        }
+        Some(Addr {
+            block: piece
+                .at
+                .block
+                .checked_add(u32::try_from(within / u64::from(block_size)).ok()?)?,
+            part: piece.at.part,
+        })
+    }
+
+    fn valid_location(&self, offset: usize, volume: &Volume<'_>, location: u32) -> bool {
+        let Some(at) = self.block_at(offset, volume.block_size) else {
+            return false;
+        };
+        if location == at.block {
+            return true;
+        }
+        // Windows VAT discs can retain the directory ICB location or zero
+        // when moving embedded FIDs into the backing physical partition.
+        let icb_map = volume.maps.get(usize::from(self.icb.part));
+        let extent_map = volume.maps.get(usize::from(at.part));
+        matches!(
+            (icb_map, extent_map),
+            (Some(Map::Virtual { area, .. }), Some(Map::Physical(physical))) if area == physical
+        ) && (location == self.icb.block || location == 0)
+    }
 }
 
 struct Volume<'a> {
@@ -682,19 +731,19 @@ struct Volume<'a> {
 impl<'a> Volume<'a> {
     // Reads the volume structures up to the root directory's ICB.
     fn open(data: &'a [u8]) -> Option<Self> {
-        Self::open_image(Image { data, raw: None }).or_else(|| {
-            Self::open_image(Image {
-                data,
-                raw: Some(RawCd::detect(data)?),
-            })
+        Self::open_image(Image { data, raw: None }, &BLOCK_SIZES).or_else(|| {
+            Self::open_image(
+                Image {
+                    data,
+                    raw: Some(RawCd::detect(data)?),
+                },
+                &[CD_USER_DATA_SIZE as u32],
+            )
         })
     }
 
-    fn open_image(image: Image<'a>) -> Option<Self> {
-        for block_size in BLOCK_SIZES {
-            if image.raw.is_some() && block_size as usize != CD_USER_DATA_SIZE {
-                continue;
-            }
+    fn open_image(image: Image<'a>, block_sizes: &[u32]) -> Option<Self> {
+        for &block_size in block_sizes {
             if !image.has_nsr_descriptor(block_size) {
                 continue;
             }
@@ -915,7 +964,7 @@ impl<'a> Volume<'a> {
         if icb.size > limit {
             return None;
         }
-        let data = self.file_bytes(icb, limit, work).ok()?;
+        let (data, _) = self.file_bytes(icb, limit, work).ok()?;
 
         let (entries, label) = if icb.file_type == FILE_TYPE_VAT {
             // UDF 2.00: a header, then the entries.
@@ -1191,7 +1240,7 @@ impl<'a> Volume<'a> {
                 _ => (
                     Addr::parse(descriptor, 12),
                     u64::from(le32(descriptor, 8)),
-                    u64::from(le32(descriptor, 4) & EXTENT_LEN_MASK),
+                    u64::from(le32(descriptor, 4)),
                 ),
             };
 
@@ -1214,6 +1263,16 @@ impl<'a> Volume<'a> {
                 pos = 0;
                 continue;
             }
+            if icb.alloc == ALLOC_EXTENDED {
+                if recorded > len {
+                    return Err("has recorded bytes outside its allocated extent");
+                }
+                if information > len {
+                    return Err(
+                        "uses an unsupported information length larger than its allocated extent",
+                    );
+                }
+            }
             if information == 0 {
                 continue;
             }
@@ -1228,6 +1287,7 @@ impl<'a> Volume<'a> {
                 0
             };
             pieces.push(Piece {
+                start: total,
                 at,
                 stored,
                 zeros: information - stored,
@@ -1278,13 +1338,18 @@ impl<'a> Volume<'a> {
 
     // The first `limit` bytes of a file's data. `limit` must be a size that
     // is safe to allocate.
-    fn file_bytes(&self, icb: &Icb<'a>, limit: u64, work: &mut Work) -> Checked<Vec<u8>> {
+    fn file_bytes(
+        &self,
+        icb: &Icb<'a>,
+        limit: u64,
+        work: &mut Work,
+    ) -> Checked<(Vec<u8>, Vec<Piece>)> {
         let size = icb.size.min(limit);
         if icb.alloc == ALLOC_EMBEDDED {
             return usize::try_from(size)
                 .ok()
                 .and_then(|size| icb.area().get(..size))
-                .map(<[u8]>::to_vec)
+                .map(|bytes| (bytes.to_vec(), Vec::new()))
                 .ok_or("is shorter than its recorded length");
         }
         let pieces = self.pieces(icb, size, work)?;
@@ -1295,7 +1360,7 @@ impl<'a> Volume<'a> {
         }
         let mut data = Vec::with_capacity(prealloc_hint(size));
         self.append(&pieces, size, &mut data);
-        Ok(data)
+        Ok((data, pieces))
     }
 }
 
@@ -1315,6 +1380,19 @@ pub fn is_udf_image(data: &[u8]) -> bool {
 // ISO 9660 volume beside one of these cannot have followed its changes.
 pub(crate) fn is_writable_volume(data: &[u8]) -> bool {
     Volume::open(data).is_some_and(|volume| volume.writable)
+}
+
+pub(crate) fn probe_cd(cd: RawCd<'_>) -> Option<bool> {
+    Some(
+        Volume::open_image(
+            Image {
+                data: &[],
+                raw: Some(cd),
+            },
+            &BLOCK_SIZES,
+        )?
+        .writable,
+    )
 }
 
 pub(crate) fn volume_label(data: &[u8]) -> Option<String> {
@@ -1423,7 +1501,7 @@ impl<'v, 'a> Walk<'v, 'a> {
         self.skipped.note(message);
     }
 
-    fn read_dir(&mut self, at: Addr) -> Checked<Vec<u8>> {
+    fn read_dir(&mut self, at: Addr) -> Checked<Directory> {
         let icb = self.volume.icb(at, &mut self.work)?;
         if icb.file_type != FILE_TYPE_DIRECTORY {
             return Err("is not recorded as a directory");
@@ -1436,9 +1514,13 @@ impl<'v, 'a> Walk<'v, 'a> {
             return Err("exceeds the directory size limit");
         }
         let len = icb.size;
-        let data = self.volume.file_bytes(&icb, len, &mut self.work)?;
+        let (bytes, pieces) = self.volume.file_bytes(&icb, len, &mut self.work)?;
         self.dir_bytes_left -= len;
-        Ok(data)
+        Ok(Directory {
+            bytes,
+            pieces,
+            icb: icb.at,
+        })
     }
 
     // Paths are charged too: deep trees repeat their prefix in every entry.
@@ -1484,7 +1566,8 @@ impl<'v, 'a> Walk<'v, 'a> {
 
     // A directory is a run of file identifier descriptors, which may cross
     // block boundaries.
-    fn parse_dir(&mut self, dir: &[u8], parent: &str, depth: u32) {
+    fn parse_dir(&mut self, directory: &Directory, parent: &str, depth: u32) {
+        let dir = &directory.bytes;
         let mut pos = 0;
         while pos < dir.len() && !self.exhausted {
             let rest = &dir[pos..];
@@ -1497,7 +1580,14 @@ impl<'v, 'a> Walk<'v, 'a> {
                 break;
             };
             let fid = &rest[..len];
+            let valid_location = directory.valid_location(pos, self.volume, le32(fid, 12));
             pos += len.next_multiple_of(4);
+            if !valid_location {
+                self.skipped.note(format!(
+                    "directory '{parent}' has an entry with an incorrect tag location"
+                ));
+                continue;
+            }
 
             let characteristics = fid[18];
             if characteristics & (FID_DELETED | FID_PARENT) != 0 {
@@ -1897,6 +1987,20 @@ mod tests {
         data: Vec<u8>,
     }
 
+    // Layout is decided after the individual file identifiers are built.
+    fn place_fids(bytes: &mut [u8], block: u32, bs: usize) {
+        let mut pos = 0;
+        while let Some(fid) = bytes
+            .get_mut(pos..)
+            .filter(|fid| fid.len() >= FID_FIXED_LEN && le16(fid, 0) == TAG_FILE_IDENTIFIER)
+        {
+            let len = FID_FIXED_LEN + usize::from(le16(fid, 36)) + usize::from(fid[19]);
+            fid[12..16].copy_from_slice(&(block + (pos / bs) as u32).to_le_bytes());
+            checksum(&mut fid[..TAG_LEN]);
+            pos += len.next_multiple_of(4);
+        }
+    }
+
     impl Disc {
         fn new(bs: usize) -> Self {
             Self::with_sectors(bs, PART + PART_BLOCKS)
@@ -1929,6 +2033,16 @@ mod tests {
 
         // A descriptor at `sector` whose tag records `location`.
         fn desc(&mut self, sector: u32, location: u32, id: u16, mut body: Vec<u8>) -> &mut Self {
+            if matches!(id, FE | EFE)
+                && body[27] == FILE_TYPE_DIRECTORY
+                && le16(&body, 34) & 7 == u16::from(ALLOC_EMBEDDED)
+            {
+                let fixed = if id == FE { 176 } else { 216 };
+                let at = fixed + le32(&body, fixed - 8) as usize;
+                if let Some(dir) = body.get_mut(at..) {
+                    place_fids(dir, location, self.bs);
+                }
+            }
             seal(&mut body, id, location);
             self.put(sector, &body)
         }
@@ -1940,7 +2054,10 @@ mod tests {
         }
 
         fn data_at(&mut self, block: u32, bytes: &[u8]) -> &mut Self {
-            self.put(PART + block, bytes)
+            self.put(PART + block, bytes);
+            let start = (PART + block) as usize * self.bs;
+            place_fids(&mut self.data[start..start + bytes.len()], block, self.bs);
+            self
         }
 
         // A directory embedded in its file entry, or in an extent at
@@ -2140,6 +2257,44 @@ mod tests {
             result.unwrap();
             assert_eq!(entries, plain_listing(bs), "{bs}");
             assert_eq!(volume_label(&disc.data).as_deref(), Some("TestVol"));
+        }
+    }
+
+    #[test]
+    fn xa_sector_views_preserve_the_cooked_logical_block_size() {
+        use crate::formats::cd_sector::XA_SECTOR_SIZES;
+        for bs in [512, 1024, 2048, 4096] {
+            let mut cooked = plain(bs).data;
+            cooked.resize(cooked.len().next_multiple_of(2048), 0);
+            for size in XA_SECTOR_SIZES {
+                let mut framed = Vec::new();
+                for sector in cooked.chunks_exact(2048) {
+                    framed.extend_from_slice(&[0; 8]);
+                    framed.extend_from_slice(sector);
+                    framed.resize(framed.len() + size - 2056, 0);
+                }
+                assert_eq!(
+                    probe_cd(RawCd::xa(&framed, size).unwrap()),
+                    Some(Volume::open(&cooked).unwrap().writable)
+                );
+                if bs <= 1024 {
+                    assert_eq!(
+                        crate::detect_format("disc.bin", Some(&framed)),
+                        Some(ContainerFormat::Udf)
+                    );
+                    let mut entries = Vec::new();
+                    let report = crate::Loader::from_bytes(framed, "disc.bin")
+                        .visit_with_report(crate::EntryType::Leaves, |entry| {
+                            let path = entry.path.strip_prefix("disc.bin/").unwrap();
+                            entries.push((path.to_string(), entry.data.to_vec()));
+                            Ok(crate::VisitAction::Continue)
+                        })
+                        .unwrap();
+                    assert_eq!(report.root_format, Some(ContainerFormat::Udf));
+                    assert!(report.diagnostics.is_empty());
+                    assert_eq!(entries, plain_listing(bs));
+                }
+            }
         }
     }
 
@@ -2505,6 +2660,36 @@ mod tests {
     }
 
     #[test]
+    fn external_vat_directory_accepts_windows_fid_locations() {
+        for location in [0u32, 1, 31, 9] {
+            let mut disc = vat_disc();
+            disc.at(
+                PART_BLOCKS - 1,
+                FE,
+                embedded(FILE_TYPE_UNSPECIFIED, &vat_150(&VAT_TARGETS)),
+            );
+            let mut id = fid(&name8("file.txt"), (1, 2), 0);
+            id[12..16].copy_from_slice(&location.to_le_bytes());
+            checksum(&mut id[..TAG_LEN]);
+            disc.put(PART + 31, &id);
+            let size = id.len() as u32;
+            let root = entry(
+                FE,
+                FILE_TYPE_DIRECTORY,
+                ALLOC_LONG,
+                u64::from(size),
+                &long_ad(RECORDED, size, (0, 31)),
+            );
+            disc.desc(PART + VAT_TARGETS[1], 1, FE, root);
+            if location == 9 {
+                assert!(skipped(&disc.data).1.contains("tag location"));
+            } else {
+                assert_mini(&disc.data);
+            }
+        }
+    }
+
+    #[test]
     fn newest_vat_wins_and_may_be_followed_by_blank_blocks() {
         let mut disc = vat_disc();
         // An older table that maps the root elsewhere.
@@ -2859,6 +3044,35 @@ mod tests {
             disc.at(block, FE, body);
         }
         assert!(!is_udf_image(&disc.data));
+    }
+
+    #[test]
+    fn extended_descriptor_cannot_read_beyond_its_extent() {
+        for (recorded, information) in [(8, 3), (3, 8)] {
+            let mut disc = plain_with(2048, &[file("bad", FREE)]);
+            let ad = ext_ad(RECORDED, 4, recorded, information, (0, 10));
+            disc.at(
+                FREE,
+                FE,
+                entry(FE, FILE_TYPE_REGULAR, ALLOC_EXTENDED, 3, &ad),
+            );
+            let (paths, why) = skipped(&disc.data);
+            assert_eq!(paths, PLAIN_PATHS);
+            assert!(why.contains("allocated extent"));
+        }
+    }
+
+    #[test]
+    fn misplaced_identifier_is_skipped_without_losing_later_siblings() {
+        let mut disc = plain(2048);
+        let start = (PART + 11) as usize * 2048 + parent(ROOT).len();
+        let tag = &mut disc.data[start..start + TAG_LEN];
+        tag[12..16].copy_from_slice(&12u32.to_le_bytes());
+        checksum(tag);
+        let (paths, why) = skipped(&disc.data);
+        assert!(!paths.iter().any(|p| p.ends_with("inner.bin")));
+        assert!(paths.iter().any(|p| p.ends_with("sparse")));
+        assert!(why.contains("tag location"));
     }
 
     #[test]

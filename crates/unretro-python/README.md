@@ -115,7 +115,7 @@ Invalid combinations raise `ValueError`:
 - `Entry` supports file-like methods: `read`, `seek`, `tell`, `readable`, `seekable`.
 - `Loader` iteration, `walk` and `listdir` raise `RuntimeError` when the root cannot be opened, is not a supported container, or fails during traversal.
 - `open` raises `FileNotFoundError` when the root path or the entry does not exist, `OSError` when the root exists but cannot be read, and `RuntimeError` when the root is unsupported or corrupt.
-- Recoverable nested traversal issues are emitted as Python warnings.
+- `Loader` iteration, `walk` and `listdir` emit `UserWarning` for recoverable traversal issues, including skipped damaged or unsupported files. `Loader` and `walk` deliver the completion warning on the thread that exhausts the iterator. `listdir` warns before returning its list. A caller using `warnings.simplefilter("error", UserWarning)` receives an exception at that point. Stopping an iterator early skips the completion warning.
 
 ## ContainerFormat and Metadata
 

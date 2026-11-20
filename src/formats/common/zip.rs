@@ -531,6 +531,7 @@ fn extract(
     entry: &CentralEntry<'_>,
     name: &str,
     input_left: &mut usize,
+    output_left: u64,
 ) -> Result<Vec<u8>> {
     let method = entry.method;
     if entry.disk != 0 {
@@ -560,7 +561,22 @@ fn extract(
             format_args!("declared size {declared} exceeds {limit} byte limit"),
         ));
     }
+    if declared > output_left {
+        return Err(entry_error(
+            name,
+            "output exceeds the size budget for this archive",
+        ));
+    }
     let compressed = compressed_data(data, base, entry, name)?;
+    if method == METHOD_STORED && compressed.len() as u64 != declared {
+        return Err(entry_error(
+            name,
+            format_args!(
+                "size mismatch: directory declares {declared} bytes, data holds {}",
+                compressed.len()
+            ),
+        ));
+    }
 
     // Local entries that do not overlap add up to at most the archive length.
     // Holding every read to that total, whether or not it then decodes, keeps
@@ -645,6 +661,10 @@ fn compression_name(method: u16) -> Option<&'static str> {
 
 impl ZipContainer {
     pub fn from_bytes(data: &[u8], prefix: String, _depth: u32) -> Result<Self> {
+        Self::read(data, prefix, crate::MAX_DECOMPRESSED_SIZE)
+    }
+
+    fn read(data: &[u8], prefix: String, mut output_left: u64) -> Result<Self> {
         let directory = read_directory(data)?;
         let (start, end, base) = locate_directory(data, &directory)?;
         let mut remaining = data
@@ -676,12 +696,18 @@ impl ZipContainer {
             }
             // Entries are independent (APPNOTE 4.1.8): one that cannot be
             // read is reported and the rest are still listed.
-            match extract(data, base, &entry, &name, &mut input_left) {
-                Ok(file_data) => entries.push(ZipEntry {
-                    path: name,
-                    data: file_data,
-                    metadata: entry_metadata(&entry),
-                }),
+            match extract(data, base, &entry, &name, &mut input_left, output_left) {
+                Ok(mut file_data) => {
+                    // Spare capacity in a decoder buffer must not accumulate
+                    // across retained files.
+                    file_data.shrink_to_fit();
+                    output_left -= file_data.len() as u64;
+                    entries.push(ZipEntry {
+                        path: name,
+                        data: file_data,
+                        metadata: entry_metadata(&entry),
+                    });
+                }
                 Err(problem) => skipped.note(&problem),
             }
         }
@@ -1067,6 +1093,23 @@ mod tests {
 
     fn archive(entries: &[TestEntry]) -> Vec<u8> {
         build(entries, &Layout::default())
+    }
+
+    #[test]
+    fn retained_output_is_bounded_across_independent_entries() {
+        let bytes = archive(&[
+            TestEntry::stored("a", b"abc"),
+            TestEntry::stored("b", b"234"),
+            TestEntry::stored("c", b"x"),
+        ]);
+        let container = ZipContainer::read(&bytes, String::new(), 4).unwrap();
+        let paths: Vec<_> = container
+            .entries
+            .iter()
+            .map(|entry| entry.path.as_str())
+            .collect();
+        assert_eq!(paths, ["a", "c"]);
+        assert!(container.skipped_entries().unwrap().contains("size budget"));
     }
 
     fn open(data: &[u8]) -> ZipContainer {

@@ -242,10 +242,10 @@ Read-only, `macintosh` feature (`ContainerFormat::StuffIt`). Decoded natively, a
   forks and segmented archives are not supported.
 - Compression methods 0 (stored), 1 (run-length), 2 (LZW), 3 (Huffman), 13 (LZ77 with
   Huffman codes), 14 (raw deflate stream) and 15 (Arsenic).
-- StuffIt installer applications (signatures such as `ST46`) store every fork with
-  method 14 in a block framing that is not decoded. A file in which every fork with
-  contents is such a fork is not detected as an archive: it stays an ordinary file
-  entry instead of a container without contents.
+- A classic `ST46` installer stays an ordinary file when its archive is complete
+  and every nonempty fork matches the known unsupported single-block method-14
+  framing. Detection checks the framing without inflating the forks. A mixed or
+  uncertain layout remains a container, so later readable forks are available.
 - Files are yielded as `<archive>/<folder>/.../<name>` with the data fork as the entry
   data, followed by `<file>/..namedfork/rsrc` when the resource fork holds a resource
   map. Each stored name is one path component: `/`, `\`, `:` and control characters in
@@ -274,11 +274,11 @@ in `no_std` and `wasm32` builds.
 - Files are yielded as `<archive>/<folder>/.../<name>` with the data fork as the entry
   data, followed by `<file>/..namedfork/rsrc` when the resource fork holds a resource
   map. Folders themselves are not yielded.
-- Each file's CRC-32, which covers both forks, is verified. A file that fails it, is
-  encrypted, or whose data fork cannot be decoded is left out; a resource fork that
-  cannot be decoded is left out on its own and the data fork is still yielded (then
-  unverified). Either case is reported by one recoverable `ContainerEntriesSkipped`
-  diagnostic. The directory CRC is not verified.
+- When both forks decode, their combined CRC-32 must match. Encrypted files, files
+  with an unreadable data fork, and files with a mismatched CRC are skipped. If only
+  the resource fork fails, the data fork is yielded. The recoverable
+  `ContainerEntriesSkipped` diagnostic counts data forks salvaged without a verifiable
+  combined CRC. The reader does not check the directory CRC.
 - Segmented archives are read through their last segment, the only one that holds the
   directory; it opens as `ContainerFormat::CompactPro` and lists every file of the set.
   The earlier segments are looked up next to it, on disk or in the same archive or
@@ -574,7 +574,11 @@ and `wasm32` builds; the reader was written from the format specification in
   directly opens on its own.
 - Limits: 99 `FILE` commands; track numbers 1 to 99, increasing; one track at most
   4 GiB; all tracks of a sheet together at most the size of the sheet and its track
-  files (at least 16 MiB, at most 4 GiB).
+  files (at least 16 MiB, at most 4 GiB). Separately, the sheet and backing buffers
+  acquired for it share one 4 GiB allowance. Filesystem loaders check the regular file
+  length before reading and bound the read if the file grows. When using
+  `CueBinContainer::from_bytes_with_siblings` directly, callers control allocations
+  inside their lookup function. The reader checks each returned buffer before retaining it.
 - Not supported: track files of type `WAVE`, `MP3`, `AIFF` or any other audio container
   (never looked up), `MODE2/2324` and unknown track modes, separate `.sub` sub-channel
   files, CD-TEXT, and the audio in a gap before `INDEX 01`. Mode 2 Form 2 sectors
@@ -732,14 +736,16 @@ and `wasm32` builds).
   through their first volume: it lists the files of every volume and joins files split
   across them. Later volumes are looked up next to it — in the same directory for a
   file on disk, in the same parent container when nested — and are not listed again
-  when the volume before them is present. A missing volume leaves out the files that
+  when an opened archive reader consumed them. A missing volume leaves out the files that
   need it and is reported; a volume without its predecessor opens on its own and
   carries the rest of the set. Data passed as bytes has no siblings, so only whole
   files are listed.
 - Not supported: garbled (password-protected) files, ARJ-PROTECT recovery data.
 - A file that is garbled, incomplete, corrupt (CRC mismatch, truncated or invalid compressed
   data), of an unknown method or over the output limit is left out. All unpacked files
-  of one archive together may not exceed 1024 times the archive size (at least 16 MiB).
+  of one volume set share a budget of 1024 times its accepted input size (minimum
+  16 MiB once per set, maximum 4 GiB). The combined pieces of one split file must fit
+  the file limit before the next piece is decoded.
   A damaged header ends the listing there and keeps the files found so far. In all
   these cases every readable file is still yielded and the traversal reports one
   recoverable `ContainerEntriesSkipped` diagnostic.
@@ -801,7 +807,9 @@ Read-only, `dos` feature (`ContainerFormat::Rar`). Read and decoded natively, al
   group together, since a file that repeats earlier ones packs to almost nothing.
   Files over the limit are still read while they total at most 16 MiB per archive, so
   that constant data such as a blank disk image is not refused. A RAR 5 file of
-  undeclared size may decode to as much as the ratio limit allows.
+  undeclared size must also fit the remaining volume-set output budget. Retained files
+  and copies share 1000 times the set's input size, with a 16 MiB minimum and a 4 GiB
+  maximum. The over-ratio exemption also applies once across the set.
 - File names of the RAR 1.3/1.4 container, and names of the RAR 1.50 to 4.x format that
   have no Unicode form and are not UTF-8, are read as code page 437.
 - Multi-volume sets are read through their first volume, which lists the files of every
@@ -811,8 +819,7 @@ Read-only, `dos` feature (`ContainerFormat::Rar`). Read and decoded natively, al
   `name.sfx`) is followed by `name.part2.rar` or `name.r00` in the same way.
   Later volumes are looked up next to the first one — in the same directory for a file
   on disk, in the same parent container when nested — and are not listed again when
-  a volume that reaches them (the one before, or an earlier one across up to eight
-  missing volumes) is present.
+  an opened archive reader consumed them.
 - A missing volume leaves out the files that need it and is reported as one recoverable
   `ContainerEntriesSkipped` diagnostic; when one of the next eight volumes is present,
   reading continues there, so files that lie entirely in later volumes are still
@@ -1101,7 +1108,9 @@ specification in [docs/lisa/](lisa/README.md).
   An entry that is encrypted, uses another method, fails its size or CRC-32 check,
   or shares its data with other entries beyond the archive's own length is left out;
   every readable entry is still yielded and the traversal reports one recoverable
-  `ContainerEntriesSkipped` diagnostic.
+  `ContainerEntriesSkipped` diagnostic. Retained data from all entries in a ZIP shares
+  a 4 GiB cap. An entry that would exceed the remainder is skipped before decoding,
+  so a later, smaller member can still fit.
 - All central directory headers inside the declared directory size are listed, also
   when the 16-bit entry count is smaller (writers without ZIP64 wrap it at 65536).
 - Names: Info-ZIP Unicode Path field, then UTF-8 when flagged or when the bytes are
@@ -1237,7 +1246,12 @@ Resource forks are not exploded into per-resource files next to their owner:
 - `xvf archive.zip/app/..namedfork/rsrc` extracts that fork's resources as
   `<TYPE>/<name>` files; `--exec` receives every individual resource.
 
-Path sanitization is applied for filesystem safety, and conflicting output names are disambiguated.
+The CLI opens the selected output directory and creates regular files relative to that
+handle. A destination path that leads outside this directory through a symbolic link
+fails extraction. Permission bits, Finder attributes and native resource forks are
+applied through the opened file. Conflicting archive names are disambiguated.
+A member named `..namedfork/rsrc` inside an ordinary archive cannot change the root
+selected for extracting its siblings.
 
 ## Python Usage
 
@@ -1291,7 +1305,7 @@ fmt = unretro.detect_format("archive.zip")
 Behavior notes:
 
 - `open(path)` returns the first matching leaf entry from traversal scope.
-- `walk`/`listdir` emit Python warnings for recoverable traversal diagnostics.
+- `Loader` iteration, `walk` and `listdir` emit Python warnings for recoverable traversal diagnostics, including damaged or unsupported files that were skipped. `Loader` and `walk` warn on the thread that exhausts the iterator. `listdir` warns before returning. Python warning filters can promote the warning to an exception. Stopping iteration early does not produce a completion warning.
 - `Loader` iteration, `walk` and `listdir` raise `RuntimeError` for root-level failures (root missing, unreadable, unsupported, or corrupt).
 - `open` raises `FileNotFoundError` when the root path or entry does not exist, `OSError` when the root exists but cannot be read, and `RuntimeError` when the root is unsupported or corrupt.
 

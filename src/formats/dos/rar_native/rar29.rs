@@ -377,6 +377,17 @@ impl Decoder {
         self.group.is_some()
     }
 
+    #[cfg(test)]
+    pub(crate) fn decode_member(
+        &mut self,
+        packed: &[u8],
+        unpacked_size: u64,
+        solid: bool,
+        max_output: u64,
+    ) -> Result<Vec<u8>> {
+        self.decode_member_with_fuel(packed, unpacked_size, solid, max_output, &mut { u64::MAX })
+    }
+
     // Decodes one member. `packed` is its packed bytes (pieces of a split
     // member concatenated, 12.5), `unpacked_size` the declared size U,
     // `solid` whether it continues the group of the member decoded before.
@@ -384,12 +395,13 @@ impl Decoder {
     // Nothing is produced beyond `max_output`. After an error, or a member
     // without an end marker, `can_continue` is false and later solid
     // members fail until a member starts a new group.
-    pub(crate) fn decode_member(
+    pub(crate) fn decode_member_with_fuel(
         &mut self,
         packed: &[u8],
         unpacked_size: u64,
         solid: bool,
         max_output: u64,
+        fuel: &mut u64,
     ) -> Result<Vec<u8>> {
         if !solid {
             // 12.2 step 1: a fresh state.
@@ -428,6 +440,7 @@ impl Decoder {
             .map_err(|_| out_of_memory())?;
         let mut run = Run {
             g: &mut group,
+            fuel,
             window: &mut self.window,
             reader: BitReader::new(packed),
             out,
@@ -461,6 +474,7 @@ enum Step {
 
 // One member being decoded.
 struct Run<'a> {
+    fuel: &'a mut u64,
     g: &'a mut Group,
     window: &'a mut Vec<u8>,
     reader: BitReader<'a>,
@@ -556,7 +570,10 @@ impl Run<'_> {
                 (Some(head), Some(tail)) => (head, tail),
                 _ => return Err(corrupt("RAR: filter block outside the window")),
             };
-            let filtered = self.g.filters.run_next(head, tail, self.start)?;
+            let filtered = self
+                .g
+                .filters
+                .run_next_with_fuel(head, tail, self.start, self.fuel)?;
             match offset
                 .checked_add(len)
                 .and_then(|end| self.out.get_mut(offset..end))

@@ -246,9 +246,9 @@ fn parse_apple_single(data: &[u8]) -> Result<AppleSingleParts> {
 
     let num_entries = u16::from_be_bytes([data[24], data[25]]) as usize;
 
-    let mut filename = String::new();
-    let mut data_fork = Vec::new();
-    let mut resource_fork = Vec::new();
+    let mut raw_name: &[u8] = &[];
+    let mut data_fork: &[u8] = &[];
+    let mut resource_fork: &[u8] = &[];
     let mut file_type = [0u8; 4];
     let mut creator = [0u8; 4];
     let mut modified = None;
@@ -278,28 +278,17 @@ fn parse_apple_single(data: &[u8]) -> Result<AppleSingleParts> {
             data[entry_offset + 11],
         ]) as usize;
 
-        if offset
+        let Some(body) = offset
             .checked_add(length)
-            .is_none_or(|end| end > data.len())
-        {
+            .and_then(|end| data.get(offset..end))
+        else {
             continue;
-        }
+        };
 
         match entry_id {
-            ENTRY_DATA_FORK => {
-                data_fork = data[offset..offset + length].to_vec();
-            }
-            ENTRY_RESOURCE_FORK => {
-                resource_fork = data[offset..offset + length].to_vec();
-            }
-            ENTRY_REAL_NAME => {
-                // Classic writers store Mac OS Roman, Mac OS X writes UTF-8.
-                let raw = &data[offset..offset + length];
-                filename = match core::str::from_utf8(raw) {
-                    Ok(name) => name.to_string(),
-                    Err(_) => decode_mac_roman(raw),
-                };
-            }
+            ENTRY_DATA_FORK => data_fork = body,
+            ENTRY_RESOURCE_FORK => resource_fork = body,
+            ENTRY_REAL_NAME => raw_name = body,
             ENTRY_FILE_DATES if length >= 8 => {
                 let seconds = i32::from_be_bytes([
                     data[offset + 4],
@@ -319,14 +308,18 @@ fn parse_apple_single(data: &[u8]) -> Result<AppleSingleParts> {
         }
     }
 
-    if filename.is_empty() {
-        filename = "untitled".to_string();
-    }
+    let filename = if raw_name.is_empty() {
+        "untitled".to_string()
+    } else {
+        // Classic writers store Mac OS Roman, Mac OS X writes UTF-8.
+        core::str::from_utf8(raw_name)
+            .map_or_else(|_| decode_mac_roman(raw_name), ToString::to_string)
+    };
 
     Ok((
         filename,
-        data_fork,
-        resource_fork,
+        data_fork.to_vec(),
+        resource_fork.to_vec(),
         file_type,
         creator,
         modified,
@@ -439,6 +432,31 @@ mod tests {
         let crc = calc_macbinary_crc(&header[..124]);
         header[124..126].copy_from_slice(&crc.to_be_bytes());
         assert!(is_macbinary_file(&header));
+    }
+
+    #[test]
+    fn apple_single_uses_the_last_in_bounds_descriptor_for_each_field() {
+        let mut bytes = vec![0u8; 26];
+        bytes[24..26].copy_from_slice(&7u16.to_be_bytes());
+        let body = 26u32 + 7 * 12;
+        for (kind, offset, len) in [
+            (ENTRY_DATA_FORK, body, 2u32),
+            (ENTRY_RESOURCE_FORK, body, 2),
+            (ENTRY_REAL_NAME, body, 2),
+            (ENTRY_DATA_FORK, body + 1, 1),
+            (ENTRY_RESOURCE_FORK, body, 1),
+            (ENTRY_REAL_NAME, body + 1, 1),
+            (ENTRY_REAL_NAME, u32::MAX, 2),
+        ] {
+            bytes.extend(kind.to_be_bytes());
+            bytes.extend(offset.to_be_bytes());
+            bytes.extend(len.to_be_bytes());
+        }
+        bytes.extend(b"ab");
+        let (name, data, rsrc, ..) = parse_apple_single(&bytes).unwrap();
+        assert_eq!(name, "b");
+        assert_eq!(data, b"b");
+        assert_eq!(rsrc, b"a");
     }
 
     #[test]

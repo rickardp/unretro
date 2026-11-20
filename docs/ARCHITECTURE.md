@@ -46,6 +46,7 @@ Python bindings (crates/unretro-python/src/)
 | `src/path_utils.rs` | Path sanitization helpers for generic and HFS-style paths. |
 | `src/error.rs` | Unified error type and crate `Result<T>`. |
 | `src/attributes.rs` | Optional filesystem attribute preservation helpers (std-only). |
+| `src/fs_access.rs` | Shared `cap-std` directory capabilities for confined CUE reads and CLI writes (std-only). |
 | `src/formats/*` | Concrete container implementations grouped by format family. |
 | `src/cli/*` | Tree presentation helpers used by the CLI binary. |
 
@@ -65,6 +66,14 @@ Primary path for Rust API calls:
 Important internals:
 
 - For `from_path`, data access can be memory-mapped using `MmapStrategy`.
+- Root file opening reuses its detected format. StuffIt installer detection checks the
+  framing of each nonempty fork without inflating it. XA probes use sector views.
+  Opening materializes the disc only after the selected format matches the view.
+- ARJ and RAR readers identify the volumes they consumed. Directory and archive traversal
+  use those identities to suppress duplicates. A later volume remains available if an
+  earlier reader failed, was skipped, or stopped before reaching it.
+- Python `Loader` and `walk` workers send completion warnings through their result channels.
+  Warning filters run on the consumer thread when iteration is exhausted.
 - `from_virtual_path` uses `parse_virtual_path` to split filesystem archive path and internal path filter.
 - Macintosh special handling includes AppleDouble integration and optional native resource-fork traversal.
 - AppleDouble sidecar pairing runs in `visit_container_recursive` for every container, including `DirectoryContainer`. It looks siblings up through `Container::has_file`/`has_dir`/`read_file` (relative to the container root); the defaults wrap `get_file` (`has_dir` is false), and `DirectoryContainer` checks the disk. A sidecar is skipped when the container also has a native fork for the same file.
@@ -92,7 +101,9 @@ resources under its data file, and a standalone AppleDouble or a bare resource-f
 puts them under `<file>/..namedfork/rsrc` (a content-detected `ResourceFork` container
 whose path does not already end in the suffix yields that fork entry, and the loader
 descends into it).
-See [USAGE.md](USAGE.md#classic-mac-resource-forks).
+The loader marks a root file’s own fork with `Entry::is_root_resource_fork()`. CLI
+extraction uses that provenance when selecting the root, so a similarly named member
+cannot redirect extraction. See [USAGE.md](USAGE.md#classic-mac-resource-forks).
 
 ## Path Sanitization Contracts
 
@@ -210,7 +221,10 @@ Design intent:
     multi-session image and lists El Torito boot images under `..eltorito/`.
     `udf.rs` reads UDF volumes (ECMA-167 as profiled by OSTA UDF 1.02 to 2.60):
     partition maps are resolved to image sectors first (physical, VAT, sparable,
-    metadata), then the directory tree is walked from the file set descriptor. Both
+    metadata), then the directory tree is walked from the file set descriptor.
+    Windows VAT directory identifiers may retain the virtual ICB location or zero
+    when stored in the backing physical partition; those tags never select a read
+    address. Both
     are clean-room, written from the standards only. The loader probes ISO 9660 before
     UDF, so bridge discs stay ISO 9660 unless their ISO root directory is unreadable or
     their UDF partition is a writable one (packet-written discs).
@@ -230,9 +244,10 @@ Design intent:
   - `cue.rs` parses a cue sheet and cuts the track files it names into one entry per
     track (data cooked to 2048-byte sectors, audio as little-endian PCM). It never opens
     a file itself: candidate names go to a lookup closure
-    (`CueBinContainer::from_bytes_with_siblings`). For a sheet on disk the loader passes
-    `read_cue_track_file`, confined to the sheet's directory; for a nested sheet it asks
-    the parent container, as for ARJ and RAR volumes. A consumed track file cannot be
+    with the remaining acquisition allowance. On disk both the direct loader and
+    `DirectoryContainer::read_cue_file` open backing files relative to the sheet's
+    directory handle. An archive parent checks the borrowed entry length before copying
+    it. The public `from_bytes_with_siblings` adapter checks the caller's returned buffer. A consumed track file cannot be
     told from its name, so `visit_container_recursive` keeps a `cue::SheetIndex` per
     container that holds back and hides the track files of the sheets it opens. Written
     only from the prose specification in `docs/cue/` (clean-room; see its README).
@@ -288,7 +303,9 @@ Each implementation provides container open/visit behavior and metadata extracti
 - Shared tree formatting helpers: `src/cli/tree.rs`.
 - CLI relies on library loader and does not duplicate format logic.
 - Listing supports `tree`, `tsv`, and `json` outputs.
-- Extraction pipeline applies path normalization/sanitization and optional preservation toggles.
+- CLI extraction normalizes virtual paths and resolves output relative to an open
+  `cap_std::fs::Dir`. Permissions and macOS attributes are applied to the opened file.
+  The filesystem dependency is enabled by `std`. Byte-only readers also build with `no_std`.
 
 ## Python Binding Architecture
 

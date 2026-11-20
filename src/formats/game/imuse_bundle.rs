@@ -87,7 +87,8 @@ impl ImuseBundleContainer {
         }
 
         let mut budget = OutputBudget::for_input(data.len(), MAX_BUNDLE_EXPANSION);
-        let mut entries = Vec::with_capacity(num_files);
+        let mut table_bytes_left = data.len();
+        let mut entries = Vec::new();
         for i in 0..num_files {
             let off = dir_offset + i * entry_size;
             let (name, track_off, track_size) = if is_lb23 {
@@ -124,7 +125,13 @@ impl ImuseBundleContainer {
                 )));
             }
 
-            let entry_data = extract_track(data, track_off, track_size, &mut budget)?;
+            let entry_data = extract_track(
+                data,
+                track_off,
+                track_size,
+                &mut budget,
+                &mut table_bytes_left,
+            )?;
             let sanitized = crate::sanitize_path_component(&name);
             let path = format!("{prefix}/{sanitized}");
             entries.push(BundleEntry {
@@ -155,6 +162,7 @@ fn extract_track(
     off: usize,
     size: usize,
     budget: &mut OutputBudget,
+    table_bytes_left: &mut usize,
 ) -> Result<EntryData> {
     let head = &data[off..off + 4.min(size)];
     // Raw iMUSE resource — stored as-is.
@@ -186,12 +194,21 @@ fn extract_track(
 
     // Read the block table; short-circuit to raw passthrough if any block
     // uses an audio codec (13/15) or something we haven't ported.
-    let mut blocks = Vec::with_capacity(num_items);
-    for i in 0..num_items {
-        let e = table_start + i * COMP_BLOCK_ENTRY_SIZE;
-        let b_off = u32::from_be_bytes(data[e..e + 4].try_into().unwrap()) as usize;
-        let b_size = u32::from_be_bytes(data[e + 4..e + 8].try_into().unwrap()) as usize;
-        let b_codec = u32::from_be_bytes(data[e + 8..e + 12].try_into().unwrap());
+    let table = &data[table_start..table_end];
+    let blocks = || {
+        table.chunks_exact(COMP_BLOCK_ENTRY_SIZE).map(|entry| {
+            let offset = u32::from_be_bytes(entry[..4].try_into().unwrap()) as usize;
+            let size = u32::from_be_bytes(entry[4..8].try_into().unwrap()) as usize;
+            let codec = u32::from_be_bytes(entry[8..12].try_into().unwrap());
+            (offset, size, codec)
+        })
+    };
+    for (b_off, b_size, b_codec) in blocks() {
+        *table_bytes_left = table_bytes_left
+            .checked_sub(COMP_BLOCK_ENTRY_SIZE)
+            .ok_or_else(|| {
+                Error::invalid_format("iMUSE COMP block tables exceed the bundle size")
+            })?;
         if !is_supported_codec(b_codec) {
             return Ok(EntryData::Raw { offset: off, size });
         }
@@ -206,18 +223,19 @@ fn extract_track(
                 "COMP block extends past track boundary",
             ));
         }
-        blocks.push((start, b_size, b_codec));
     }
 
-    let mut out = Vec::with_capacity(crate::limits::prealloc_hint(
-        (num_items as u64).saturating_mul(CHUNK_SIZE as u64),
-    ));
+    let mut out = Vec::new();
     let mut scratch = [0u8; CHUNK_SIZE];
-    for (start, b_size, codec) in blocks {
-        let input = &data[start..start + b_size];
+    for (relative, size, codec) in blocks() {
+        // These ranges were validated in the table pass above.
+        let start = off + relative;
+        let input = &data[start..start + size];
         let written = decompress_block(codec, input, &mut scratch)?;
         // Blocks may overlap and directory entries may share a track.
         budget.charge(written, "iMUSE bundle")?;
+        out.try_reserve(written)
+            .map_err(|_| Error::decompression("iMUSE: cannot allocate track"))?;
         out.extend_from_slice(&scratch[..written]);
     }
     Ok(EntryData::Owned(out))
@@ -609,9 +627,18 @@ mod tests {
     }
 
     #[test]
+    fn repeated_empty_block_tables_spend_a_shared_work_allowance() {
+        let blob = aliased_bundle(4, &comp_track(16, b""));
+        let error = ImuseBundleContainer::from_bytes(&blob, String::new(), 32)
+            .err()
+            .unwrap();
+        assert!(error.to_string().contains("block tables exceed"));
+    }
+
+    #[test]
     fn comp_track_reassembles_stored_blocks() {
         let track = comp_track(3, b"abcd");
-        match extract_track(&track, 0, track.len(), &mut test_budget()).unwrap() {
+        match extract_track(&track, 0, track.len(), &mut test_budget(), &mut track.len()).unwrap() {
             EntryData::Owned(out) => assert_eq!(out, b"abcdabcdabcd"),
             EntryData::Raw { .. } => panic!("expected decoded track"),
         }
@@ -621,10 +648,10 @@ mod tests {
     fn comp_block_count_does_not_drive_allocation() {
         // 4096 empty blocks would have reserved 32 MiB up front.
         let track = comp_track(4096, b"");
-        match extract_track(&track, 0, track.len(), &mut test_budget()).unwrap() {
+        match extract_track(&track, 0, track.len(), &mut test_budget(), &mut track.len()).unwrap() {
             EntryData::Owned(out) => {
                 assert!(out.is_empty());
-                assert!(out.capacity() <= crate::limits::PREALLOC_LIMIT);
+                assert_eq!(out.capacity(), 0);
             }
             EntryData::Raw { .. } => panic!("expected decoded track"),
         }

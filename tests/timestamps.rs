@@ -16,7 +16,7 @@ fn times(fixture: &str) -> BTreeMap<String, Option<Timestamp>> {
         .join(fixture);
     let root = format!("{}/", path.display());
     let mut seen = BTreeMap::new();
-    Loader::from_path(&path)
+    Loader::from_bytes(std::fs::read(&path).unwrap(), path.to_string_lossy())
         .visit(EntryType::Leaves, |entry| {
             let inside = entry.path.strip_prefix(&root).unwrap_or(entry.path);
             let modified = entry.metadata.and_then(|metadata| metadata.modified);

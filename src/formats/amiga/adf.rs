@@ -1,7 +1,7 @@
 use crate::compat::{FastMap, String, Vec, format, vec};
 use crate::error::{Error, Result};
 use crate::format::ContainerFormat;
-use crate::limits::{OutputBudget, prealloc_hint};
+use crate::limits::OutputBudget;
 use crate::sanitize_archive_path;
 use crate::{Container, ContainerInfo, Entry, Metadata, Timestamp};
 
@@ -266,7 +266,7 @@ impl<'a> Walk<'a> {
 
     fn read_file(&mut self, header: &'a [u8], header_block: u32) -> Vec<u8> {
         let size = be32(header, OFF_BYTE_SIZE) as usize;
-        let mut out = Vec::with_capacity(prealloc_hint(size as u64));
+        let mut out = Vec::new();
         let mut remaining = size;
         let mut list = header;
 
@@ -295,6 +295,11 @@ impl<'a> Walk<'a> {
                 if self.budget.charge(take, "ADF").is_err() {
                     self.exhausted = true;
                     self.damage(header_block, "file data exceeds the size budget");
+                    return out;
+                }
+                if out.try_reserve(take).is_err() {
+                    self.exhausted = true;
+                    self.damage(header_block, "cannot allocate file data");
                     return out;
                 }
                 out.extend_from_slice(&payload[..take]);
@@ -939,6 +944,21 @@ mod tests {
         let entry = &c.entries[0];
         assert_eq!(entry.data.len(), BLOCK_SIZE);
         assert!(entry.data.capacity() <= crate::limits::PREALLOC_LIMIT);
+        assert!(c.damage.as_deref().unwrap().contains("shorter"));
+    }
+
+    #[test]
+    fn empty_damaged_files_do_not_retain_declared_capacity() {
+        let mut b = Builder::new(FFS, DD_BLOCKS);
+        let root = b.root;
+        for index in 0..128 {
+            let header = b.file(root, format!("f{index}").as_bytes(), b"");
+            b.put(header, OFF_BYTE_SIZE, u32::MAX);
+            b.seal(header);
+        }
+        let c = open(&b.image);
+        assert_eq!(c.entries.len(), 128);
+        assert!(c.entries.iter().all(|entry| entry.data.capacity() == 0));
         assert!(c.damage.as_deref().unwrap().contains("shorter"));
     }
 

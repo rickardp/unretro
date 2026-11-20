@@ -840,6 +840,70 @@ fn self_extracting_first_volume() {
 }
 
 #[test]
+fn standalone_rar4_sibling_is_listed_after_a_continuing_volume() {
+    let set = zip_of(&[("x.part1.rar", RAR4_V1_PART1), ("x.part2.rar", RAR4_A1)]);
+    let outcome = read(&set, "set.zip");
+    assert_entries(
+        &outcome,
+        "set.zip",
+        &[
+            ("x.part1.rar/A.TXT", TEXT_A),
+            ("x.part2.rar/A.TXT", TEXT_A),
+            ("x.part2.rar/DIR/B.TXT", TEXT_B),
+        ],
+    );
+}
+
+#[test]
+fn first_volume_beyond_the_set_limit_is_listed_separately() {
+    // Twenty-byte empty volumes keep the full boundary case below 150 KiB.
+    let mut empty = rar4_archive(29, &[]);
+    empty[10] = 1;
+    let crc = crc32(&empty[9..]) as u16;
+    empty[7..9].copy_from_slice(&crc.to_le_bytes());
+    let names: Vec<_> = (1..=1001).map(|n| format!("x.part{n:04}.rar")).collect();
+    let files: Vec<_> = names
+        .iter()
+        .enumerate()
+        .map(|(i, name)| {
+            let contents = if i == 1000 {
+                RAR4_V1_PART2
+            } else {
+                empty.as_slice()
+            };
+            (name.as_str(), contents)
+        })
+        .collect();
+    let set = zip_of(&files);
+    let outcome = read(&set, "set.zip");
+    assert_entries(&outcome, "set.zip", &[("x.part1001.rar/B.TXT", TEXT_B)]);
+}
+
+#[test]
+fn standalone_and_self_extracting_first_volumes_can_coexist() {
+    let big = big_bin();
+    let mut module = b"MZ".to_vec();
+    module.resize(512, 0);
+    module.extend_from_slice(RAR4_V1_PART1);
+    let set = zip_of(&[
+        ("x.part2.rar", RAR4_V1_PART2),
+        ("x.part1.rar", RAR4_A1),
+        ("x.part1.sfx", &module),
+    ]);
+    assert_clean(
+        &set,
+        "set.zip",
+        &[
+            ("x.part1.rar/A.TXT", TEXT_A),
+            ("x.part1.rar/DIR/B.TXT", TEXT_B),
+            ("x.part1.sfx/A.TXT", TEXT_A),
+            ("x.part1.sfx/BIG.BIN", &big),
+            ("x.part1.sfx/B.TXT", TEXT_B),
+        ],
+    );
+}
+
+#[test]
 fn rar4_encryption_is_reported() {
     assert_skipped(
         RAR4_A4,
@@ -955,6 +1019,47 @@ fn rar5_three_volume_set() {
 }
 
 #[test]
+fn corrupt_rar_predecessor_does_not_hide_later_files() {
+    for predecessor in [b"corrupt volume".as_slice(), RAR5_C8_VOL1] {
+        // The signature-bearing variant has a damaged main header.
+        let mut damaged = predecessor.to_vec();
+        if damaged.starts_with(b"Rar!") {
+            damaged[8] ^= 1;
+        }
+        let set = zip_of(&[
+            ("x.part1.rar", &damaged),
+            ("x.part2.rar", RAR5_C8_VOL2),
+            ("x.part3.rar", RAR5_C8_VOL3),
+        ]);
+        let mut recovered = false;
+        let report = Loader::from_bytes(set, "set.zip")
+            .visit_with_report(EntryType::Leaves, |entry| {
+                recovered |= entry.path == "set.zip/x.part2.rar/e.txt" && entry.data == TEXT_B;
+                Ok(VisitAction::Continue)
+            })
+            .unwrap();
+        assert!(!report.has_root_failures());
+        assert!(recovered, "{:?}", report.diagnostics);
+    }
+}
+
+#[test]
+fn standalone_rar_predecessor_does_not_own_a_later_volume() {
+    let set = zip_of(&[
+        ("x.part1.rar", RAR5_G6),
+        ("x.part2.rar", RAR5_C8_VOL2),
+        ("x.part3.rar", RAR5_C8_VOL3),
+    ]);
+    let outcome = read(&set, "set.zip");
+    assert!(
+        outcome
+            .entries
+            .iter()
+            .any(|(name, data)| name == "x.part2.rar/e.txt" && data == TEXT_B)
+    );
+}
+
+#[test]
 fn rar5_encryption_is_reported() {
     assert_skipped(
         RAR5_C6,
@@ -1053,4 +1158,34 @@ fn corrupt_streams_are_skipped() {
             read(&changed(archive, &[(offset, !archive[offset])]), "flip.rar");
         }
     }
+}
+
+#[test]
+fn duplicate_continuation_names_keep_distinct_member_contents() {
+    let mut builder = tar::Builder::new(Vec::new());
+    for (name, data) in [("x.rar", RAR4_A1), ("x.r00", RAR4_A1), ("x.r00", RAR5_G6)] {
+        let mut header = tar::Header::new_gnu();
+        header.set_size(data.len() as u64);
+        header.set_mode(0o644);
+        header.set_cksum();
+        builder.append_data(&mut header, name, data).unwrap();
+    }
+    let outcome = read(&builder.into_inner().unwrap(), "duplicates.tar");
+    assert!(!outcome.root_failure);
+    assert!(
+        outcome
+            .entries
+            .iter()
+            .any(|(name, _)| name == "x.r00/h.txt"),
+        "{:?}",
+        outcome.entries
+    );
+    assert!(
+        outcome
+            .entries
+            .iter()
+            .any(|(name, _)| name == "x.r00/DIR/B.TXT"),
+        "{:?}",
+        outcome.entries
+    );
 }

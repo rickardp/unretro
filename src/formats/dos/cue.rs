@@ -1013,6 +1013,33 @@ impl CueBinContainer {
         depth: u32,
         get_sibling: &dyn Fn(&str) -> Option<Vec<u8>>,
     ) -> Result<Self> {
+        Self::from_bytes_with_limited_siblings(data, prefix, depth, &|name, _limit| {
+            get_sibling(name)
+        })
+    }
+
+    pub(crate) fn from_bytes_with_limited_siblings(
+        data: &[u8],
+        prefix: String,
+        depth: u32,
+        get_sibling: &dyn Fn(&str, u64) -> Option<Vec<u8>>,
+    ) -> Result<Self> {
+        Self::from_bytes_with_acquisition_limit(
+            data,
+            prefix,
+            depth,
+            get_sibling,
+            crate::MAX_DECOMPRESSED_SIZE,
+        )
+    }
+
+    fn from_bytes_with_acquisition_limit(
+        data: &[u8],
+        prefix: String,
+        depth: u32,
+        get_sibling: &dyn Fn(&str, u64) -> Option<Vec<u8>>,
+        acquisition_limit: u64,
+    ) -> Result<Self> {
         if depth == 0 {
             return Err(Error::MaxDepthExceeded);
         }
@@ -1025,10 +1052,19 @@ impl CueBinContainer {
 
         // Track files in the order of `resolved.groups`.
         let mut files: Vec<Vec<u8>> = Vec::new();
+        let mut remaining = acquisition_limit.saturating_sub(data.len() as u64);
+        let mut refused = false;
         let resolved = resolve(&sheet, sheet_stem, &mut |candidate| {
-            get_sibling(candidate)
-                .map(|bytes| files.push(bytes))
-                .is_some()
+            let Some(bytes) = get_sibling(candidate, remaining) else {
+                return false;
+            };
+            if bytes.len() as u64 > remaining {
+                refused = true;
+                return false;
+            }
+            remaining -= bytes.len() as u64;
+            files.push(bytes);
+            true
         });
 
         // Per sheet track: its file and extent, or why it cannot be read.
@@ -1055,6 +1091,9 @@ impl CueBinContainer {
             .fold(data.len(), |total, file| total.saturating_add(file.len()));
         let mut budget = OutputBudget::for_input(input_len, OUTPUT_BUDGET_RATIO);
         let mut skipped = Skipped::default();
+        if refused {
+            skipped.note("backing files exceed the acquisition budget".to_string());
+        }
         let mut tracks = Vec::new();
         for (declared, outcome) in sheet.tracks.iter().zip(outcomes) {
             let number = declared.number;
@@ -1370,6 +1409,32 @@ mod tests {
 
     fn names(listing: &Listing) -> Vec<&str> {
         listing.entries.iter().map(|e| e.0.as_str()).collect()
+    }
+
+    #[test]
+    fn backing_acquisition_uses_one_shared_allowance() {
+        let sheet = b"FILE \"a.bin\" BINARY\n TRACK 01 AUDIO\n INDEX 01 00:00:00\nFILE \"b.bin\" BINARY\n TRACK 02 AUDIO\n INDEX 01 00:00:00\n";
+        let limits = core::cell::RefCell::new(Vec::new());
+        let container = CueBinContainer::from_bytes_with_acquisition_limit(
+            sheet,
+            "disc.cue".to_string(),
+            4,
+            &|_name, remaining| {
+                limits.borrow_mut().push(remaining);
+                Some(vec![0; 2352])
+            },
+            sheet.len() as u64 + 2352,
+        )
+        .unwrap();
+        assert_eq!(limits.borrow()[0], 2352);
+        assert!(limits.borrow()[1..].iter().all(|&remaining| remaining == 0));
+        assert_eq!(container.files.len(), 1);
+        assert!(
+            container
+                .skipped_entries()
+                .unwrap()
+                .contains("acquisition budget")
+        );
     }
 
     #[test]

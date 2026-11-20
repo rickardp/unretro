@@ -296,6 +296,30 @@ fn volume_sets_in_a_directory_are_listed_once() {
 }
 
 #[test]
+fn pending_split_claims_its_continuations_without_the_main_volume_flag() {
+    let scratch = Scratch::with("pending", &VOL_SET);
+    let mut first = fixture("vol.arj");
+    let size = usize::from(u16::from_le_bytes([first[2], first[3]]));
+    first[8] &= !0x04;
+    let mut crc = flate2::Crc::new();
+    crc.update(&first[4..4 + size]);
+    first[4 + size..8 + size].copy_from_slice(&crc.sum().to_le_bytes());
+    std::fs::write(scratch.0.join("vol.arj"), first).unwrap();
+    let (found, report) = leaves_at(&scratch.path(""));
+    assert!(report.diagnostics.is_empty(), "{:?}", report.diagnostics);
+    assert_eq!(
+        found,
+        owned(&[
+            ("vol.arj/big.bin", 90_000, BIG),
+            ("vol.arj/plain.txt", 13, PLAIN),
+            ("vol.arj/runs.bin", 3394, RUNS),
+            ("vol.arj/split.bin", 30000, SPLIT),
+            ("vol.arj/text.txt", 3903, TEXT),
+        ])
+    );
+}
+
+#[test]
 fn missing_volume_is_reported_and_the_rest_of_the_set_survives() {
     // vol.a01, the middle of big.bin, is absent.
     let scratch = Scratch::with("gap", &["vol.arj", "vol.a02", "vol.a03", "vol.a04"]);
@@ -334,6 +358,79 @@ fn missing_volume_is_reported_and_the_rest_of_the_set_survives() {
             .iter()
             .any(|m| m.contains("'big.bin' continues a file from an earlier volume"))
     );
+}
+
+#[test]
+fn corrupt_predecessor_does_not_hide_readable_later_volumes() {
+    let scratch = Scratch::with("corrupt-gap", &["vol.arj", "vol.a02", "vol.a03", "vol.a04"]);
+    std::fs::write(scratch.0.join("vol.a01"), b"corrupt volume").unwrap();
+    let (found, report) = leaves_at(&scratch.path(""));
+    assert_eq!(
+        found,
+        owned(&[
+            ("vol.a01", b"corrupt volume".len(), fnv1a(b"corrupt volume")),
+            ("vol.a02/runs.bin", 3394, RUNS),
+            ("vol.a02/split.bin", 30000, SPLIT),
+            ("vol.a02/text.txt", 3903, TEXT),
+            ("vol.arj/plain.txt", 13, PLAIN),
+        ])
+    );
+    assert!(!report.has_root_failures());
+    assert!(
+        report
+            .diagnostics
+            .iter()
+            .any(|d| d.message.contains("not an ARJ archive"))
+    );
+
+    #[cfg(feature = "common")]
+    {
+        use std::io::Write;
+        let mut bytes = Vec::new();
+        {
+            let mut zip = zip::ZipWriter::new(std::io::Cursor::new(&mut bytes));
+            for name in VOL_SET {
+                zip.start_file(name, zip::write::SimpleFileOptions::default())
+                    .unwrap();
+                zip.write_all(&std::fs::read(scratch.0.join(name)).unwrap())
+                    .unwrap();
+            }
+            zip.finish().unwrap();
+        }
+        let (entries, report) = leaves(bytes, "set.zip");
+        let mut in_zip: Vec<_> = entries
+            .iter()
+            .map(|entry| {
+                (
+                    entry.path.strip_prefix("set.zip/").unwrap().to_string(),
+                    entry.size,
+                    entry.hash,
+                )
+            })
+            .collect();
+        in_zip.sort();
+        assert_eq!(in_zip, found);
+        assert!(!report.has_root_failures());
+    }
+}
+
+#[test]
+fn standalone_predecessor_does_not_hide_later_arj_files() {
+    let scratch = Scratch::with(
+        "standalone-gap",
+        &["vol.arj", "vol.a02", "vol.a03", "vol.a04"],
+    );
+    std::fs::write(scratch.0.join("vol.a01"), fixture("m0.arj")).unwrap();
+    let (found, report) = leaves_at(&scratch.path(""));
+    for name in ["runs.bin", "split.bin", "text.txt"] {
+        assert!(
+            found
+                .iter()
+                .any(|(path, _, _)| path == &format!("vol.a02/{name}")),
+            "{found:?}"
+        );
+    }
+    assert!(!report.has_root_failures());
 }
 
 #[test]

@@ -107,7 +107,7 @@ fn parse_gpt_partitions(data: &[u8]) -> Result<Vec<GptPartition>> {
             entry[40], entry[41], entry[42], entry[43], entry[44], entry[45], entry[46], entry[47],
         ]);
 
-        if end_lba < start_lba {
+        if start_lba == 0 || end_lba < start_lba {
             continue;
         }
 
@@ -135,6 +135,7 @@ fn parse_gpt_partitions(data: &[u8]) -> Result<Vec<GptPartition>> {
 pub struct GptContainer {
     prefix: String,
     partitions: Vec<(String, Vec<u8>)>,
+    skipped: usize,
 }
 
 impl GptContainer {
@@ -153,16 +154,30 @@ impl GptContainer {
             return Err(Error::invalid_format("No valid GPT partitions found"));
         }
 
-        let partitions = parts
-            .into_iter()
-            .map(|p| {
-                let part_data = data[p.offset..p.offset + p.length].to_vec();
-                let name = partition_name(p.index, &part_data, numeric_identifiers);
-                (name, part_data)
-            })
-            .collect();
-
-        Ok(Self { prefix, partitions })
+        let mut ranges = Vec::<core::ops::Range<usize>>::new();
+        let mut partitions = Vec::new();
+        let mut skipped = 0;
+        let mut budget = crate::limits::OutputBudget::for_input(data.len(), 1);
+        for p in parts {
+            let range = p.offset..p.offset + p.length;
+            if ranges
+                .iter()
+                .any(|old| old.start < range.end && range.start < old.end)
+                || budget.charge(p.length, "GPT").is_err()
+            {
+                skipped += 1;
+                continue;
+            }
+            let part_data = &data[range.clone()];
+            ranges.push(range);
+            let name = partition_name(p.index, part_data, numeric_identifiers);
+            partitions.push((name, part_data.to_vec()));
+        }
+        Ok(Self {
+            prefix,
+            partitions,
+            skipped,
+        })
     }
 }
 
@@ -189,6 +204,15 @@ impl Container for GptContainer {
             }
         }
         Ok(())
+    }
+
+    fn skipped_entries(&self) -> Option<String> {
+        (self.skipped > 0).then(|| {
+            format!(
+                "GPT: {} overlapping or over-budget partition(s) omitted",
+                self.skipped
+            )
+        })
     }
 
     fn info(&self) -> ContainerInfo {
@@ -284,6 +308,20 @@ mod tests {
         image[entry_offset + 32..entry_offset + 40].copy_from_slice(&0u64.to_le_bytes());
         image[entry_offset + 40..entry_offset + 48].copy_from_slice(&u64::MAX.to_le_bytes());
         assert!(parse_gpt_partitions(&image).is_ok_and(|found| found.is_empty()));
+    }
+
+    #[test]
+    fn overlapping_partition_does_not_hide_a_later_disjoint_one() {
+        let mut image = create_gpt_image(&[0x55; 512]);
+        image[592..596].copy_from_slice(&3u32.to_le_bytes());
+        image.copy_within(1024..1152, 1152);
+        image.copy_within(1024..1152, 1280);
+        image[1312..1320].copy_from_slice(&4u64.to_le_bytes());
+        image[1320..1328].copy_from_slice(&4u64.to_le_bytes());
+        let disk = GptContainer::from_bytes(&image, "disk".into(), 8, true).unwrap();
+        assert_eq!(disk.partitions.len(), 2);
+        assert!(disk.has_file("p2.img"));
+        assert!(disk.skipped_entries().is_some());
     }
 
     #[test]

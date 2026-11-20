@@ -9,6 +9,7 @@ pub(crate) const CD_USER_DATA_SIZE: usize = 2048;
 #[derive(Clone, Copy)]
 pub(crate) struct RawCd<'a> {
     data: &'a [u8],
+    sector_size: usize,
 }
 
 impl<'a> RawCd<'a> {
@@ -32,18 +33,33 @@ impl<'a> RawCd<'a> {
             return None;
         }
 
-        Some(Self { data })
+        Some(Self {
+            data,
+            sector_size: CD_RAW_SECTOR_SIZE,
+        })
+    }
+
+    pub(crate) fn xa(data: &'a [u8], sector_size: usize) -> Option<Self> {
+        xa_output_size(data.len() as u64, sector_size)?;
+        (XA_SECTOR_SIZES.contains(&sector_size) && has_xa_subheaders(data, sector_size))
+            .then_some(Self { data, sector_size })
     }
 
     pub(crate) fn sector_count(&self) -> usize {
-        self.data.len() / CD_RAW_SECTOR_SIZE
+        self.data.len() / self.sector_size
     }
 
     pub(crate) fn user_data(&self, sector: usize) -> &'a [u8] {
-        let raw = &self.data[sector * CD_RAW_SECTOR_SIZE..][..CD_RAW_SECTOR_SIZE];
+        let raw = &self.data[sector * self.sector_size..][..self.sector_size];
         // Mode 2 (XA) sectors have an 8-byte subheader after the 16-byte
         // sync and header; Form 1 then carries the same 2048 bytes as Mode 1.
-        let offset = if raw[15] == 0x02 { 24 } else { 16 };
+        let offset = if self.sector_size != CD_RAW_SECTOR_SIZE {
+            XA_SUBHEADER_SIZE
+        } else if raw[15] == 0x02 {
+            24
+        } else {
+            16
+        };
         &raw[offset..offset + CD_USER_DATA_SIZE]
     }
 }
@@ -89,15 +105,28 @@ pub(crate) fn has_xa_subheaders(data: &[u8], sector_size: usize) -> bool {
 // anchor at sector 256.
 pub(crate) const XA_HEAD_SECTORS: usize = 320;
 
+fn xa_output_size(input_len: u64, sector_size: usize) -> Option<usize> {
+    if !XA_SECTOR_SIZES.contains(&sector_size) || input_len % sector_size as u64 != 0 {
+        return None;
+    }
+    let size = (input_len / sector_size as u64).checked_mul(CD_USER_DATA_SIZE as u64)?;
+    crate::limits::checked_output_size(size, "XA image").ok()
+}
+
+#[cfg(all(test, feature = "std"))]
+std::thread_local! {
+    pub(crate) static XA_COOKS: core::cell::Cell<usize> = const { core::cell::Cell::new(0) };
+}
+
 // The user data of every sector. A Form 2 sector gives the first 2048 of
 // its 2324 bytes. `None` when the copy is over the output limit or cannot
 // be allocated.
 pub(crate) fn cook_xa(data: &[u8], sector_size: usize) -> Option<Vec<u8>> {
-    let size = (data.len() / sector_size) as u64 * CD_USER_DATA_SIZE as u64;
+    #[cfg(all(test, feature = "std"))]
+    XA_COOKS.with(|calls| calls.set(calls.get() + 1));
+    let size = xa_output_size(data.len() as u64, sector_size)?;
     let mut cooked = Vec::new();
-    cooked
-        .try_reserve_exact(crate::limits::checked_output_size(size, "XA image").ok()?)
-        .ok()?;
+    cooked.try_reserve_exact(size).ok()?;
     for sector in data.chunks_exact(sector_size) {
         cooked.extend_from_slice(&sector[XA_SUBHEADER_SIZE..][..CD_USER_DATA_SIZE]);
     }
@@ -108,6 +137,21 @@ pub(crate) fn cook_xa(data: &[u8], sector_size: usize) -> Option<Vec<u8>> {
 mod tests {
     use super::*;
     use crate::compat::vec;
+
+    #[test]
+    fn xa_geometry_is_checked_before_probing_or_allocation() {
+        for sector_size in XA_SECTOR_SIZES {
+            let max_sectors = crate::MAX_DECOMPRESSED_SIZE / CD_USER_DATA_SIZE as u64;
+            assert_eq!(
+                xa_output_size(sector_size as u64 * 17, sector_size),
+                Some(17 * CD_USER_DATA_SIZE)
+            );
+            assert!(xa_output_size((max_sectors + 1) * sector_size as u64, sector_size).is_none());
+            assert!(xa_output_size(u64::MAX, sector_size).is_none());
+            assert!(xa_output_size(17 * sector_size as u64 + 1, sector_size).is_none());
+        }
+        assert!(xa_output_size(0, 0).is_none());
+    }
 
     fn framed(sectors: usize, sector_size: usize) -> Vec<u8> {
         let mut data = vec![0u8; sectors * sector_size];

@@ -17,6 +17,7 @@ import gzip
 import tarfile
 import tempfile
 import zipfile
+import warnings
 from pathlib import Path
 
 import pytest
@@ -158,6 +159,44 @@ class TestLoader:
         entries = list(loader)
         # Should still work with depth 1
         assert len(entries) >= 1
+
+    @pytest.mark.parametrize("from_bytes", [False, True])
+    @pytest.mark.parametrize("filtered", [False, True])
+    def test_loader_warns_for_skipped_entries(self, tmp_path, from_bytes, filtered):
+        buf = io.BytesIO()
+        with zipfile.ZipFile(buf, "w", zipfile.ZIP_STORED) as zf:
+            zf.writestr("good.txt", b"readable")
+            zf.writestr("bad.txt", b"unique damaged payload")
+        damaged = buf.getvalue().replace(b"unique damaged payload", b"Unique damaged payload")
+        if from_bytes:
+            loader = unretro.Loader(data=damaged, name="damaged.zip")
+        else:
+            path = tmp_path / "damaged.zip"
+            path.write_bytes(damaged)
+            loader = unretro.Loader(path=str(path))
+        if filtered:
+            loader = loader.filter_extension(["does-not-match"])
+        for _ in range(2):
+            with pytest.warns(UserWarning, match="ContainerEntriesSkipped") as seen:
+                iterator = iter(loader)
+                entries = list(iterator)
+                assert list(iterator) == []
+            assert len(seen) == 1
+            assert [entry.name for entry in entries] == ([] if filtered else ["good.txt"])
+
+    def test_loader_recoverable_warning_can_be_an_error(self):
+        buf = io.BytesIO()
+        with zipfile.ZipFile(buf, "w", zipfile.ZIP_STORED) as zf:
+            zf.writestr("bad.txt", b"unique damaged payload")
+        damaged = buf.getvalue().replace(b"unique damaged payload", b"Unique damaged payload")
+        with warnings.catch_warnings():
+            warnings.simplefilter("error", UserWarning)
+            with pytest.raises(UserWarning, match="ContainerEntriesSkipped"):
+                list(unretro.Loader(data=damaged, name="damaged.zip"))
+
+    def test_loader_healthy_archive_does_not_warn(self, simple_zip_bytes, recwarn):
+        assert len(list(unretro.Loader(data=simple_zip_bytes, name="good.zip"))) == 3
+        assert not recwarn
 
     def test_loader_missing_path_raises(self, tmp_path):
         """Iterating a missing root raises instead of yielding nothing."""
@@ -427,6 +466,22 @@ class TestOpen:
 # =============================================================================
 
 class TestWalk:
+    @pytest.mark.parametrize("topdown", [True, False])
+    def test_walk_completion_warnings_honor_filters(self, tmp_path, topdown):
+        buf = io.BytesIO()
+        with zipfile.ZipFile(buf, "w", zipfile.ZIP_STORED) as zf:
+            zf.writestr("good.txt", b"readable")
+            zf.writestr("bad.txt", b"unique damaged payload")
+        path = tmp_path / "damaged.zip"
+        path.write_bytes(buf.getvalue().replace(b"unique damaged payload", b"Unique damaged payload"))
+        with pytest.warns(UserWarning, match="ContainerEntriesSkipped") as seen:
+            assert list(unretro.walk(str(path), topdown=topdown))
+        assert len(seen) == 1
+        with warnings.catch_warnings():
+            warnings.simplefilter("error", UserWarning)
+            with pytest.raises(UserWarning, match="ContainerEntriesSkipped"):
+                list(unretro.walk(str(path), topdown=topdown))
+
     """Tests for unretro.walk() function."""
 
     def test_walk_basic(self, temp_zip_file):

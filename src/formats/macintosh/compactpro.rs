@@ -87,11 +87,7 @@ pub fn is_compactpro_archive(data: &[u8]) -> bool {
     // First byte of index should have a valid name length (1-31 chars)
     let first_name_byte = data[index_start];
     let name_len = first_name_byte & 0x3F;
-    if name_len == 0 || name_len > 31 {
-        return false;
-    }
-
-    true
+    name_len != 0 && name_len <= 31
 }
 
 /// The number of this segment when `data` is the last segment of a segmented
@@ -467,6 +463,7 @@ fn build_metadata(hdr: &FileHeader) -> Option<Metadata> {
 struct Skipped {
     count: usize,
     first: Option<String>,
+    unverified: usize,
 }
 
 impl Skipped {
@@ -479,72 +476,130 @@ impl Skipped {
 
     fn summary(self) -> Option<String> {
         self.first.map(|first| {
-            format!(
+            let mut message = format!(
                 "CompactPro: {} unreadable file(s) or fork(s) left out, first: {first}",
                 self.count
-            )
+            );
+            if self.unverified > 0 {
+                message.push_str(&format!(
+                    "; combined CRC unverified for {} salvaged data fork(s)",
+                    self.unverified
+                ));
+            }
+            message
         })
     }
 }
 
-fn read_fork(
-    packed_area: &[u8],
-    start: Option<usize>,
-    packed: u32,
-    unpacked: u32,
-    lzh: bool,
-    budget: &mut OutputBudget,
-) -> Result<Vec<u8>> {
-    if unpacked == 0 {
-        return Ok(Vec::new());
-    }
-    let input = start
-        .and_then(|start| packed_area.get(start..start.checked_add(packed as usize)?))
-        .ok_or_else(|| Error::invalid_format("CompactPro fork lies outside the archive"))?;
-    budget.charge(unpacked as usize, "CompactPro fork")?;
-    let output = if lzh {
-        decompress_rle_lzh(input, unpacked as usize)?
-    } else {
-        decompress_rle(input, unpacked as usize)
-    };
-    if output.len() != unpacked as usize {
-        return Err(Error::decompression("CompactPro fork is truncated"));
-    }
-    Ok(output)
+// A file starts at a segment-relative offset; its two forks can continue
+// across segments. Skip the preceding fork without materializing it.
+struct ForkReader<'a> {
+    bodies: Vec<Option<&'a [u8]>>,
+    packed_left: usize,
+    output: OutputBudget,
 }
 
-// The `len` packed bytes of a file that starts at `pos` of segment `volume`.
-// They run on through the segments that follow, past each one's header.
-fn packed_bytes<'a>(
-    bodies: &[Option<&'a [u8]>],
-    volume: usize,
-    pos: u32,
-    len: usize,
-) -> core::result::Result<Cow<'a, [u8]>, String> {
-    let outside = || "lies outside the archive".to_string();
-    if len == 0 {
-        return Ok(Cow::Borrowed(&[]));
-    }
-    if volume == 0 || volume > bodies.len() {
-        return Err(outside());
-    }
-    let mut start = (pos as usize).checked_sub(CPTHDRSIZE).ok_or_else(outside)?;
-    let mut joined = Vec::new();
-    for (index, body) in bodies.iter().enumerate().skip(volume - 1) {
-        let body =
-            body.ok_or_else(|| format!("segment {} of {} is missing", index + 1, bodies.len()))?;
-        let rest = body.get(start..).ok_or_else(outside)?;
-        let want = len - joined.len();
-        if joined.is_empty() && rest.len() >= want {
-            return Ok(Cow::Borrowed(&rest[..want]));
+impl ForkReader<'_> {
+    fn read(&mut self, file: &FileHeader, resource: bool) -> Result<Vec<u8>> {
+        let (skip, packed, unpacked, flag) = if resource {
+            (
+                0,
+                file.comp_rsrc_length,
+                file.rsrc_length,
+                FLAG_RSRC_COMPRESSED,
+            )
+        } else {
+            (
+                file.comp_rsrc_length,
+                file.comp_data_length,
+                file.data_length,
+                FLAG_DATA_COMPRESSED,
+            )
+        };
+        if unpacked == 0 {
+            return Ok(Vec::new());
         }
-        joined.extend_from_slice(&rest[..want.min(rest.len())]);
-        if joined.len() == len {
-            return Ok(Cow::Owned(joined));
+        let packed = packed as usize;
+        if u64::from(unpacked) > self.output.remaining() {
+            return Err(Error::decompression(
+                "CompactPro fork exceeds the output size budget",
+            ));
         }
-        start = 0;
+        let outside = || Error::invalid_format("CompactPro fork lies outside the archive");
+        let first = if self.bodies.len() == 1 {
+            0
+        } else {
+            usize::from(file.volume)
+                .checked_sub(1)
+                .ok_or_else(outside)?
+        };
+        let start = (file.file_pos as usize)
+            .checked_sub(CPTHDRSIZE)
+            .ok_or_else(outside)?;
+        let mut skip = skip as usize;
+        let mut remaining = packed;
+        let mut parts = Vec::new();
+        for (index, body) in self.bodies.iter().enumerate().skip(first) {
+            let body = body.ok_or_else(|| {
+                Error::invalid_format(format!(
+                    "segment {} of {} is missing",
+                    index + 1,
+                    self.bodies.len()
+                ))
+            })?;
+            let body = if index == first {
+                body.get(start..).ok_or_else(outside)?
+            } else {
+                body
+            };
+            if skip >= body.len() {
+                skip -= body.len();
+                continue;
+            }
+            let rest = &body[skip..];
+            skip = 0;
+            let take = remaining.min(rest.len());
+            parts.push(&rest[..take]);
+            remaining -= take;
+            if remaining == 0 {
+                break;
+            }
+        }
+        if remaining != 0 || skip != 0 || packed == 0 {
+            return Err(outside());
+        }
+        self.packed_left = self.packed_left.checked_sub(packed).ok_or_else(|| {
+            Error::decompression("CompactPro packed forks exceed the archive size")
+        })?;
+        self.output.charge(unpacked as usize, "CompactPro fork")?;
+        let input = match parts.as_slice() {
+            [one] => Cow::Borrowed(*one),
+            _ => {
+                let mut joined = Vec::new();
+                joined
+                    .try_reserve_exact(packed)
+                    .map_err(|_| Error::decompression("CompactPro cannot allocate packed fork"))?;
+                for part in parts {
+                    joined.extend_from_slice(part);
+                }
+                Cow::Owned(joined)
+            }
+        };
+        let output = if file.cpt_flag & flag != 0 {
+            decompress_rle_lzh(&input, unpacked as usize)?
+        } else {
+            decompress_rle(&input, unpacked as usize)
+        };
+        if output.len() != unpacked as usize {
+            return Err(Error::decompression("CompactPro fork is truncated"));
+        }
+        Ok(output)
     }
-    Err(outside())
+}
+
+fn file_path(parent: &str, name: &str, budget: &mut OutputBudget) -> Result<String> {
+    budget.charge(parent.len() + name.len(), "CompactPro paths")?;
+    Ok(format!("{parent}{name}"))
 }
 
 // `earlier` holds the segments before `data`, the one with the index, in
@@ -563,7 +618,12 @@ fn parse_and_extract(
         .collect();
     bodies.push(Some(compressed_data));
     let total = earlier.iter().flatten().map(Vec::len).sum::<usize>() + data.len();
-    let mut budget = OutputBudget::for_input(total, BUDGET_RATIO);
+    let packed_left = bodies.iter().flatten().map(|body| body.len()).sum();
+    let mut reader = ForkReader {
+        bodies,
+        packed_left,
+        output: OutputBudget::for_input(total, BUDGET_RATIO),
+    };
     let mut skipped = Skipped::default();
 
     // Index starts after the second header part
@@ -571,8 +631,9 @@ fn parse_and_extract(
 
     let mut entries = Vec::new();
     let mut index_pos = index_start;
-    let mut path_stack: Vec<String> = Vec::new();
-    let mut folder_remaining: Vec<u16> = Vec::new();
+    let mut parent_path = String::new();
+    let mut folders: Vec<(usize, u16)> = Vec::new();
+    let mut path_budget = OutputBudget::for_input(data.len().saturating_sub(index_start), 16);
 
     for _ in 0..header.entries {
         if index_pos + 1 > data.len() {
@@ -629,28 +690,28 @@ fn parse_and_extract(
         let file_hdr = parse_file_header(&hdr_data)?;
 
         // Update path stack for folders
-        while let Some(remaining) = folder_remaining.last_mut() {
-            if *remaining == 0 {
-                folder_remaining.pop();
-                path_stack.pop();
-            } else {
+        while let Some((start, remaining)) = folders.last_mut() {
+            if *remaining > 0 {
                 *remaining -= 1;
                 break;
             }
+            parent_path.truncate(*start);
+            folders.pop();
         }
 
+        let name = sanitize_path_component(&file_hdr.name);
         if file_hdr.is_folder {
-            path_stack.push(sanitize_path_component(&file_hdr.name));
-            folder_remaining.push(file_hdr.folder_size);
+            folders.push((parent_path.len(), file_hdr.folder_size));
+            parent_path.push_str(&name);
+            parent_path.push('/');
             continue;
         }
-
-        // Build full path (path_stack is already sanitized)
-        let sanitized_name = sanitize_path_component(&file_hdr.name);
-        let full_name = if path_stack.is_empty() {
-            sanitized_name
-        } else {
-            format!("{}/{}", path_stack.join("/"), sanitized_name)
+        let full_name = match file_path(&parent_path, &name, &mut path_budget) {
+            Ok(path) => path,
+            Err(err) => {
+                skipped.note(&name, err);
+                continue;
+            }
         };
 
         if (file_hdr.cpt_flag & FLAG_ENCRYPTED) != 0 {
@@ -658,56 +719,18 @@ fn parse_and_extract(
             continue;
         }
 
-        // filepos counts from the start of the segment the file begins in;
-        // the resource fork is stored first. An archive in one piece has
-        // only segment 1.
-        let volume = if count == 1 {
-            1
-        } else {
-            usize::from(file_hdr.volume)
-        };
-        let packed_len = (file_hdr.comp_rsrc_length as usize)
-            .checked_add(if file_hdr.data_length == 0 {
-                0
-            } else {
-                file_hdr.comp_data_length as usize
-            })
-            .ok_or_else(|| "fork lengths overflow".to_string());
-        let packed = match packed_len
-            .and_then(|len| packed_bytes(&bodies, volume, file_hdr.file_pos, len))
-        {
-            Ok(packed) => packed,
-            Err(err) => {
-                skipped.note(&full_name, err);
-                continue;
-            }
-        };
-        let compressed_data: &[u8] = &packed;
-        let rsrc_start = Some(0);
-        let data_start = Some(file_hdr.comp_rsrc_length as usize);
-        let rsrc = read_fork(
-            compressed_data,
-            rsrc_start,
-            file_hdr.comp_rsrc_length,
-            file_hdr.rsrc_length,
-            (file_hdr.cpt_flag & FLAG_RSRC_COMPRESSED) != 0,
-            &mut budget,
-        );
-        let data = read_fork(
-            compressed_data,
-            data_start,
-            file_hdr.comp_data_length,
-            file_hdr.data_length,
-            (file_hdr.cpt_flag & FLAG_DATA_COMPRESSED) != 0,
-            &mut budget,
-        );
+        let rsrc = reader.read(&file_hdr, true);
+        let data = reader.read(&file_hdr, false);
 
         // Without its data fork the file is left out, without its resource
         // fork only that fork is.
         let data_fork = match data {
             Ok(bytes) => bytes,
             Err(err) => {
-                skipped.note(&full_name, format_args!("data fork: {err}"));
+                match err {
+                    Error::InvalidFormat { message } => skipped.note(&full_name, message),
+                    _ => skipped.note(&full_name, format_args!("data fork: {err}")),
+                }
                 continue;
             }
         };
@@ -725,6 +748,10 @@ fn parse_and_extract(
             }
             Err(err) => {
                 skipped.note(&full_name, format_args!("resource fork: {err}"));
+                if data_fork.is_empty() {
+                    continue;
+                }
+                skipped.unverified += 1;
                 Vec::new()
             }
         };
@@ -1205,6 +1232,31 @@ mod tests {
         assert!(entries[0].resource_fork.is_empty());
         let skipped = skipped.unwrap();
         assert!(skipped.contains("resource fork: "), "{skipped}");
+        assert!(skipped.contains("combined CRC unverified"), "{skipped}");
+    }
+
+    #[test]
+    fn unreadable_resource_only_file_is_not_an_empty_file() {
+        let mut archive = FIXTURE.to_vec();
+        let fields = first_entry_fields(&archive);
+        for field in [F_DATALENGTH, F_COMPDLENGTH] {
+            let at = fields + field - F_VOLUME;
+            archive[at..at + 4].fill(0);
+        }
+        archive[CPTHDRSIZE] = 0xFF;
+        let (entries, skipped) = parse_and_extract(&archive, &[]).unwrap();
+        assert!(entries.is_empty());
+        assert!(skipped.unwrap().contains("resource fork:"));
+
+        for field in [F_RSRCLENGTH, F_COMPRLENGTH] {
+            let at = fields + field - F_VOLUME;
+            archive[at..at + 4].fill(0);
+        }
+        let (entries, skipped) = parse_and_extract(&archive, &[]).unwrap();
+        assert_eq!(entries.len(), 1);
+        assert!(entries[0].data_fork.is_empty());
+        assert!(entries[0].resource_fork.is_empty());
+        assert_eq!(skipped, None);
     }
 
     #[test]
@@ -1236,6 +1288,42 @@ mod tests {
         last.extend_from_slice(&FIXTURE[at..]);
         segments.push(last);
         segments
+    }
+
+    #[test]
+    fn enclosing_folders_count_toward_each_retained_path() {
+        let mut budget = OutputBudget::for_input(0, 16);
+        budget
+            .charge(budget.remaining() as usize - 8, "test")
+            .unwrap();
+        assert_eq!(file_path("dir/", "a", &mut budget).unwrap(), "dir/a");
+        assert!(file_path("dir/", "b", &mut budget).is_err());
+        assert_eq!(file_path("", "end", &mut budget).unwrap(), "end");
+    }
+
+    #[test]
+    fn empty_and_repeated_cross_segment_forks_respect_packed_allowance() {
+        let mut hdr = [0; FILEHDRSIZE];
+        hdr[F_VOLUME] = 1;
+        hdr[F_FILEPOS..F_FILEPOS + 4].copy_from_slice(&8u32.to_be_bytes());
+        hdr[F_COMPRLENGTH..F_COMPRLENGTH + 4].copy_from_slice(&2u32.to_be_bytes());
+        let mut file = parse_file_header(&hdr).unwrap();
+        let mut reader = ForkReader {
+            bodies: vec![Some(b"a"), Some(b"b")],
+            packed_left: 2,
+            output: OutputBudget::for_input(2, BUDGET_RATIO),
+        };
+        assert!(reader.read(&file, true).unwrap().is_empty());
+        assert_eq!(reader.packed_left, 2);
+        file.rsrc_length = 2;
+        assert_eq!(reader.read(&file, true).unwrap(), b"ab");
+        assert!(
+            reader
+                .read(&file, true)
+                .unwrap_err()
+                .to_string()
+                .contains("packed forks")
+        );
     }
 
     #[test]

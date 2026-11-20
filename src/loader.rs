@@ -638,15 +638,39 @@ impl Loader {
                         )?),
                     ))
                 } else {
+                    #[cfg(feature = "dos")]
+                    if path
+                        .extension()
+                        .is_some_and(|ext| ext.eq_ignore_ascii_case("cue"))
+                    {
+                        let directory = path
+                            .parent()
+                            .filter(|p| !p.as_os_str().is_empty())
+                            .unwrap_or_else(|| Path::new("."));
+                        let root = crate::fs_access::ConfinedDir::open(directory)?;
+                        if let Some(name) = path.file_name() {
+                            if let Ok(sheet) = root.read(Path::new(name), 1024 * 1024) {
+                                if is_cue_sheet(&sheet) {
+                                    let opened = CueBinContainer::from_bytes_with_limited_siblings(
+                                        &sheet,
+                                        path.display().to_string(),
+                                        self.max_depth,
+                                        &|name, limit| root.read(Path::new(name), limit).ok(),
+                                    )?;
+                                    return Ok((Some(Source::Loaded(sheet)), Box::new(opened)));
+                                }
+                            }
+                        }
+                    }
                     // File source - use Source for mmap/load
                     let source = Source::open(path, self.mmap_strategy)?;
                     let path_str = path.display().to_string();
+                    let format = detect_format(&path_str, Some(source.as_slice()));
 
                     // For HFS files, we need to provide access to the native resource fork
                     // for NDIF decompression support (bcem resource in resource fork)
                     #[cfg(all(feature = "macintosh", feature = "std"))]
                     {
-                        let format = detect_format(&path_str, Some(source.as_slice()));
                         if matches!(format, Some(ContainerFormat::Hfs)) {
                             if let Some(opened) = open_xa_framed(
                                 source.as_slice(),
@@ -682,8 +706,7 @@ impl Loader {
                     // the last one.
                     #[cfg(all(feature = "macintosh", feature = "std"))]
                     if compactpro::last_segment_number(source.as_slice()).is_some()
-                        && detect_format(&path_str, Some(source.as_slice()))
-                            == Some(ContainerFormat::CompactPro)
+                        && format == Some(ContainerFormat::CompactPro)
                     {
                         let name = path.file_name().and_then(|name| name.to_str());
                         let container = Box::new(CompactProContainer::from_bytes_with_segments(
@@ -717,22 +740,6 @@ impl Loader {
                         }
                     }
 
-                    // The track files of a cue sheet sit next to it.
-                    #[cfg(feature = "dos")]
-                    if path
-                        .extension()
-                        .is_some_and(|ext| ext.eq_ignore_ascii_case("cue"))
-                        && is_cue_sheet(source.as_slice())
-                    {
-                        let container = Box::new(CueBinContainer::from_bytes_with_siblings(
-                            source.as_slice(),
-                            path_str.clone(),
-                            self.max_depth,
-                            &|name| read_cue_track_file(path, name),
-                        )?);
-                        return Ok((Some(source), container));
-                    }
-
                     #[cfg(feature = "dos")]
                     if rar::volume_after(&path_str, 1).is_some()
                         && is_rar_archive(source.as_slice())
@@ -757,10 +764,7 @@ impl Loader {
                         &path_str,
                         self.max_depth,
                         options,
-                        // When macintosh feature is enabled, format was already detected above
-                        // but that variable is scoped to the cfg block; re-detection is acceptable
-                        // at the top level since it only happens once per file open.
-                        None,
+                        format,
                     )?;
                     Ok((Some(source), container))
                 }
@@ -864,7 +868,12 @@ impl Loader {
                     }
 
                     report.record_visited_entry(false);
-                    match visitor(e) {
+                    let mut entry = Entry::new(e.path, e.container_path, e.data);
+                    entry.metadata = e.metadata;
+                    entry.container_format = e.container_format;
+                    entry.root_resource_fork =
+                        e.path.strip_suffix(RESOURCE_FORK_SUFFIX) == Some(root_path.as_str());
+                    match visitor(&entry) {
                         Ok(action) => Ok(action == VisitAction::Continue),
                         Err(err) => {
                             visitor_error = Some(err);
@@ -929,6 +938,43 @@ fn is_audio_track(container: &dyn Container, prefix: &str, path: &str) -> bool {
     )
 }
 
+#[cfg(feature = "dos")]
+struct DeferredVolume {
+    path: String,
+    container_path: String,
+    relative: String,
+    metadata: Option<crate::Metadata>,
+    position: usize,
+}
+
+#[cfg(feature = "dos")]
+struct MultipartContainer {
+    inner: Box<dyn Container>,
+    consumed: Vec<String>,
+}
+
+#[cfg(feature = "dos")]
+impl Container for MultipartContainer {
+    fn visit(&self, visitor: &mut dyn FnMut(&Entry<'_>) -> Result<bool>) -> Result<()> {
+        self.inner.visit(visitor)
+    }
+    fn prefix(&self) -> &str {
+        self.inner.prefix()
+    }
+    fn info(&self) -> ContainerInfo {
+        self.inner.info()
+    }
+    fn skipped_entries(&self) -> Option<String> {
+        self.inner.skipped_entries()
+    }
+    fn consumed_siblings(&self) -> &[String] {
+        &self.consumed
+    }
+    fn get_file(&self, path: &str) -> Option<&[u8]> {
+        self.inner.get_file(path)
+    }
+}
+
 /// Recursively visit a container and its nested containers.
 ///
 /// This is the core recursion logic - containers just yield entries,
@@ -957,6 +1003,11 @@ where
 
     #[cfg(feature = "dos")]
     let cue_sheets = core::cell::RefCell::new(cue::SheetIndex::default());
+    #[cfg(feature = "dos")]
+    let consumed_volumes =
+        core::cell::RefCell::new(crate::compat::FastMap::<String, ()>::default());
+    #[cfg(feature = "dos")]
+    let deferred_volumes = core::cell::RefCell::new(Vec::<DeferredVolume>::new());
     // `late` for an entry held back until the container had been visited.
     let mut visit_entry = |entry: &Entry<'_>, late: bool| -> Result<bool> {
         if let Some(budget) = nesting.as_deref_mut().filter(|_| !late) {
@@ -970,34 +1021,46 @@ where
             }
         }
 
-        // A later volume of an ARJ or RAR set is read through the volume
-        // before it, so listing it again would duplicate its files.
         #[cfg(feature = "dos")]
         if depth > 1 {
             if let Some(rel) = extract_relative_path(entry.path, &prefix) {
-                let earlier = arj::volume_number(&rel)
-                    .filter(|&number| number > 0 && is_arj_archive(entry.data))
-                    .and_then(|number| arj::volume_name(&rel, number - 1));
-                let earlier = earlier.or_else(|| {
-                    // A reader that starts at an earlier volume passes over
-                    // a few missing ones.
-                    is_rar_archive(entry.data)
-                        .then(|| {
-                            rar::volumes_before(&rel)
-                                .find(|name| container.has_file(name))
-                                .or_else(|| {
-                                    rar::sfx_first_volumes(&rel).into_iter().find(|name| {
-                                        container.has_file(name)
-                                            && container
-                                                .read_file(name)
-                                                .is_some_and(|data| is_rar_archive(&data))
-                                    })
-                                })
-                        })
-                        .flatten()
-                });
-                if earlier.is_some_and(|earlier| container.has_file(&earlier)) {
+                if container.replay_matches(&rel, entry.data)
+                    && consumed_volumes
+                        .borrow()
+                        .contains_key(&container.sibling_key(&rel))
+                {
                     return Ok(true);
+                }
+                if !late {
+                    let position = if is_arj_archive(entry.data) {
+                        arj::volume_number(&rel)
+                            .filter(|&number| number > 0)
+                            .filter(|&number| {
+                                arj::volume_name(&rel, number - 1)
+                                    .is_some_and(|name| container.has_file(&name))
+                            })
+                    } else if is_rar_archive(entry.data) {
+                        rar::volume_position(&rel).filter(|_| {
+                            rar::volumes_before(&rel).any(|name| container.has_file(&name))
+                                || rar::sfx_first_volumes(&rel)
+                                    .iter()
+                                    .any(|name| container.has_file(name))
+                        })
+                    } else {
+                        None
+                    };
+                    if let Some(position) =
+                        position.filter(|_| container.replay_matches(&rel, entry.data))
+                    {
+                        deferred_volumes.borrow_mut().push(DeferredVolume {
+                            path: entry.path.to_string(),
+                            container_path: entry.container_path.to_string(),
+                            relative: rel.into_owned(),
+                            metadata: entry.metadata.cloned(),
+                            position,
+                        });
+                        return Ok(true);
+                    }
                 }
                 // Likewise a track file that a cue sheet beside it reads; it
                 // is held back while that sheet is still to be visited.
@@ -1165,11 +1228,22 @@ where
             #[cfg(not(feature = "macintosh"))]
             let metadata_ref = entry.metadata;
 
-            let entry_with_format = if let Some(metadata) = metadata_ref {
+            #[allow(unused_mut)]
+            let mut entry_with_format = if let Some(metadata) = metadata_ref {
                 entry_with_format.with_metadata(metadata)
             } else {
                 entry_with_format
             };
+
+            #[cfg(feature = "macintosh")]
+            {
+                entry_with_format.root_resource_fork = is_root_container
+                    && matches!(
+                        container.info().format,
+                        ContainerFormat::ResourceFork | ContainerFormat::AppleDouble
+                    )
+                    && entry.path.strip_suffix(RESOURCE_FORK_SUFFIX) == Some(prefix.as_str());
+            }
 
             match visitor(&entry_with_format) {
                 Ok(action) => action == VisitAction::Continue,
@@ -1202,38 +1276,74 @@ where
                 // `-Dwarnings` doesn't trip on `unused_variables`.
                 #[cfg(feature = "macintosh")]
                 let ad_rsrc_ref = ad_resource_fork.as_deref();
-                open_container_internal_with_siblings(
-                    entry.data,
-                    entry.path,
-                    entry.path,
-                    depth - 1,
-                    options,
-                    |sibling_path| {
-                        // If caller asks for this entry's `..namedfork/rsrc`
-                        // and we have an AD sidecar resource fork in hand,
-                        // serve that. Otherwise fall through to the container.
-                        #[cfg(feature = "macintosh")]
-                        {
-                            let expected = format!("{}/..namedfork/rsrc", entry.path);
-                            if let Some(rsrc) = ad_rsrc_ref {
-                                if sibling_path == expected {
-                                    return Some(rsrc.to_vec());
+                #[cfg(feature = "dos")]
+                let cue = if matches!(detected_format, Some(ContainerFormat::CueBin)) {
+                    extract_relative_path(entry.path, &prefix).map(|relative| {
+                        CueBinContainer::from_bytes_with_limited_siblings(
+                            entry.data,
+                            entry.path.to_string(),
+                            depth - 1,
+                            &|name, limit| {
+                                #[cfg(feature = "std")]
+                                if let Some(root) = entry.cue_directory {
+                                    return root.read(Path::new(name), limit).ok();
+                                }
+                                container
+                                    .read_cue_file(&relative, name, limit)
+                                    .map(Cow::into_owned)
+                            },
+                        )
+                        .map(|cue| Box::new(cue) as Box<dyn Container>)
+                    })
+                } else {
+                    None
+                };
+                #[cfg(not(feature = "dos"))]
+                let cue: Option<Result<Box<dyn Container>>> = None;
+                cue.unwrap_or_else(|| {
+                    open_container_internal_with_siblings(
+                        entry.data,
+                        entry.path,
+                        entry.path,
+                        depth - 1,
+                        options,
+                        |sibling_path| {
+                            // If caller asks for this entry's `..namedfork/rsrc`
+                            // and we have an AD sidecar resource fork in hand,
+                            // serve that. Otherwise fall through to the container.
+                            #[cfg(feature = "macintosh")]
+                            {
+                                let expected = format!("{}/..namedfork/rsrc", entry.path);
+                                if let Some(rsrc) = ad_rsrc_ref {
+                                    if sibling_path == expected {
+                                        return Some(rsrc.to_vec());
+                                    }
                                 }
                             }
-                        }
-                        if let Some(data) = container.get_file(sibling_path) {
-                            return Some(data.to_vec());
-                        }
-                        // Siblings named by full path, such as ARJ volumes.
-                        #[cfg(any(feature = "macintosh", feature = "dos"))]
-                        if let Some(rel) = extract_relative_path(sibling_path, &prefix) {
-                            return container.read_file(&rel).map(Cow::into_owned);
-                        }
-                        None
-                    },
-                    detected_format,
-                )
+                            if let Some(data) = container.get_file(sibling_path) {
+                                return Some(data.to_vec());
+                            }
+                            // Siblings named by full path, such as ARJ volumes.
+                            #[cfg(any(feature = "macintosh", feature = "dos"))]
+                            if let Some(rel) = extract_relative_path(sibling_path, &prefix) {
+                                return container.read_file(&rel).map(Cow::into_owned);
+                            }
+                            None
+                        },
+                        detected_format,
+                    )
+                })
             };
+            #[cfg(feature = "dos")]
+            if let Ok(opened) = &open_result {
+                for name in opened.consumed_siblings() {
+                    if let Some(relative) = extract_relative_path(name, &prefix) {
+                        consumed_volumes
+                            .borrow_mut()
+                            .insert(container.sibling_key(&relative), ());
+                    }
+                }
+            }
             #[cfg(feature = "dos")]
             if open_result.is_ok() && matches!(detected_format, Some(ContainerFormat::CueBin)) {
                 if let Some(rel) = extract_relative_path(entry.path, &prefix) {
@@ -1334,6 +1444,28 @@ where
             visitor_failed |= result.is_err();
             result
         });
+        let mut deferred = core::mem::take(&mut *deferred_volumes.borrow_mut());
+        deferred.sort_by(|a, b| {
+            a.position
+                .cmp(&b.position)
+                .then_with(|| a.path.cmp(&b.path))
+        });
+        for held in deferred {
+            if visitor_failed {
+                break;
+            }
+            if consumed_volumes
+                .borrow()
+                .contains_key(&container.sibling_key(&held.relative))
+            {
+                continue;
+            }
+            if let Some(data) = container.read_file(&held.relative) {
+                let mut entry = Entry::new(&held.path, &held.container_path, &data);
+                entry.metadata = held.metadata.as_ref();
+                visitor_failed = visit_entry(&entry, true).is_err();
+            }
+        }
         // Track files whose cue sheet was not opened after all.
         let unlisted = cue_sheets.borrow_mut().take_unlisted();
         for held in unlisted {
@@ -1448,28 +1580,6 @@ where
 #[cfg(feature = "macintosh")]
 fn has_native_resource_fork(container: &dyn Container, entry_path: &str, prefix: &str) -> bool {
     extract_relative_path(entry_path, prefix).is_some_and(|rel| container.has_resource_fork(&rel))
-}
-
-// A track file for the cue sheet at `sheet`, by a name relative to the
-// sheet's directory. Links are resolved, and a name that leads out of that
-// directory is not read.
-#[cfg(all(feature = "std", feature = "dos"))]
-fn read_cue_track_file(sheet: &Path, name: &str) -> Option<Vec<u8>> {
-    let name = Path::new(name);
-    if !name
-        .components()
-        .all(|component| matches!(component, std::path::Component::Normal(_)))
-    {
-        return None;
-    }
-    let directory = sheet
-        .parent()
-        .filter(|parent| !parent.as_os_str().is_empty())
-        .unwrap_or_else(|| Path::new("."))
-        .canonicalize()
-        .ok()?;
-    let file = directory.join(name).canonicalize().ok()?;
-    (file.starts_with(&directory) && file.is_file()).then(|| fs::read(file).ok())?
 }
 
 // The cue sheets in the directory of the file at `entry_path`, which is at
@@ -1916,31 +2026,45 @@ where
         }
     }
 
-    // Later volumes of an ARJ set are siblings named after this one.
     #[cfg(feature = "dos")]
     if let Some(number) = arj::volume_number(path) {
         let format = pre_detected_format.or_else(|| detect_format(path, Some(data)));
         if matches!(format, Some(ContainerFormat::Arj)) {
-            return Ok(Box::new(ArjContainer::from_bytes_with_volumes(
+            let opened = ArjContainer::from_bytes_with_volumes(
                 data,
                 prefix.to_string(),
                 depth,
                 number,
                 &|number| arj::volume_name(path, number).and_then(|name| get_sibling(&name)),
-            )?));
+            )?;
+            let consumed = opened
+                .consumed_volumes()
+                .iter()
+                .filter_map(|&number| arj::volume_name(path, number))
+                .collect();
+            return Ok(Box::new(MultipartContainer {
+                inner: Box::new(opened),
+                consumed,
+            }));
         }
     }
-
     #[cfg(feature = "dos")]
     if rar::volume_after(path, 1).is_some() {
         let format = pre_detected_format.or_else(|| detect_format(path, Some(data)));
         if matches!(format, Some(ContainerFormat::Rar)) {
-            return Ok(Box::new(RarContainer::from_bytes_with_volumes(
-                data,
-                prefix.to_string(),
-                depth,
-                &|steps| rar::volume_after(path, steps).and_then(|name| get_sibling(&name)),
-            )?));
+            let opened =
+                RarContainer::from_bytes_with_volumes(data, prefix.to_string(), depth, &|steps| {
+                    rar::volume_after(path, steps).and_then(|name| get_sibling(&name))
+                })?;
+            let consumed = opened
+                .consumed_volumes()
+                .iter()
+                .filter_map(|&steps| rar::volume_after(path, steps))
+                .collect();
+            return Ok(Box::new(MultipartContainer {
+                inner: Box::new(opened),
+                consumed,
+            }));
         }
     }
 
@@ -2016,19 +2140,19 @@ fn disc_head_has_volume(head: &[u8], total_len: usize) -> bool {
 // An image of CD-ROM XA sectors without sync and header (2056 or 2336 bytes
 // each): the volume its user data holds, and that user data. Such a file has
 // no signature of its own, so it is accepted only when no volume is found in
-// the bytes as they are and one is found in the cooked view. The whole image
-// is copied only once its leading sectors have shown a volume.
+// the bytes as they are and one is found through a cooked sector view.
+// Only opening materializes the whole image.
 #[cfg(any(feature = "macintosh", feature = "dos"))]
-fn xa_framed_volume(data: &[u8]) -> Option<(ContainerFormat, Vec<u8>)> {
+fn xa_framed_layout(data: &[u8]) -> Option<(ContainerFormat, usize)> {
     use crate::formats::cd_sector::{
-        CD_USER_DATA_SIZE, XA_HEAD_SECTORS, XA_SECTOR_SIZES, cook_xa, has_xa_subheaders,
+        CD_USER_DATA_SIZE, RawCd, XA_HEAD_SECTORS, XA_SECTOR_SIZES, cook_xa,
     };
 
     let mut plain = None;
     for sector_size in XA_SECTOR_SIZES {
-        if !has_xa_subheaders(data, sector_size) {
+        let Some(cd) = RawCd::xa(data, sector_size) else {
             continue;
-        }
+        };
         if *plain.get_or_insert_with(|| disc_volume_format(data).is_some()) {
             return None;
         }
@@ -2040,14 +2164,40 @@ fn xa_framed_volume(data: &[u8]) -> Option<(ContainerFormat, Vec<u8>)> {
                 continue;
             }
         }
-        let Some(cooked) = cook_xa(data, sector_size) else {
-            continue;
-        };
-        if let Some(format) = disc_volume_format(&cooked) {
-            return Some((format, cooked));
+        #[cfg(feature = "macintosh")]
+        {
+            if crate::formats::macintosh::apm::cd_has_partition_map(cd) {
+                return Some((ContainerFormat::Apm, sector_size));
+            }
+            if crate::formats::macintosh::hfs::cd_has_volume(cd) {
+                return Some((ContainerFormat::Hfs, sector_size));
+            }
+        }
+        #[cfg(feature = "dos")]
+        {
+            let iso = crate::formats::dos::iso9660::probe_cd(cd);
+            let udf = crate::formats::dos::udf::probe_cd(cd);
+            if let Some(readable) = iso {
+                let format = if udf == Some(true) || (!readable && udf.is_some()) {
+                    ContainerFormat::Udf
+                } else {
+                    ContainerFormat::Iso9660
+                };
+                return Some((format, sector_size));
+            }
+            if udf.is_some() {
+                return Some((ContainerFormat::Udf, sector_size));
+            }
         }
     }
     None
+}
+
+#[cfg(all(test, feature = "std", feature = "dos", feature = "common"))]
+fn xa_framed_volume(data: &[u8]) -> Option<(ContainerFormat, Vec<u8>)> {
+    let (format, sector_size) = xa_framed_layout(data)?;
+    let cooked = crate::formats::cd_sector::cook_xa(data, sector_size)?;
+    Some((format, cooked))
 }
 
 // The container of a volume stored in XA sectors, when `format` names it.
@@ -2060,10 +2210,30 @@ fn open_xa_framed(
     options: LoaderOptions,
     format: Option<ContainerFormat>,
 ) -> Option<Result<Box<dyn Container>>> {
-    format?;
-    let (cooked_format, cooked) = xa_framed_volume(data)?;
-    (format == Some(cooked_format))
-        .then(|| open_container_internal(&cooked, path, prefix, depth, options, format))
+    let format = format?;
+    let optical = match format {
+        #[cfg(feature = "macintosh")]
+        ContainerFormat::Hfs | ContainerFormat::Apm => true,
+        #[cfg(feature = "dos")]
+        ContainerFormat::Iso9660 | ContainerFormat::Udf => true,
+        _ => false,
+    };
+    if !optical {
+        return None;
+    }
+    let (cooked_format, sector_size) = xa_framed_layout(data)?;
+    if cooked_format != format {
+        return None;
+    }
+    let cooked = crate::formats::cd_sector::cook_xa(data, sector_size)?;
+    Some(open_container_internal(
+        &cooked,
+        path,
+        prefix,
+        depth,
+        options,
+        Some(format),
+    ))
 }
 
 // A Macintosh disk image: its volume, or its partitions when a UDIF, DiskCopy
@@ -2440,7 +2610,7 @@ pub fn detect_format(path: &str, data: Option<&[u8]>) -> Option<ContainerFormat>
 
     // Last: only when nothing claims the bytes as they are.
     #[cfg(any(feature = "macintosh", feature = "dos"))]
-    if let Some((format, _)) = xa_framed_volume(data) {
+    if let Some((format, _)) = xa_framed_layout(data) {
         return Some(format);
     }
 
@@ -2485,6 +2655,127 @@ fn path_matches_prefix(entry_path: &str, filter: &str) -> bool {
 mod tests {
     use super::*;
 
+    #[cfg(all(feature = "std", feature = "dos"))]
+    #[test]
+    fn consumed_volumes_are_not_acquired_again_during_replay() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        struct Files {
+            members: Vec<(String, Vec<u8>)>,
+            reads: AtomicUsize,
+        }
+        impl Container for Files {
+            fn prefix(&self) -> &str {
+                "set"
+            }
+            fn info(&self) -> ContainerInfo {
+                ContainerInfo {
+                    path: "set".into(),
+                    format: ContainerFormat::Directory,
+                    entry_count: Some(self.members.len()),
+                }
+            }
+            fn get_file(&self, path: &str) -> Option<&[u8]> {
+                let path = path.strip_prefix("set/").unwrap_or(path);
+                self.members
+                    .iter()
+                    .find(|(name, _)| name == path)
+                    .map(|(_, data)| data.as_slice())
+            }
+            fn sibling_key(&self, path: &str) -> String {
+                path.to_string()
+            }
+            fn read_file(&self, path: &str) -> Option<Cow<'_, [u8]>> {
+                let data = self.get_file(path)?;
+                self.reads.fetch_add(1, Ordering::Relaxed);
+                Some(Cow::Borrowed(data))
+            }
+            fn visit(&self, visitor: &mut dyn FnMut(&Entry<'_>) -> Result<bool>) -> Result<()> {
+                for (name, bytes) in &self.members {
+                    visitor(&Entry::new(&format!("set/{name}"), "set", bytes))?;
+                }
+                Ok(())
+            }
+        }
+        let mut names = vec!["vol.a01", "vol.a02", "vol.a03", "vol.a04", "vol.arj"];
+        let members = names
+            .drain(..)
+            .map(|name| {
+                (
+                    name.into(),
+                    fs::read(
+                        Path::new(env!("CARGO_MANIFEST_DIR"))
+                            .join("testdata/arj")
+                            .join(name),
+                    )
+                    .unwrap(),
+                )
+            })
+            .collect();
+        let files = Files {
+            members,
+            reads: AtomicUsize::new(0),
+        };
+        let mut report = VisitReport::new("set".into());
+        let mut yielded = 0;
+        visit_container_recursive(
+            &files,
+            &PathFilter::None,
+            8,
+            LoaderOptions::default(),
+            EntryType::Leaves,
+            &mut |_| {
+                yielded += 1;
+                Ok(VisitAction::Continue)
+            },
+            &mut report,
+            Some(&mut NestingBudget::for_input(100000)),
+            true,
+        )
+        .unwrap();
+        assert_eq!(yielded, 5);
+        assert!(report.diagnostics.is_empty(), "{:?}", report.diagnostics);
+        assert_eq!(files.reads.load(Ordering::Relaxed), 0);
+
+        let fixture = |name| {
+            fs::read(
+                Path::new(env!("CARGO_MANIFEST_DIR"))
+                    .join("testdata/arj")
+                    .join(name),
+            )
+            .unwrap()
+        };
+        let members = vec![
+            ("SET.a01".into(), fixture("vol.a01")),
+            ("SET.a02".into(), fixture("vol.a02")),
+            ("SET.a03".into(), fixture("vol.a03")),
+            ("SET.a04".into(), fixture("vol.a04")),
+            ("SET.arj".into(), fixture("vol.arj")),
+            ("set.a01".into(), fixture("m0.arj")),
+        ];
+        let files = Files {
+            members,
+            reads: AtomicUsize::new(0),
+        };
+        let mut report = VisitReport::new("set".into());
+        let mut standalone_seen = false;
+        visit_container_recursive(
+            &files,
+            &PathFilter::None,
+            8,
+            LoaderOptions::default(),
+            EntryType::Leaves,
+            &mut |entry| {
+                standalone_seen |= entry.path == "set/set.a01/text.txt";
+                Ok(VisitAction::Continue)
+            },
+            &mut report,
+            Some(&mut NestingBudget::for_input(100000)),
+            true,
+        )
+        .unwrap();
+        assert!(standalone_seen, "{:?}", report.diagnostics);
+    }
+
     #[cfg(all(feature = "std", feature = "dos", feature = "common"))]
     fn toast_fixture(name: &str) -> Vec<u8> {
         use std::io::Read;
@@ -2522,6 +2813,40 @@ mod tests {
         let raw = toast_fixture("iso-joliet.m2.toast.gz");
         assert_eq!(disc_volume_format(&raw), Some(ContainerFormat::Iso9660));
         assert!(xa_framed_volume(&raw).is_none());
+    }
+
+    #[cfg(all(feature = "std", feature = "dos", feature = "common"))]
+    #[test]
+    fn mismatched_xa_format_does_not_materialize_the_disc() {
+        use crate::formats::cd_sector::XA_COOKS;
+        let image = toast_fixture("iso-joliet.xa2056.toast.gz");
+        XA_COOKS.with(|calls| calls.set(0));
+        for format in [None, Some(ContainerFormat::Zip), Some(ContainerFormat::Udf)] {
+            assert!(
+                open_xa_framed(
+                    &image,
+                    "disc.bin",
+                    "disc.bin",
+                    0,
+                    LoaderOptions::default(),
+                    format
+                )
+                .is_none()
+            );
+        }
+        XA_COOKS.with(|calls| assert_eq!(calls.get(), 0));
+        assert!(matches!(
+            open_xa_framed(
+                &image,
+                "disc.bin",
+                "disc.bin",
+                8,
+                LoaderOptions::default(),
+                Some(ContainerFormat::Iso9660)
+            ),
+            Some(Ok(_))
+        ));
+        XA_COOKS.with(|calls| assert_eq!(calls.get(), 1));
     }
 
     #[cfg(all(
