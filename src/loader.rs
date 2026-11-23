@@ -310,7 +310,7 @@ pub struct ParsedPath {
 pub fn parse_virtual_path(path: &str) -> ParsedPath {
     let path_obj = Path::new(path);
     for archive in path_obj.ancestors() {
-        if archive.is_file() {
+        if fs::metadata(archive).is_ok_and(|metadata| metadata.is_file()) {
             let remaining = path_obj.strip_prefix(archive).expect("ancestor of path");
             let internal: Vec<_> = remaining
                 .iter()
