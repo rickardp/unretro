@@ -309,51 +309,17 @@ pub struct ParsedPath {
 #[cfg(feature = "std")]
 pub fn parse_virtual_path(path: &str) -> ParsedPath {
     let path_obj = Path::new(path);
-
-    // Try increasingly longer prefixes until we find one that's a file
-    let components: Vec<&std::ffi::OsStr> = path_obj
-        .components()
-        .filter_map(|c| match c {
-            std::path::Component::Normal(s) => Some(s),
-            std::path::Component::RootDir
-            | std::path::Component::CurDir
-            | std::path::Component::ParentDir
-            | std::path::Component::Prefix(_) => None,
-        })
-        .collect();
-
-    // Handle absolute paths - keep track of whether path started with /
-    let is_absolute = path.starts_with('/');
-
-    // Try each prefix to find where the archive file is
-    for i in 1..=components.len() {
-        let prefix_parts: Vec<&str> = components[..i].iter().filter_map(|s| s.to_str()).collect();
-
-        let prefix_path = if is_absolute {
-            format!("/{}", prefix_parts.join("/"))
-        } else {
-            prefix_parts.join("/")
-        };
-
-        // Check if this prefix is a file (not a directory)
-        if let Ok(meta) = fs::metadata(&prefix_path) {
-            if meta.is_file() {
-                // Found the archive file
-                if i < components.len() {
-                    // There's more path after the archive
-                    let internal_parts: Vec<&str> =
-                        components[i..].iter().filter_map(|s| s.to_str()).collect();
-                    return ParsedPath {
-                        archive_path: prefix_path,
-                        internal_path: Some(internal_parts.join("/")),
-                    };
-                }
-                // The whole path is the archive
-                return ParsedPath {
-                    archive_path: prefix_path,
-                    internal_path: None,
-                };
-            }
+    for archive in path_obj.ancestors() {
+        if archive.is_file() {
+            let remaining = path_obj.strip_prefix(archive).expect("ancestor of path");
+            let internal: Vec<_> = remaining
+                .iter()
+                .filter_map(|component| component.to_str())
+                .collect();
+            return ParsedPath {
+                archive_path: archive.to_string_lossy().into_owned(),
+                internal_path: (!internal.is_empty()).then(|| internal.join("/")),
+            };
         }
     }
 

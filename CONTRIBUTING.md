@@ -78,6 +78,9 @@ and the external corpus run separately from checked-in fixture results.
 
 ### Python binding checks
 
+The Linux Python 3.9 CI job uses Ubuntu 24.04 because the Ubuntu 26.04
+runner lacks a Python 3.9 build. Newer Python versions use the latest runner.
+
 ```bash
 cd crates/unretro-python
 maturin develop --release

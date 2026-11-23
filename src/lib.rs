@@ -22,7 +22,11 @@ mod metadata;
 
 // Memory mapping support
 mod source;
-#[cfg(all(test, feature = "std"))]
+#[cfg(all(
+    test,
+    feature = "std",
+    any(feature = "amiga", feature = "macintosh", feature = "dos")
+))]
 mod test_samples;
 
 /// Internal format implementations.
